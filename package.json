@@ -1,0 +1,24 @@
+{
+  "name": "assistant-studio",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Self-hosted platform to build dynamic agentic chat assistants (RAG + DB + tools + MCP).",
+  "workspaces": [
+    "apps/web",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w web",
+    "build": "npm run build -w web",
+    "lint": "npm run lint -w web",
+    "typecheck": "npm run typecheck -w web",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,css}\" --ignore-path .gitignore"
+  },
+  "devDependencies": {
+    "prettier": "^3.4.2",
+    "prettier-plugin-tailwindcss": "^0.6.9"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
