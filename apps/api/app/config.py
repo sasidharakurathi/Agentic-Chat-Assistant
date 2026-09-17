@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     api_port: int = 8000
     log_level: str = "INFO"
     log_format: Literal["console", "json"] = "console"
-    cors_origins: str = "http://localhost:3000"
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     # ── Auth / crypto ────────────────────────────────────────
     jwt_secret: str = "dev-insecure-change-me"
@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     # ── Agent runtime ────────────────────────────────────────
     agent_max_concurrency: int = 8
     approval_timeout_s: int = 300
+    # auto = real SDK when ANTHROPIC_API_KEY is set (and not APP_ENV=test), else fake
+    agent_driver: Literal["auto", "claude", "fake"] = "auto"
 
     # ── Observability ────────────────────────────────────────
     otel_exporter_otlp_endpoint: str = ""

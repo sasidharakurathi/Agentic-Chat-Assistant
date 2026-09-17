@@ -53,3 +53,12 @@ async def registered(client: AsyncClient) -> dict[str, str]:
 @pytest.fixture
 def auth_headers(registered: dict[str, str]) -> dict[str, str]:
     return {"Authorization": f"Bearer {registered['access_token']}"}
+
+
+@pytest.fixture
+async def org_headers(client: AsyncClient, registered: dict[str, str]) -> dict[str, str]:
+    """Auth headers + the X-Org-Id of the user's personal org."""
+    h = {"Authorization": f"Bearer {registered['access_token']}"}
+    me = await client.get("/api/v1/auth/me", headers=h)
+    org_id = me.json()["memberships"][0]["org_id"]
+    return {**h, "X-Org-Id": org_id}

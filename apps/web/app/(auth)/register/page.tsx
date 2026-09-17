@@ -1,17 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ApiError, auth, tokenStore } from "@/lib/api";
+import { ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 export default function RegisterPage() {
-  const router = useRouter();
+  const { register } = useAuth();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -23,12 +23,9 @@ export default function RegisterPage() {
     setError(null);
     setPending(true);
     try {
-      const tokens = await auth.register(email, password, name);
-      tokenStore.set(tokens);
-      router.push("/dashboard");
+      await register(email, password, name);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong");
-    } finally {
       setPending(false);
     }
   }

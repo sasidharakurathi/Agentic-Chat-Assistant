@@ -1,17 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ApiError, auth, tokenStore } from "@/lib/api";
+import { ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 export default function LoginPage() {
-  const router = useRouter();
+  const { login } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -22,12 +22,9 @@ export default function LoginPage() {
     setError(null);
     setPending(true);
     try {
-      const tokens = await auth.login(email, password);
-      tokenStore.set(tokens);
-      router.push("/dashboard");
+      await login(email, password);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong");
-    } finally {
       setPending(false);
     }
   }

@@ -3,30 +3,58 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  --background: oklch(0.99 0 0);
-  --foreground: oklch(0.15 0.01 260);
-  --muted: oklch(0.96 0.005 260);
-  --muted-foreground: oklch(0.5 0.01 260);
-  --border: oklch(0.9 0.005 260);
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.2 0.004 0);
+  --muted: oklch(0.96 0.003 0);
+  --muted-foreground: oklch(0.47 0.006 0);
+  --border: oklch(0.9 0.004 0);
   --card: oklch(1 0 0);
-  --primary: oklch(0.55 0.18 265);
+  --primary: oklch(0.63 0.19 29);
   --primary-foreground: oklch(0.99 0 0);
-  --destructive: oklch(0.58 0.19 27);
-  --ring: oklch(0.55 0.18 265);
-  --radius: 0.625rem;
+  --destructive: oklch(0.55 0.2 15);
+  --success: oklch(0.55 0.13 155);
+  --warning: oklch(0.65 0.15 75);
+  --ring: oklch(0.63 0.19 29);
+  --radius: 0.75rem;
+  --shadow-color: oklch(0.2 0.01 0 / 0.08);
+
+  /* Categorical accent scale for canvas node types — one family, 8 hues
+     evenly rotated 45° apart from the primary (tomato, 29°) around the
+     wheel, all held at matched lightness/chroma so they read as a
+     deliberate set rather than assorted named colors. */
+  --node-agent: var(--primary);
+  --node-guardrail: oklch(0.72 0.15 80);
+  --node-kb: oklch(0.65 0.14 140);
+  --node-tool: oklch(0.65 0.12 190);
+  --node-database: oklch(0.6 0.14 240);
+  --node-memory: oklch(0.6 0.15 275);
+  --node-subagent: oklch(0.6 0.16 305);
+  --node-mcp: oklch(0.62 0.17 345);
 }
 
 .dark {
-  --background: oklch(0.16 0.01 260);
-  --foreground: oklch(0.96 0.005 260);
-  --muted: oklch(0.24 0.01 260);
-  --muted-foreground: oklch(0.68 0.01 260);
-  --border: oklch(0.3 0.01 260);
-  --card: oklch(0.2 0.01 260);
-  --primary: oklch(0.7 0.15 265);
-  --primary-foreground: oklch(0.16 0.01 260);
-  --destructive: oklch(0.62 0.19 27);
-  --ring: oklch(0.7 0.15 265);
+  --background: oklch(0.17 0.004 0);
+  --foreground: oklch(0.96 0.002 0);
+  --muted: oklch(0.25 0.004 0);
+  --muted-foreground: oklch(0.66 0.004 0);
+  --border: oklch(0.31 0.004 0);
+  --card: oklch(0.21 0.004 0);
+  --primary: oklch(0.68 0.19 29);
+  --primary-foreground: oklch(0.99 0 0);
+  --destructive: oklch(0.6 0.2 15);
+  --success: oklch(0.62 0.14 155);
+  --warning: oklch(0.72 0.15 75);
+  --ring: oklch(0.68 0.19 29);
+  --shadow-color: oklch(0 0 0 / 0.3);
+
+  --node-agent: var(--primary);
+  --node-guardrail: oklch(0.78 0.14 80);
+  --node-kb: oklch(0.7 0.14 140);
+  --node-tool: oklch(0.7 0.12 190);
+  --node-database: oklch(0.68 0.14 240);
+  --node-memory: oklch(0.68 0.15 275);
+  --node-subagent: oklch(0.68 0.16 305);
+  --node-mcp: oklch(0.68 0.17 345);
 }
 
 @theme inline {
@@ -39,10 +67,22 @@
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
   --color-ring: var(--ring);
+  --color-node-agent: var(--node-agent);
+  --color-node-guardrail: var(--node-guardrail);
+  --color-node-kb: var(--node-kb);
+  --color-node-tool: var(--node-tool);
+  --color-node-database: var(--node-database);
+  --color-node-memory: var(--node-memory);
+  --color-node-subagent: var(--node-subagent);
+  --color-node-mcp: var(--node-mcp);
   --radius-lg: var(--radius);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 3px);
+  --radius-sm: calc(var(--radius) - 5px);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-source-serif), ui-serif, Georgia, serif;
 }
 
 * {
@@ -52,13 +92,9 @@
 body {
   background-color: var(--color-background);
   color: var(--color-foreground);
-  font-family:
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    Roboto,
-    Helvetica,
-    Arial,
-    sans-serif;
+  font-family: var(--font-sans);
+}
+
+::selection {
+  background-color: color-mix(in oklch, var(--primary) 30%, transparent);
 }

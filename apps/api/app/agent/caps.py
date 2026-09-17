@@ -1,0 +1,144 @@
+"""In-process capability tools exposed to the agent as an SDK MCP server.
+
+Phase 1 ships two safe, read-only tools: ``calculator`` and ``datetime``. RAG,
+SQL, HTTP and MongoDB tools land in phases 2-4 and register here too.
+
+Each tool is a plain async ``handler(args) -> {"content": [...]}``. ``build_caps_server``
+adapts them to ``claude_agent_sdk``. Keeping the handlers SDK-agnostic means they
+are unit-testable without the CLI.
+"""
+
+from __future__ import annotations
+
+import ast
+import operator
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from claude_agent_sdk import create_sdk_mcp_server, tool
+from claude_agent_sdk.types import McpSdkServerConfig
+
+ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
+CAPS_SERVER_NAME = "caps"
+
+
+@dataclass(frozen=True)
+class CapabilityTool:
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    handler: ToolHandler
+    read_only: bool = True
+
+    @property
+    def qualified_name(self) -> str:
+        return f"mcp__{CAPS_SERVER_NAME}__{self.name}"
+
+
+def _text(s: str) -> dict[str, Any]:
+    return {"content": [{"type": "text", "text": s}]}
+
+
+# ── calculator ───────────────────────────────────────────────
+
+_BIN_OPS: dict[type[ast.operator], Callable[[Any, Any], Any]] = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+_UNARY_OPS: dict[type[ast.unaryop], Callable[[Any], Any]] = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+_MAX_POW_EXPONENT = 1000
+
+
+def _safe_eval(node: ast.AST) -> float:
+    if isinstance(node, ast.Expression):
+        return _safe_eval(node.body)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return float(node.value)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
+        return _UNARY_OPS[type(node.op)](_safe_eval(node.operand))
+    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
+        left, right = _safe_eval(node.left), _safe_eval(node.right)
+        if isinstance(node.op, ast.Pow) and abs(right) > _MAX_POW_EXPONENT:
+            raise ValueError("exponent too large")
+        return _BIN_OPS[type(node.op)](left, right)
+    raise ValueError("unsupported expression")
+
+
+async def _calculator(args: dict[str, Any]) -> dict[str, Any]:
+    expr = str(args.get("expression", "")).strip()
+    if not expr:
+        return _text("error: empty expression")
+    try:
+        result = _safe_eval(ast.parse(expr, mode="eval"))
+    except (ValueError, SyntaxError, ZeroDivisionError, OverflowError) as exc:
+        return _text(f"error: {exc}")
+    return _text(f"{expr} = {result}")
+
+
+CALCULATOR = CapabilityTool(
+    name="calculator",
+    description="Evaluate a basic arithmetic expression (+, -, *, /, //, %, **, parentheses).",
+    input_schema={"expression": str},
+    handler=_calculator,
+)
+
+
+# ── datetime ─────────────────────────────────────────────────
+
+
+async def _datetime(args: dict[str, Any]) -> dict[str, Any]:
+    tz_name = args.get("tz")
+    now_utc = datetime.now(UTC)
+    if not tz_name:
+        return _text(f"UTC now: {now_utc.isoformat()}")
+    try:
+        tz = ZoneInfo(str(tz_name))
+    except (ZoneInfoNotFoundError, ValueError):
+        return _text(f"error: unknown timezone {tz_name!r}")
+    return _text(f"{tz_name}: {now_utc.astimezone(tz).isoformat()}")
+
+
+DATETIME = CapabilityTool(
+    name="datetime",
+    description="Return the current date and time (UTC, or in an IANA timezone via `tz`).",
+    input_schema={"tz": str},
+    handler=_datetime,
+)
+
+
+ALL_CAPS: dict[str, CapabilityTool] = {t.name: t for t in (CALCULATOR, DATETIME)}
+
+
+def build_caps_server(tools: list[CapabilityTool]) -> McpSdkServerConfig:
+    """Wrap capability tools as a claude_agent_sdk in-process MCP server."""
+    sdk_tools = [tool(t.name, t.description, t.input_schema)(_wrap(t.handler)) for t in tools]
+    return create_sdk_mcp_server(name=CAPS_SERVER_NAME, version="0.1.0", tools=sdk_tools)
+
+
+def _wrap(handler: ToolHandler) -> ToolHandler:
+    async def _inner(args: dict[str, Any]) -> dict[str, Any]:
+        return await handler(args)
+
+    return _inner
+
+
+__all__ = [
+    "ALL_CAPS",
+    "CALCULATOR",
+    "CAPS_SERVER_NAME",
+    "DATETIME",
+    "CapabilityTool",
+    "build_caps_server",
+]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, status
@@ -18,7 +19,9 @@ from app.schemas.org import (
     OrgOut,
     RoleUpdate,
 )
+from app.schemas.usage import GroupBy, UsageRollupResponse
 from app.services import orgs as orgs_service
+from app.services import usage as usage_service
 
 router = APIRouter(tags=["orgs"])
 
@@ -121,6 +124,21 @@ async def accept_invite(
 ) -> Message:
     await orgs_service.accept_invite(session, raw_token=token, user=user, ip=ip)
     return Message(message="joined organization")
+
+
+@router.get("/orgs/{org_id}/usage", response_model=UsageRollupResponse)
+async def get_usage(
+    org_id: Annotated[uuid.UUID, Path()],
+    _membership: OrgMembership,
+    session: SessionDep,
+    group_by: Annotated[GroupBy, Query()] = "assistant",
+    from_: Annotated[datetime | None, Query(alias="from")] = None,
+    to: Annotated[datetime | None, Query()] = None,
+) -> UsageRollupResponse:
+    rows = await usage_service.rollup(
+        session, org_id=org_id, group_by=group_by, date_from=from_, date_to=to
+    )
+    return UsageRollupResponse(group_by=group_by, rows=rows)
 
 
 @router.get(

@@ -11,9 +11,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import DateTime
+from sqlalchemy import JSON, DateTime
+from sqlalchemy.dialects.postgresql import JSONB as _PgJSONB
 from sqlalchemy.engine import Dialect
 from sqlalchemy.types import TypeDecorator
+
+# jsonb on Postgres, plain JSON (TEXT) on SQLite so tests still run without PG.
+JSONB = JSON().with_variant(_PgJSONB(), "postgresql")
 
 
 class TZDateTime(TypeDecorator[datetime]):
@@ -45,4 +49,4 @@ class TZDateTime(TypeDecorator[datetime]):
         return self.impl._compiler_dispatch(visitor, **kw)
 
 
-__all__ = ["TZDateTime"]
+__all__ = ["JSONB", "TZDateTime"]

@@ -20,6 +20,12 @@ EXPECTED_TABLES = {
     "api_tokens",
     "refresh_tokens",
     "audit_log",
+    "assistants",
+    "assistant_versions",
+    "conversations",
+    "messages",
+    "runs",
+    "usage_events",
     "alembic_version",
 }
 
