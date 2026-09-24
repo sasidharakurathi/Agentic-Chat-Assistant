@@ -31,16 +31,20 @@ class UsageEvent(UUIDPrimaryKeyMixin, Base):
     org_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    # SET NULL, not CASCADE: this is an append-only ledger of spend that really
+    # happened. Deleting an assistant or a conversation must not make an
+    # org's usage totals drop.
     assistant_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("assistants.id", ondelete="CASCADE"), nullable=True, index=True
+        ForeignKey("assistants.id", ondelete="SET NULL"), nullable=True, index=True
     )
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=True, index=True
+        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
     )
     kind: Mapped[UsageKind] = mapped_column(
         SAEnum(UsageKind, name="usage_kind", native_enum=False, length=20), nullable=False
     )
     model: Mapped[str | None] = mapped_column(String(80))
+    #: For kind=tool, the number of calls (a tool has no tokens).
     tokens_in: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Non-token usage (e.g. chunks embedded, documents reranked) — null for "llm".

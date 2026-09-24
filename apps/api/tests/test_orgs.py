@@ -26,12 +26,12 @@ async def _register(client: AsyncClient, email: str) -> Actor:
 async def test_list_and_create_orgs(client: AsyncClient, auth_headers: dict[str, str]) -> None:
     listing = await client.get("/api/v1/orgs", headers=auth_headers)
     assert listing.status_code == 200
-    assert len(listing.json()) == 1  # personal org from registration
+    assert len(listing.json()["items"]) == 1  # personal org from registration
 
     created = await client.post("/api/v1/orgs", json={"name": "Acme Inc"}, headers=auth_headers)
     assert created.status_code == 201
     assert created.json()["slug"] == "acme-inc"
-    assert len((await client.get("/api/v1/orgs", headers=auth_headers)).json()) == 2
+    assert len((await client.get("/api/v1/orgs", headers=auth_headers)).json()["items"]) == 2
 
 
 async def test_invite_flow_and_rbac(client: AsyncClient) -> None:
@@ -53,7 +53,7 @@ async def test_invite_flow_and_rbac(client: AsyncClient) -> None:
 
     members = await client.get(f"/api/v1/orgs/{org['id']}/members", headers=member.headers)
     assert members.status_code == 200
-    assert {m["role"] for m in members.json()} == {"owner", "member"}
+    assert {m["role"] for m in members.json()["items"]} == {"owner", "member"}
 
     # member (not admin) cannot promote the owner
     bad = await client.patch(
@@ -76,7 +76,7 @@ async def test_invite_flow_and_rbac(client: AsyncClient) -> None:
     # audit log now readable by the (newly) admin member
     audit = await client.get(f"/api/v1/orgs/{org['id']}/audit-log", headers=member.headers)
     assert audit.status_code == 200
-    actions = {e["action"] for e in audit.json()}
+    actions = {e["action"] for e in audit.json()["items"]}
     assert "org.invite.accept" in actions
     assert "org.member.role_change" in actions
 

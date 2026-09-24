@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -85,11 +86,24 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+        # `input` is dropped from every error. For a model-level validator, or
+        # a missing field, pydantic sets it to the *whole request body* — so
+        # a 422 used to echo back whatever password or connection string came
+        # with the request, into proxy logs and error trackers. The message
+        # and location still say what is wrong; they never repeat a value.
+        #
+        # And encoded with `jsonable_encoder`: a model-level validator that
+        # raises ValueError puts the exception *object* in `ctx`, which plain
+        # JSON cannot serialise — so every such validation failure crashed
+        # this handler and never produced its 422 (the client got no
+        # response at all).
+        errors = jsonable_encoder(
+            [{k: v for k, v in e.items() if k != "input"} for e in exc.errors()],
+            custom_encoder={BaseException: str},
+        )
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content=_envelope(
-                "validation_error", "Request validation failed", {"errors": exc.errors()}
-            ),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content=_envelope("validation_error", "Request validation failed", {"errors": errors}),
         )
 
     @app.exception_handler(StarletteHTTPException)

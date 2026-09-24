@@ -22,7 +22,7 @@ SubagentRole = Literal["retrieval", "sql", "research"]
 
 
 class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", json_schema_serialization_defaults_required=True)
 
 
 # ── Models ───────────────────────────────────────────────────

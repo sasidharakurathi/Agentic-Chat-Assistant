@@ -80,6 +80,13 @@ async def register(
         ip=ip,
     )
     await session.flush()
+    # Commit before returning, not in `get_session`'s teardown. The caller
+    # gets an access token in this very response and will typically use it
+    # immediately — and the dependency's commit runs *after* the response is
+    # sent, so that next request can beat the row into existence and get a
+    # 401 "User not found". Same race (and same fix) as the mutating
+    # assistant/conversation services.
+    await session.commit()
     log.info("user_registered", user_id=str(user.id), org_id=str(org.id))
     return user
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 from app.graph.nodes import (
     AgentNode,
     AgentNodeData,
+    AnyNode,
     DatabaseNode,
     DatabaseNodeData,
     DataSourceNode,
@@ -46,33 +47,71 @@ _COL_OUTPUT = 1320.0
 
 
 def project_config(config: AssistantConfig, existing_graph: Graph | None = None) -> Graph:
+    canonical = _project(config, existing_graph)
+    if existing_graph is None:
+        return canonical
+    return _keep_user_wiring(config, canonical, existing_graph)
+
+
+def _identity(node: AnyNode) -> tuple[str, ...]:
+    """What a node *is*, independent of its id: its type, plus whatever it
+    references. The canvas and the projection mint different ids for the same
+    thing ("db" vs "db:{connection_id}"), so ids cannot be the match key."""
+    data = node.data
+    ref = next(
+        (
+            str(getattr(data, attr))
+            for attr in ("connection_id", "data_source_id", "key", "mcp_server_id", "role")
+            if getattr(data, attr, None) is not None
+        ),
+        None,
+    )
+    return (node.type,) if ref is None else (node.type, ref)
+
+
+def _project(config: AssistantConfig, existing_graph: Graph | None) -> Graph:
+    existing: dict[tuple[str, ...], AnyNode] = {}
+    for n in existing_graph.nodes if existing_graph else []:
+        existing.setdefault(_identity(n), n)
+
+    def ident(identity: tuple[str, ...], default: str) -> str:
+        """The node's id on the user's canvas if it is already there."""
+        found = existing.get(identity)
+        return found.id if found is not None else default
+
     pos = {n.id: n.position for n in existing_graph.nodes} if existing_graph else {}
 
     def at(node_id: str, x: float, y: float) -> Position:
         return pos.get(node_id, Position(x=x, y=y))
 
+    i_in = ident(("input",), "input")
+    i_guard = ident(("guardrail",), "guardrail")
+    i_mem = ident(("memory",), "memory")
+    i_agent = ident(("agent",), "agent")
+    i_out = ident(("output",), "output")
+
     nodes: list = []
     edges: list[Edge] = []
 
-    nodes.append(InputNode(id="input", position=at("input", _COL_INPUT, 0)))
+    nodes.append(InputNode(id=i_in, position=at(i_in, _COL_INPUT, 0)))
     nodes.append(
         GuardrailNode(
-            id="guardrail",
-            position=at("guardrail", _COL_PRE, -120),
+            id=i_guard,
+            position=at(i_guard, _COL_PRE, -120),
             data=GuardrailNodeData(**config.guardrails.model_dump()),
         )
     )
     nodes.append(
         MemoryNode(
-            id="memory",
-            position=at("memory", _COL_CAP, 420),
+            id=i_mem,
+            position=at(i_mem, _COL_CAP, 420),
             data=MemoryNodeData(**config.memory.model_dump()),
         )
     )
     nodes.append(
         AgentNode(
-            id="agent",
-            position=at("agent", _COL_AGENT, 0),
+            id=i_agent,
+            position=at(i_agent, _COL_AGENT, 0),
             data=AgentNodeData(
                 system_prompt=config.system_prompt,
                 models=config.models.model_copy(deep=True),
@@ -82,24 +121,25 @@ def project_config(config: AssistantConfig, existing_graph: Graph | None = None)
     )
     nodes.append(
         OutputNode(
-            id="output",
-            position=at("output", _COL_OUTPUT, 0),
+            id=i_out,
+            position=at(i_out, _COL_OUTPUT, 0),
             data=OutputNodeData(citations=config.rag.citations),
         )
     )
     edges += [
-        Edge(source="input", target="guardrail"),
-        Edge(source="guardrail", target="agent"),
-        Edge(source="memory", target="agent"),
-        Edge(source="agent", target="output"),
+        Edge(source=i_in, target=i_guard),
+        Edge(source=i_guard, target=i_agent),
+        Edge(source=i_mem, target=i_agent),
+        Edge(source=i_agent, target=i_out),
     ]
 
     y = 0.0
     if config.rag.enabled:
+        i_kb = ident(("knowledge_base",), "kb")
         nodes.append(
             KnowledgeBaseNode(
-                id="kb",
-                position=at("kb", _COL_CAP, y),
+                id=i_kb,
+                position=at(i_kb, _COL_CAP, y),
                 data=KnowledgeBaseNodeData(
                     embedder=config.rag.embedder,
                     reranker=config.rag.reranker,
@@ -110,10 +150,10 @@ def project_config(config: AssistantConfig, existing_graph: Graph | None = None)
                 ),
             )
         )
-        edges.append(Edge(source="kb", target="agent"))
+        edges.append(Edge(source=i_kb, target=i_agent))
         y += 140
         for i, sid in enumerate(config.rag.source_ids):
-            nid = f"src:{sid}"
+            nid = ident(("data_source", sid), f"src:{sid}")
             nodes.append(
                 DataSourceNode(
                     id=nid,
@@ -121,10 +161,10 @@ def project_config(config: AssistantConfig, existing_graph: Graph | None = None)
                     data=DataSourceNodeData(data_source_id=sid),
                 )
             )
-            edges.append(Edge(source=nid, target="kb"))
+            edges.append(Edge(source=nid, target=i_kb))
 
     for db in config.databases:
-        nid = f"db:{db.connection_id}"
+        nid = ident(("database", db.connection_id), f"db:{db.connection_id}")
         nodes.append(
             DatabaseNode(
                 id=nid,
@@ -136,11 +176,11 @@ def project_config(config: AssistantConfig, existing_graph: Graph | None = None)
                 ),
             )
         )
-        edges.append(Edge(source=nid, target="agent"))
+        edges.append(Edge(source=nid, target=i_agent))
         y += 120
 
     for key, cfg, approval in _enabled_tools(config):
-        nid = f"tool:{key}"
+        nid = ident(("tool", key), f"tool:{key}")
         nodes.append(
             ToolNode(
                 id=nid,
@@ -148,11 +188,11 @@ def project_config(config: AssistantConfig, existing_graph: Graph | None = None)
                 data=ToolNodeData(key=key, config=cfg, approval=approval),
             )
         )
-        edges.append(Edge(source=nid, target="agent"))
+        edges.append(Edge(source=nid, target=i_agent))
         y += 110
 
     for mid in config.mcp_servers:
-        nid = f"mcp:{mid}"
+        nid = ident(("mcp_server", mid), f"mcp:{mid}")
         nodes.append(
             McpServerNode(
                 id=nid,
@@ -160,13 +200,13 @@ def project_config(config: AssistantConfig, existing_graph: Graph | None = None)
                 data=McpServerNodeData(mcp_server_id=mid),
             )
         )
-        edges.append(Edge(source=nid, target="agent"))
+        edges.append(Edge(source=nid, target=i_agent))
         y += 110
 
     sy = 0.0
     for role in ("retrieval", "sql", "research"):
         if getattr(config.subagents, role):
-            nid = f"sub:{role}"
+            nid = ident(("subagent", role), f"sub:{role}")
             nodes.append(
                 SubagentNode(
                     id=nid,
@@ -174,10 +214,45 @@ def project_config(config: AssistantConfig, existing_graph: Graph | None = None)
                     data=SubagentNodeData(role=role),
                 )
             )
-            edges.append(Edge(source=nid, target="agent"))
+            edges.append(Edge(source=nid, target=i_agent))
             sy += 120
 
     return Graph(nodes=nodes, edges=edges)
+
+
+def _keep_user_wiring(config: AssistantConfig, canonical: Graph, existing: Graph) -> Graph:
+    """Prefer the edges the user drew, when they mean the same thing.
+
+    The projection wires everything straight to the agent, but the canvas
+    allows equivalent shapes (a database wired through a subagent compiles
+    to the same config). Rewiring on every Panels save would change the
+    user's canvas for no semantic reason. So: keep every existing edge whose
+    endpoints survive, add canonical edges only for nodes that are new, and
+    use the result only if it still validates and compiles to exactly this
+    config — otherwise the canonical wiring is the safe answer.
+    """
+    # Imported here: compile/validate depend on nothing in this module, but
+    # keeping projection importable on its own keeps the layering obvious.
+    from app.graph.compile import compile_graph
+    from app.graph.validate import validate_graph
+
+    ids = {n.id for n in canonical.nodes}
+    old_ids = {n.id for n in existing.nodes}
+    kept = [e for e in existing.edges if e.source in ids and e.target in ids]
+    added = [e for e in canonical.edges if e.source not in old_ids or e.target not in old_ids]
+    seen: set[tuple[str, str]] = set()
+    edges: list[Edge] = []
+    for e in [*kept, *added]:
+        if (e.source, e.target) not in seen:
+            seen.add((e.source, e.target))
+            edges.append(e)
+    candidate = Graph(nodes=canonical.nodes, edges=edges)
+    try:
+        if validate_graph(candidate).ok and compile_graph(candidate) == config:
+            return candidate
+    except (ValueError, KeyError):
+        pass
+    return canonical
 
 
 def _enabled_tools(config: AssistantConfig) -> list[tuple[str, dict[str, object], str]]:

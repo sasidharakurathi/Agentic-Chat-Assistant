@@ -13,6 +13,8 @@ from contextvars import ContextVar
 import structlog
 from structlog.typing import EventDict, WrappedLogger
 
+from app.security.redact import redact_event
+
 request_id_ctx: ContextVar[str | None] = ContextVar("request_id", default=None)
 
 _state = {"configured": False}
@@ -36,6 +38,9 @@ def configure_logging(level: str = "INFO", fmt: str = "console") -> None:
         _add_request_id,
         timestamper,
         structlog.processors.StackInfoRenderer(),
+        # Last: masks credentials in whatever the processors above merged in
+        # (plan §8, logs never carry secrets).
+        redact_event,
     ]
 
     renderer: structlog.typing.Processor = (
@@ -56,6 +61,11 @@ def configure_logging(level: str = "INFO", fmt: str = "console") -> None:
         processors=[structlog.stdlib.ProcessorFormatter.remove_processors_meta, renderer],
     )
 
+    # A Windows console is cp1252 by default: one character outside it (arq
+    # logs a "→" per job) raised UnicodeEncodeError inside logging, and the
+    # line was lost behind a "--- Logging error ---" traceback.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="backslashreplace")
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
 

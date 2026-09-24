@@ -1,0 +1,135 @@
+{
+  "name": "support-handbook-v1",
+  "notes": "Hand-labelled retrieval suite for task 2.11. Deliberately built so keyword overlap is NOT enough: several questions share no content words with the passage that answers them (q_refund_window says 'get my money back', the passage says 'refund'), and the corpus is full of near-misses (refunds vs exchanges vs store credit; shipping vs delivery estimates vs international) so a retriever that merely matches the topic still scores badly. Two cases have more than one right answer, which is the only thing that makes nDCG say something recall doesn't.",
+  "corpus": [
+    {
+      "key": "refund_window",
+      "title": "Refunds",
+      "text": "Refund requests must be submitted within 30 days of the delivery date. Once approved, the amount is returned to the original payment method and typically appears within five business days."
+    },
+    {
+      "key": "refund_condition",
+      "title": "Refunds",
+      "text": "Items must be unused and in their original packaging to qualify for a refund. Products showing wear, missing accessories, or damage caused after delivery are not eligible."
+    },
+    {
+      "key": "exchange_policy",
+      "title": "Exchanges",
+      "text": "Exchanges are accepted for 60 days and may be made for any item of equal or lesser value. Exchanges do not require the original packaging, unlike refunds."
+    },
+    {
+      "key": "store_credit",
+      "title": "Store credit",
+      "text": "Store credit never expires and can be combined with other payment methods at checkout. It cannot be converted back into cash."
+    },
+    {
+      "key": "shipping_speed",
+      "title": "Shipping",
+      "text": "Orders placed before noon are dispatched the same business day. Standard dispatch otherwise takes up to two business days."
+    },
+    {
+      "key": "delivery_estimate",
+      "title": "Shipping",
+      "text": "Domestic parcels usually arrive three to five business days after dispatch. Tracking numbers are emailed as soon as the carrier scans the parcel."
+    },
+    {
+      "key": "international",
+      "title": "Shipping",
+      "text": "International orders may be held by customs, which can add one to three weeks. Any duties or import taxes are the recipient's responsibility."
+    },
+    {
+      "key": "warranty_length",
+      "title": "Warranty",
+      "text": "All hardware carries a two year limited warranty beginning on the date of purchase. Batteries and other consumable parts are covered for the first six months only."
+    },
+    {
+      "key": "warranty_exclusions",
+      "title": "Warranty",
+      "text": "Accidental damage, liquid ingress, and damage from unauthorised repairs are not covered by the limited warranty. Extended protection plans cover accidental damage separately."
+    },
+    {
+      "key": "account_deletion",
+      "title": "Accounts",
+      "text": "You can close your account from the privacy settings page. Closure is permanent after a 14 day grace period, during which signing in restores the account."
+    },
+    {
+      "key": "password_reset",
+      "title": "Accounts",
+      "text": "Use the 'forgot password' link on the sign-in page to receive a reset email. Reset links expire after one hour for security reasons."
+    },
+    {
+      "key": "support_hours",
+      "title": "Contact",
+      "text": "Live chat is staffed Monday to Friday, 9am to 6pm. Emails sent outside those hours are answered on the next working day."
+    }
+  ],
+  "cases": [
+    {
+      "id": "q_refund_window",
+      "input": "how long do I have to get my money back?",
+      "relevant": ["refund_window"],
+      "notes": "No shared content words with the passage ('money back' vs 'refund'), and exchange_policy is a strong topical distractor with its own deadline."
+    },
+    {
+      "id": "q_refund_requirements",
+      "input": "does the box need to be kept to return something?",
+      "relevant": ["refund_condition"],
+      "notes": "exchange_policy also mentions original packaging, but says the opposite."
+    },
+    {
+      "id": "q_refund_full",
+      "input": "what do I need to know about returning an item for a refund?",
+      "relevant": ["refund_window", "refund_condition"],
+      "notes": "Two right answers — the case that separates nDCG from recall."
+    },
+    {
+      "id": "q_dispatch",
+      "input": "if I order this morning when does it leave the warehouse?",
+      "relevant": ["shipping_speed"],
+      "notes": "delivery_estimate is about arrival, not dispatch."
+    },
+    {
+      "id": "q_arrival",
+      "input": "how many days until my parcel actually turns up?",
+      "relevant": ["delivery_estimate"]
+    },
+    {
+      "id": "q_customs",
+      "input": "why is my overseas order taking so long?",
+      "relevant": ["international"]
+    },
+    {
+      "id": "q_warranty_length",
+      "input": "how long is the hardware guarantee?",
+      "relevant": ["warranty_length"],
+      "notes": "'guarantee' never appears in the corpus."
+    },
+    {
+      "id": "q_dropped_it",
+      "input": "I dropped my device, is that covered?",
+      "relevant": ["warranty_exclusions"],
+      "notes": "Requires connecting 'dropped' to 'accidental damage'."
+    },
+    {
+      "id": "q_warranty_full",
+      "input": "what does the warranty cover and for how long?",
+      "relevant": ["warranty_length", "warranty_exclusions"]
+    },
+    {
+      "id": "q_cant_sign_in",
+      "input": "I forgot my login details, what now?",
+      "relevant": ["password_reset"],
+      "notes": "account_deletion is the near-miss — same 'Accounts' section."
+    },
+    {
+      "id": "q_close_account",
+      "input": "can I permanently remove my profile?",
+      "relevant": ["account_deletion"]
+    },
+    {
+      "id": "q_support_hours",
+      "input": "when can I talk to a human?",
+      "relevant": ["support_hours"]
+    }
+  ]
+}

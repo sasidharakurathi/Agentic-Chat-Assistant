@@ -3,6 +3,8 @@ import { Inter, Source_Serif_4 } from "next/font/google";
 import type { ReactNode } from "react";
 
 import { ThemeProvider } from "@/components/theme-provider";
+import { DialogProvider } from "@/components/ui/dialog";
+import { ToastProvider } from "@/components/ui/toast";
 import { AuthProvider } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
@@ -22,7 +24,11 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     <html lang="en" suppressHydrationWarning>
       <body className={cn(inter.variable, sourceSerif.variable, "min-h-screen antialiased")}>
         <ThemeProvider>
-          <AuthProvider>{children}</AuthProvider>
+          <ToastProvider>
+            <DialogProvider>
+              <AuthProvider>{children}</AuthProvider>
+            </DialogProvider>
+          </ToastProvider>
         </ThemeProvider>
       </body>
     </html>

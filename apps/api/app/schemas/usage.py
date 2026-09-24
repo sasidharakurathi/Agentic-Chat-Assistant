@@ -3,12 +3,12 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel
+from app.schemas.common import ApiModel
 
 GroupBy = Literal["assistant", "model"]
 
 
-class UsageRollupRow(BaseModel):
+class UsageRollupRow(ApiModel):
     group_key: str | None
     event_count: int
     tokens_in: int
@@ -16,7 +16,7 @@ class UsageRollupRow(BaseModel):
     cost_usd: Decimal
 
 
-class UsageRollupResponse(BaseModel):
+class UsageRollupResponse(ApiModel):
     group_by: GroupBy
     rows: list[UsageRollupRow]
 

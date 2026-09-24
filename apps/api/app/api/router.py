@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.routes import assistants, auth, conversations, health, meta, orgs
+from app.api.routes import (
+    approvals,
+    assistants,
+    auth,
+    conversations,
+    data_sources,
+    db_connections,
+    health,
+    meta,
+    orgs,
+)
 
 # Health lives at the root; everything else under /api/v1.
 root_router = APIRouter()
@@ -13,6 +23,9 @@ api_v1.include_router(auth.router)
 api_v1.include_router(orgs.router)
 api_v1.include_router(assistants.router)
 api_v1.include_router(conversations.router)
+api_v1.include_router(data_sources.router)
+api_v1.include_router(db_connections.router)
+api_v1.include_router(approvals.router)
 api_v1.include_router(meta.router)
 
 __all__ = ["api_v1", "root_router"]

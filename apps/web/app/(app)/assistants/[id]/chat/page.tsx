@@ -5,7 +5,8 @@ import { use, useCallback, useEffect, useState } from "react";
 
 import { ChatThread } from "@/components/chat/ChatThread";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { assistants, conversations, type Conversation } from "@/lib/api";
+import { useConfirm, usePrompt } from "@/components/ui/dialog";
+import { ApiError, assistants, conversations, type Conversation } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export default function ChatPage({ params }: { params: Promise<{ id: string }> }) {
@@ -14,14 +15,26 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const [rows, setRows] = useState<Conversation[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [more, setMore] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [a, list] = await Promise.all([assistants.get(id), conversations.list(id)]);
+    const [a, page] = await Promise.all([assistants.get(id), conversations.list(id)]);
     setName(a.name);
-    setRows(list);
-    setActive((cur) => cur ?? list[0]?.id ?? null);
+    setRows(page.items);
+    setMore(page.next_cursor);
+    setActive((cur) => cur ?? page.items[0]?.id ?? null);
     setLoading(false);
   }, [id]);
+
+  const loadMore = useCallback(async () => {
+    if (!more) return;
+    const page = await conversations.list(id, more);
+    setRows((r) => {
+      const seen = new Set(r.map((c) => c.id));
+      return [...r, ...page.items.filter((c) => !seen.has(c.id))];
+    });
+    setMore(page.next_cursor);
+  }, [id, more]);
 
   useEffect(() => {
     void load();
@@ -32,6 +45,55 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     setRows((r) => [c, ...r]);
     setActive(c.id);
   }, [id]);
+
+  const [error, setError] = useState<string | null>(null);
+
+  const confirm = useConfirm();
+  const askTitle = usePrompt();
+
+  const rename = useCallback(
+    async (c: Conversation) => {
+      const title = (
+        await askTitle({
+          title: "Rename conversation",
+          label: "Title",
+          defaultValue: c.title,
+          confirmLabel: "Rename",
+        })
+      )?.trim();
+      if (!title || title === c.title) return;
+      setError(null);
+      try {
+        const updated = await conversations.rename(c.id, title);
+        setRows((r) => r.map((x) => (x.id === c.id ? { ...x, title: updated.title } : x)));
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : "Could not rename");
+      }
+    },
+    [askTitle],
+  );
+
+  const archive = useCallback(
+    async (c: Conversation) => {
+      const sure = await confirm({
+        title: `Archive "${c.title}"?`,
+        description: "It leaves this list and can't be continued.",
+        confirmLabel: "Archive",
+        destructive: true,
+      });
+      if (!sure) return;
+      setError(null);
+      try {
+        await conversations.archive(c.id);
+        const next = rows.filter((x) => x.id !== c.id);
+        setRows(next);
+        if (active === c.id) setActive(next[0]?.id ?? null);
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : "Could not archive");
+      }
+    },
+    [rows, active, confirm],
+  );
 
   if (loading) return <div className="text-muted-foreground p-10 text-sm">Loading…</div>;
 
@@ -49,28 +111,58 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           </Button>
         </div>
         <div className="flex-1 space-y-1 overflow-auto px-2">
+          {error && (
+            <p className="text-destructive px-2 py-1 text-xs" role="alert">
+              {error}
+            </p>
+          )}
           {rows.map((c) => (
-            <button
-              key={c.id}
-              onClick={() => setActive(c.id)}
-              className={cn(
-                "w-full truncate rounded-md px-2 py-1.5 text-left text-sm",
-                c.id === active
-                  ? "bg-muted font-medium"
-                  : "text-muted-foreground hover:text-foreground",
+            <div key={c.id}>
+              <button
+                onClick={() => setActive(c.id)}
+                className={cn(
+                  "w-full truncate rounded-md px-2 py-1.5 text-left text-sm",
+                  c.id === active
+                    ? "bg-muted font-medium"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {c.title}
+              </button>
+              {c.id === active && (
+                <div className="flex gap-3 px-2 pt-0.5 pb-1">
+                  <button
+                    className="text-muted-foreground hover:text-foreground text-xs"
+                    onClick={() => void rename(c)}
+                  >
+                    Rename
+                  </button>
+                  <button
+                    className="text-muted-foreground hover:text-destructive text-xs"
+                    onClick={() => void archive(c)}
+                  >
+                    Archive
+                  </button>
+                </div>
               )}
-            >
-              {c.title}
-            </button>
+            </div>
           ))}
           {rows.length === 0 && (
             <p className="text-muted-foreground px-2 py-4 text-xs">No conversations yet.</p>
+          )}
+          {more && (
+            <button
+              className="text-muted-foreground hover:text-foreground w-full px-2 py-2 text-xs"
+              onClick={() => void loadMore()}
+            >
+              Load older conversations
+            </button>
           )}
         </div>
       </aside>
       <div className="min-w-0 flex-1">
         {active ? (
-          <ChatThread key={active} conversationId={active} />
+          <ChatThread key={active} conversationId={active} assistantId={id} />
         ) : (
           <div className="flex h-full items-center justify-center">
             <button className={buttonVariants()} onClick={() => void newChat()}>

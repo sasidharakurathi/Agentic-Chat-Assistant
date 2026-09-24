@@ -7,12 +7,13 @@ not here.
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import Field
 
-from app.graph.nodes import Graph, NodeType
+from app.graph.nodes import AnyNode, Graph, NodeType
+from app.schemas.common import ApiModel
 
 # Which (source_type -> target_type) edges are meaningful.
-_ALLOWED_EDGES: set[tuple[NodeType, NodeType]] = {
+ALLOWED_EDGES: set[tuple[NodeType, NodeType]] = {
     ("input", "guardrail"),
     ("input", "router"),
     ("input", "agent"),
@@ -34,19 +35,25 @@ _ALLOWED_EDGES: set[tuple[NodeType, NodeType]] = {
 }
 
 _CAPABILITY_TYPES: set[NodeType] = {"knowledge_base", "database", "tool", "mcp_server"}
-_SINGLETON_TYPES: tuple[NodeType, ...] = ("input", "agent", "output")
+SINGLETON_TYPES: tuple[NodeType, ...] = ("input", "agent", "output")
+#: Optional, but never more than one: the compiler reads a single node of
+#: each. With two, it took whichever happened to be listed first, so the
+#: compiled config depended on node order (task 1.12's determinism gap).
+AT_MOST_ONE_TYPES: tuple[NodeType, ...] = ("guardrail", "memory", "router")
+#: Absent, these fall back to schema defaults; say so rather than silently.
+_DEFAULTED_TYPES: tuple[NodeType, ...] = ("guardrail", "memory")
 
 
-class GraphIssue(BaseModel):
+class GraphIssue(ApiModel):
     code: str
     message: str
     node_id: str | None = None
     edge: tuple[str, str] | None = None
 
 
-class ValidationResult(BaseModel):
-    errors: list[GraphIssue] = []
-    warnings: list[GraphIssue] = []
+class ValidationResult(ApiModel):
+    errors: list[GraphIssue] = Field(default_factory=list)
+    warnings: list[GraphIssue] = Field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -84,6 +91,39 @@ def _reaches(start: str, targets: set[str], adj: dict[str, list[str]]) -> bool:
     return False
 
 
+def _check_node_counts(nodes: list[AnyNode], res: ValidationResult) -> None:
+    """Required singletons, at-most-one types, and defaulted types."""
+    for t in SINGLETON_TYPES:
+        count = sum(1 for n in nodes if n.type == t)
+        if count == 0:
+            res.errors.append(
+                GraphIssue(code="missing_node", message=f"graph needs exactly one {t} node")
+            )
+        elif count > 1:
+            res.errors.append(
+                GraphIssue(
+                    code="duplicate_node", message=f"graph has {count} {t} nodes; expected 1"
+                )
+            )
+    for t in AT_MOST_ONE_TYPES:
+        count = sum(1 for n in nodes if n.type == t)
+        if count > 1:
+            res.errors.append(
+                GraphIssue(
+                    code="duplicate_node",
+                    message=f"graph has {count} {t} nodes; at most one is allowed",
+                )
+            )
+    for t in _DEFAULTED_TYPES:
+        if not any(n.type == t for n in nodes):
+            res.warnings.append(
+                GraphIssue(
+                    code="defaults_in_use",
+                    message=f"no {t} node: the default {t} settings apply",
+                )
+            )
+
+
 def validate_graph(graph: Graph) -> ValidationResult:
     res = ValidationResult()
     nodes = graph.nodes
@@ -112,7 +152,7 @@ def validate_graph(graph: Graph) -> ValidationResult:
             )
             continue
         pair = (type_of[e.source], type_of[e.target])
-        if pair not in _ALLOWED_EDGES:
+        if pair not in ALLOWED_EDGES:
             res.errors.append(
                 GraphIssue(
                     code="illegal_edge",
@@ -125,22 +165,30 @@ def validate_graph(graph: Graph) -> ValidationResult:
 
     # ── singletons ───────────────────────────────────────────
     agent_ids = [n.id for n in nodes if n.type == "agent"]
-    for t in _SINGLETON_TYPES:
-        count = sum(1 for n in nodes if n.type == t)
-        if count == 0:
-            res.errors.append(
-                GraphIssue(code="missing_node", message=f"graph needs exactly one {t} node")
-            )
-        elif count > 1:
-            res.errors.append(
-                GraphIssue(
-                    code="duplicate_node", message=f"graph has {count} {t} nodes; expected 1"
-                )
-            )
+    _check_node_counts(nodes, res)
 
     # ── cycles ───────────────────────────────────────────────
     if _has_cycle(id_set, adj):
         res.errors.append(GraphIssue(code="cycle", message="graph contains a cycle"))
+
+    # ── a second knowledge base would be silently ignored ────
+    # `compile_graph` takes kb_nodes[0]; any further knowledge_base node wired
+    # to the agent contributes nothing, so its settings would be dead config
+    # the user believes is live. Before task 2.13 this was unreachable (no UI
+    # could create one); now that the canvas can, say so out loud.
+    kb_wired = [n for n in nodes if n.type == "knowledge_base"]
+    if len(kb_wired) > 1:
+        for extra in kb_wired[1:]:
+            res.errors.append(
+                GraphIssue(
+                    code="duplicate_knowledge_base",
+                    message=(
+                        "only one knowledge base is supported; "
+                        "this node's settings would be ignored"
+                    ),
+                    node_id=extra.id,
+                )
+            )
 
     # ── duplicate capability refs ────────────────────────────
     _dup_ref_check(graph, res)

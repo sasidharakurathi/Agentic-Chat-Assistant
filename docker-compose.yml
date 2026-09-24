@@ -1,8 +1,8 @@
 # Base stack.
 #   docker compose up -d                     -> datastores only (postgres, redis, minio)
 #   docker compose --profile apps up -d      -> also build + run api + web
-#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
-#                                            -> add the optional Langfuse stack
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml --profile observability up -d
+#                                            -> add the optional Langfuse stack (task 1.9)
 
 name: assistant-studio
 
@@ -11,6 +11,11 @@ x-api-env: &api-env
   DATABASE_URL: postgresql+asyncpg://app:app@postgres:5432/app
   REDIS_URL: redis://redis:6379/0
   S3_ENDPOINT: http://minio:9000
+  # Where the *browser* reaches MinIO. Citation deep links are presigned
+  # URLs opened by the user's browser, which cannot resolve the compose
+  # hostname `minio` - and the host is signed, so it can't be rewritten
+  # afterwards. Tracks MINIO_PORT, since that is what compose publishes.
+  S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:${MINIO_PORT:-9000}}
   S3_BUCKET: ${S3_BUCKET:-assistant-uploads}
   S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
   S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
@@ -20,6 +25,13 @@ x-api-env: &api-env
   VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
   LOG_FORMAT: ${LOG_FORMAT:-json}
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+  # Tracing (task 1.9); all optional. The containers reach Langfuse by its
+  # compose name, not the localhost URL a host-run API uses, so the docker
+  # value is its own variable.
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  LANGFUSE_HOST: ${LANGFUSE_DOCKER_HOST:-${LANGFUSE_HOST:-}}
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
 
 services:
   postgres:
@@ -28,9 +40,13 @@ services:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: app
       POSTGRES_DB: app
-    # Host port 55432 (not 5432) to avoid colliding with a locally-installed Postgres.
+    # Host port 45432: not 5432 (a locally-installed Postgres has it), and below
+    # 49152 on purpose. Windows' dynamic range is 49152-65535, and Hyper-V/WinNAT
+    # reserves random blocks of it at every boot. 55432 was used until one reboot
+    # reserved 55407-55506 and Postgres could no longer start. All the datastore
+    # host ports here stay under 49152 for the same reason.
     ports:
-      - "${POSTGRES_PORT:-55432}:5432"
+      - "${POSTGRES_PORT:-45432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
@@ -44,7 +60,7 @@ services:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "${REDIS_PORT:-56379}:6379"
+      - "${REDIS_PORT:-46379}:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -105,6 +121,26 @@ services:
       timeout: 5s
       retries: 10
 
+  # Runs app/worker.py's Arq jobs (currently just data-source ingestion,
+  # task 2.5). Same image as `api`, different command — migrations already
+  # run there, so skip them here to avoid a redundant race on startup.
+  worker:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    profiles: ["apps"]
+    command: ["arq", "app.worker.WorkerSettings"]
+    environment:
+      <<: *api-env
+      RUN_MIGRATIONS: "0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
   web:
     build:
       context: .
@@ -117,7 +153,46 @@ services:
     depends_on:
       - api
 
+  # Extra engines for Phase 3 integration tests. Opt-in so a normal
+  # `docker compose up -d postgres redis minio` stays small:
+  #   docker compose --profile datastores up -d mysql mongo
+  mysql:
+    image: mysql:8.4
+    profiles: ["datastores"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpw}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-appdb}
+      MYSQL_USER: ${MYSQL_USER:-app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-app}
+    ports:
+      - "${MYSQL_PORT:-43306}:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-rootpw}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - mysqldata:/var/lib/mysql
+
+  mongo:
+    image: mongo:7
+    profiles: ["datastores"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-rootpw}
+    ports:
+      - "${MONGO_PORT:-47017}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - mongodata:/data/db
+
 volumes:
+  mysqldata:
+  mongodata:
   pgdata:
   redisdata:
   miniodata:

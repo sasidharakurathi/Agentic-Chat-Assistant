@@ -1,16 +1,31 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
+import { safeNext, useAuth } from "@/lib/auth";
 
+/** `useSearchParams` reads the URL being rendered. Reading
+ *  `window.location` instead gave the *previous* URL during a client-side
+ *  navigation (the page renders before the address bar changes), which lost
+ *  `?next=` on the way from an invite link. Next requires the Suspense. */
 export default function RegisterPage() {
+  return (
+    <Suspense>
+      <RegisterForm />
+    </Suspense>
+  );
+}
+
+function RegisterForm() {
+  const next = safeNext(useSearchParams().get("next"));
+  const withNext = (path: string) => (next ? `${path}?next=${encodeURIComponent(next)}` : path);
   const { register } = useAuth();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -23,7 +38,7 @@ export default function RegisterPage() {
     setError(null);
     setPending(true);
     try {
-      await register(email, password, name);
+      await register(email, password, name, next);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong");
       setPending(false);
@@ -71,7 +86,7 @@ export default function RegisterPage() {
           </Button>
           <p className="text-muted-foreground text-center text-sm">
             Already have an account?{" "}
-            <Link href="/login" className="text-primary hover:underline">
+            <Link href={withNext("/login")} className="text-primary hover:underline">
               Sign in
             </Link>
           </p>

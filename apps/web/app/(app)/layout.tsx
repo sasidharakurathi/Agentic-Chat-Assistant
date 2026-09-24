@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { Select } from "@/components/ui/select";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -25,12 +26,15 @@ export default function AppLayout({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen">
       <aside className="border-border bg-muted/40 flex w-60 shrink-0 flex-col border-r px-3 py-4">
-        <Link href="/assistants" className="font-serif px-2 text-base font-semibold tracking-tight">
+        <Link href="/assistants" className="px-2 font-serif text-base font-semibold tracking-tight">
           Assistant Studio
         </Link>
         <nav className="mt-6 flex flex-col gap-1">
           <NavLink href="/assistants" active={pathname.startsWith("/assistants")}>
             Assistants
+          </NavLink>
+          <NavLink href="/members" active={pathname.startsWith("/members")}>
+            Members
           </NavLink>
         </nav>
         <div className="mt-auto flex flex-col gap-2">
@@ -47,8 +51,9 @@ export default function AppLayout({ children }: { children: ReactNode }) {
               ))}
             </Select>
           )}
+          <ThemeToggle />
           <div className="text-muted-foreground truncate px-2 text-xs">{user.email}</div>
-          <Button variant="outline" size="sm" onClick={logout}>
+          <Button variant="outline" size="sm" onClick={() => logout()}>
             Sign out
           </Button>
         </div>

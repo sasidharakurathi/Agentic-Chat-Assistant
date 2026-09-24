@@ -11,6 +11,7 @@ from app.graph.nodes import (
     GuardrailNode,
     InputNode,
     KnowledgeBaseNode,
+    MemoryNode,
     OutputNode,
     SubagentNode,
     SubagentNodeData,
@@ -44,6 +45,7 @@ def rich_graph() -> Graph:
             GuardrailNode(id="g"),
             AgentNode(id="a"),
             OutputNode(id="out"),
+            MemoryNode(id="mem"),
             KnowledgeBaseNode(id="kb"),
             DatabaseNode(id="db1", data=DatabaseNodeData(connection_id="conn-1")),
             DatabaseNode(
@@ -56,6 +58,7 @@ def rich_graph() -> Graph:
             Edge(source="in", target="g"),
             Edge(source="g", target="a"),
             Edge(source="a", target="out"),
+            Edge(source="mem", target="a"),
             Edge(source="kb", target="a"),
             Edge(source="db1", target="a"),
             Edge(source="db2", target="s1"),

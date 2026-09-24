@@ -8,26 +8,31 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import Field
+
+from app.schemas.common import ApiModel
 
 DiffOp = Literal["added", "removed", "changed"]
 
 _SENTINEL = object()
 
 
-class DiffEntry(BaseModel):
+class DiffEntry(ApiModel):
     path: str
     op: DiffOp
     before: Any = None
     after: Any = None
 
 
-class GraphDiff(BaseModel):
-    nodes_added: list[str] = []
-    nodes_removed: list[str] = []
-    nodes_changed: list[DiffEntry] = []
-    edges_added: list[tuple[str, str]] = []
-    edges_removed: list[tuple[str, str]] = []
+class GraphDiff(ApiModel):
+    nodes_added: list[str] = Field(default_factory=list)
+    nodes_removed: list[str] = Field(default_factory=list)
+    nodes_changed: list[DiffEntry] = Field(default_factory=list)
+    edges_added: list[tuple[str, str]] = Field(default_factory=list)
+    edges_removed: list[tuple[str, str]] = Field(default_factory=list)
+    #: id -> node type for every node mentioned above, so a UI can say
+    #: "database node added" rather than show a bare canvas id like "db".
+    node_types: dict[str, str] = Field(default_factory=dict)
 
 
 def diff_values(before: Any, after: Any, path: str = "") -> list[DiffEntry]:
@@ -72,6 +77,11 @@ def diff_graphs(before: dict[str, Any], after: dict[str, Any]) -> GraphDiff:
     a_edges = {(e["source"], e["target"]) for e in after.get("edges", [])}
     d.edges_added = sorted(a_edges - b_edges)
     d.edges_removed = sorted(b_edges - a_edges)
+    mentioned = {*d.nodes_added, *d.nodes_removed}
+    mentioned |= {e.path.split(".", 1)[0] for e in d.nodes_changed}
+    mentioned |= {nid for edge in (*d.edges_added, *d.edges_removed) for nid in edge}
+    both = {**b_nodes, **a_nodes}
+    d.node_types = {nid: str(both[nid].get("type")) for nid in sorted(mentioned) if nid in both}
     return d
 
 

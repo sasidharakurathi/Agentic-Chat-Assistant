@@ -37,6 +37,20 @@ def render_item(type_: str, obj: object, autogen_context: object) -> str | Liter
     return False
 
 
+def include_object(
+    obj: object, name: str | None, type_: str, reflected: bool, compare_to: object
+) -> bool:
+    """Leave dialect-specific indexes out of the comparison on other dialects.
+
+    An index tagged `info["only_on"]` (see `models/rag.py`) is never built on
+    SQLite, so without this autogenerate there would report it as missing
+    and try to add an HNSW index to a text column."""
+    info = getattr(obj, "info", None)
+    if type_ == "index" and isinstance(info, dict) and "only_on" in info:
+        return bool(info["only_on"] == context.get_context().dialect.name)
+    return True
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=settings.database_url,
@@ -45,6 +59,7 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
         render_as_batch=_is_sqlite(),
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -57,6 +72,7 @@ def do_run_migrations(connection: Connection) -> None:
         compare_type=True,
         render_as_batch=_is_sqlite(),
         render_item=render_item,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()

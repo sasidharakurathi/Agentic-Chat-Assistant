@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import BadRequest, Conflict, Forbidden, NotFound
 from app.config import settings
+from app.db.pagination import PageResult, keyset_page
 from app.models.audit_log import AuditLog
 from app.models.enums import MemberRole
 from app.models.invite import Invite
@@ -28,14 +29,19 @@ def _hash_token(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-async def list_for_user(session: AsyncSession, user_id: uuid.UUID) -> list[Organization]:
-    rows = await session.scalars(
+async def list_for_user(
+    session: AsyncSession, user_id: uuid.UUID, *, limit: int = 50, cursor: str | None = None
+) -> PageResult[Organization]:
+    return await keyset_page(
+        session,
         select(Organization)
         .join(Membership, Membership.org_id == Organization.id)
-        .where(Membership.user_id == user_id)
-        .order_by(Organization.created_at)
+        .where(Membership.user_id == user_id),
+        [Organization.created_at, Organization.id],
+        limit=limit,
+        cursor=cursor,
+        descending=False,
     )
-    return list(rows)
 
 
 async def create(
@@ -61,14 +67,48 @@ async def create(
     return org
 
 
-async def list_members(session: AsyncSession, org_id: uuid.UUID) -> list[tuple[User, Membership]]:
-    rows = await session.execute(
+async def list_members(
+    session: AsyncSession, org_id: uuid.UUID, *, limit: int = 50, cursor: str | None = None
+) -> PageResult[tuple[User, Membership]]:
+    return await keyset_page(
+        session,
         select(User, Membership)
         .join(Membership, Membership.user_id == User.id)
-        .where(Membership.org_id == org_id)
-        .order_by(Membership.created_at)
+        .where(Membership.org_id == org_id),
+        [Membership.created_at, Membership.id],
+        limit=limit,
+        cursor=cursor,
+        descending=False,
+        entities=2,
     )
-    return [(u, m) for u, m in rows.all()]
+
+
+def _authorise_role_change(
+    actor: MemberRole, current: MemberRole, new: MemberRole, *, is_self: bool
+) -> None:
+    """Who may move whom, where.
+
+    The route only asked "is the actor at least an admin?", which let an admin
+    promote *themselves* to owner and then demote the founding owner — a full
+    takeover in two 200s. That needs both sides of the change, so it lives
+    here rather than in a route dependency:
+
+    - anyone may lower (or keep) their own role;
+    - owners may make any change (the last-owner rule still applies after);
+    - otherwise you cannot grant above your own rank, and cannot change
+      someone ranked at or above you — so one admin cannot strip the rest.
+    """
+    if is_self and new.rank <= current.rank:
+        return
+    if actor is MemberRole.owner:
+        return
+    if new.rank > actor.rank:
+        raise Forbidden("You cannot grant a role above your own", code="role_change_not_allowed")
+    if current.rank >= actor.rank:
+        raise Forbidden(
+            "You cannot change the role of someone at or above your own rank",
+            code="role_change_not_allowed",
+        )
 
 
 async def change_role(
@@ -85,6 +125,14 @@ async def change_role(
     )
     if membership is None:
         raise NotFound("That user is not a member of this org")
+    actor = await session.scalar(
+        select(Membership).where(Membership.org_id == org_id, Membership.user_id == actor_user_id)
+    )
+    if actor is None:
+        raise Forbidden("You are not a member of this org")
+    _authorise_role_change(
+        actor.role, membership.role, new_role, is_self=actor_user_id == target_user_id
+    )
 
     # Don't allow removing the last owner.
     if membership.role is MemberRole.owner and new_role is not MemberRole.owner:
@@ -140,18 +188,31 @@ async def create_invite(
         expires_at=datetime.now(UTC) + INVITE_TTL,
     )
     session.add(invite)
+    # Flushed first so the audit entry names the invite itself; it used to
+    # record the placeholder "(pending)", which matched nothing.
+    await session.flush()
     await audit.record(
         session,
         action="org.invite.create",
         org_id=org_id,
         actor_user_id=actor_user_id,
         target_type="invite",
-        target_id="(pending)",
+        target_id=invite.id,
         meta={"email": email, "role": role.value},
         ip=ip,
     )
-    await session.flush()
+    # Committed before the link is handed out: an invitee clicking it at once
+    # must not race the request teardown's commit.
+    await session.commit()
     return invite, raw
+
+
+async def preview_invite(session: AsyncSession, *, raw_token: str) -> tuple[Invite, Organization]:
+    invite = await session.scalar(select(Invite).where(Invite.token_hash == _hash_token(raw_token)))
+    org = await session.get(Organization, invite.org_id) if invite is not None else None
+    if invite is None or org is None:
+        raise NotFound("Invite not found")
+    return invite, org
 
 
 async def accept_invite(
@@ -170,7 +231,7 @@ async def accept_invite(
     )
     if existing is not None:
         invite.accepted_at = datetime.now(UTC)
-        await session.flush()
+        await session.commit()
         return existing
 
     membership = Membership(org_id=invite.org_id, user_id=user.id, role=invite.role)
@@ -185,21 +246,25 @@ async def accept_invite(
         target_id=user.id,
         ip=ip,
     )
-    await session.flush()
+    # Explicit, like every other mutating service: the UI switches to the new
+    # org and lists it immediately, and the request's own commit only runs
+    # after the response has been sent.
+    await session.commit()
     return membership
 
 
 async def list_audit(
-    session: AsyncSession, *, org_id: uuid.UUID, limit: int = 100, offset: int = 0
-) -> list[AuditLog]:
-    rows = await session.scalars(
-        select(AuditLog)
-        .where(AuditLog.org_id == org_id)
-        .order_by(AuditLog.created_at.desc())
-        .limit(min(limit, 500))
-        .offset(offset)
+    session: AsyncSession, *, org_id: uuid.UUID, limit: int = 50, cursor: str | None = None
+) -> PageResult[AuditLog]:
+    # This was the one list with pagination, by OFFSET, which on an
+    # append-only log shifts under the reader with every new entry.
+    return await keyset_page(
+        session,
+        select(AuditLog).where(AuditLog.org_id == org_id),
+        [AuditLog.created_at, AuditLog.id],
+        limit=limit,
+        cursor=cursor,
     )
-    return list(rows)
 
 
 def invite_accept_url(raw_token: str) -> str:
@@ -215,4 +280,5 @@ __all__ = [
     "list_audit",
     "list_for_user",
     "list_members",
+    "preview_invite",
 ]

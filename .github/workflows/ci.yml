@@ -23,9 +23,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install
+        # CPU-only torch, as in docker/api.Dockerfile: the default wheel pulls
+        # the multi-GB CUDA build that nothing here uses.
         run: |
           python -m pip install -U pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,observability]" --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Ruff (lint + format)
         run: |
@@ -35,6 +37,8 @@ jobs:
       - name: Mypy
         run: mypy app scripts
 
+      # Includes the contract tests: `alembic check` against a migrated SQLite
+      # database, and the OpenAPI snapshot the web app's types come from.
       - name: Pytest
         env:
           APP_ENV: test
@@ -42,10 +46,12 @@ jobs:
           DATABASE_URL: sqlite+aiosqlite:///./ci.db
         run: pytest -q -m "not integration"
 
+      # No `|| true`: an advisory against a dependency fails the build. It
+      # used to be informational, so a critical CVE never turned CI red.
       - name: pip-audit
         run: |
           pip install pip-audit
-          pip-audit || true
+          pip-audit --progress-spinner off
 
   web:
     runs-on: ubuntu-latest
@@ -59,11 +65,26 @@ jobs:
 
       - run: npm ci
 
+      # packages/shared was never installed, linted or type-checked by any
+      # runner. It now holds the generated API types, so it is checked first:
+      # the types must match the committed schema, and compile.
+      - name: Shared types are up to date
+        run: npm run gen:check -w @assistant-studio/shared
+
+      - name: Shared typecheck
+        run: npm run typecheck -w @assistant-studio/shared
+
       - name: Typecheck
         run: npm run typecheck -w web
 
       - name: Lint
         run: npm run lint -w web
+
+      - name: Unit tests
+        run: npm run test -w web
+
+      - name: Formatting
+        run: npm run format:check
 
       - name: Build
         run: npm run build -w web
@@ -71,4 +92,62 @@ jobs:
           NEXT_TELEMETRY_DISABLED: "1"
 
       - name: npm audit (high)
-        run: npm audit --audit-level=high || true
+        run: npm audit --audit-level=high
+
+  # The images were never built by anything, so a broken Dockerfile could sit
+  # undetected until someone tried to deploy. Build both, then prove each one
+  # actually starts: build success alone says nothing about the entrypoint.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/web.Dockerfile
+          tags: assistant-studio-web:ci
+          load: true
+          push: false
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/api.Dockerfile
+          tags: assistant-studio-api:ci
+          load: true
+          push: false
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Smoke-test the web image
+        run: |
+          docker run -d --name web -p 3000:3000 assistant-studio-web:ci
+          for i in $(seq 1 30); do
+            curl -fsS -o /dev/null http://localhost:3000/login && exit 0
+            sleep 1
+          done
+          docker logs web
+          exit 1
+
+      # Liveness only, with no database or Redis: /healthz must come up on its
+      # own (the Redis listeners degrade to retrying, by design).
+      - name: Smoke-test the API image
+        run: |
+          docker run -d --name api -p 8000:8000 \
+            -e RUN_MIGRATIONS=0 \
+            -e JWT_SECRET=ci-secret-value-that-is-definitely-long-enough \
+            -e DATABASE_URL=sqlite+aiosqlite:////tmp/ci.db \
+            assistant-studio-api:ci
+          for i in $(seq 1 45); do
+            curl -fsS -o /dev/null http://localhost:8000/healthz && exit 0
+            sleep 2
+          done
+          docker logs api
+          exit 1

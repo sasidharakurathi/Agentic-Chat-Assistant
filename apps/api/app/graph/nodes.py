@@ -41,7 +41,7 @@ NodeType = Literal[
 
 
 class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", json_schema_serialization_defaults_required=True)
 
 
 class Position(_Strict):
@@ -61,7 +61,7 @@ class OutputNodeData(_Strict):
 
 
 class GuardrailNodeData(Guardrails):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", json_schema_serialization_defaults_required=True)
 
 
 class RouterNodeData(_Strict):
@@ -100,9 +100,13 @@ class McpServerNodeData(_Strict):
 
 
 class SubagentNodeData(_Strict):
+    """`model` and `max_turns` override the assistant's subagent model role
+    (`models.subagent`); None keeps it. They used to be accepted and then
+    dropped by compile."""
+
     role: SubagentRole
     model: ModelSpec | None = None
-    max_turns: int = Field(default=8, ge=1, le=100)
+    max_turns: int | None = Field(default=None, ge=1, le=100)
 
 
 class AgentNodeData(_Strict):
@@ -112,7 +116,7 @@ class AgentNodeData(_Strict):
 
 
 class MemoryNodeData(MemoryConfig):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", json_schema_serialization_defaults_required=True)
 
 
 # ── Node wrappers (discriminated on ``type``) ────────────────

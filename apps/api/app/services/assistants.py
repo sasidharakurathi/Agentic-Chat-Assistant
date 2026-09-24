@@ -5,24 +5,36 @@ from __future__ import annotations
 import secrets
 import uuid
 
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent import session_store
 from app.api.errors import BadRequest, NotFound
+from app.db.pagination import PageResult, keyset_page
 from app.graph.compile import compile_graph
 from app.graph.nodes import Graph
 from app.graph.project import project_config
 from app.graph.validate import ValidationResult, validate_graph
+from app.logging import get_logger
 from app.models.assistant import Assistant, AssistantStatus, AssistantVersion
+from app.models.conversation import Conversation
+from app.models.integration import DbConnection
+from app.models.rag import DataSource
+from app.models.secret import Secret
 from app.schemas.assistant import (
     DraftConfigSaveResult,
     DraftGraphSaveResult,
     VersionDiff,
 )
 from app.schemas.assistant_config import AssistantConfig, default_config
-from app.services import audit
+from app.services import audit, chat
 from app.services.diff import diff_graphs, diff_values
+from app.services.graph_refs import reference_issues
 from app.services.slug import slugify
+from app.storage.s3 import delete_object
+
+log = get_logger(__name__)
 
 # ── helpers ──────────────────────────────────────────────────
 
@@ -53,7 +65,22 @@ def load_graph(assistant: Assistant) -> Graph:
 
 
 def draft_validation(assistant: Assistant) -> ValidationResult:
+    """Structural checks only (pure). See `full_validation` for references."""
     return validate_graph(load_graph(assistant))
+
+
+async def full_validation(
+    session: AsyncSession, assistant: Assistant, graph: Graph | None = None
+) -> ValidationResult:
+    """Structure *and* references. The structural validator is pure and cannot
+    see whether a node's connection or data source actually exists, belongs
+    to this assistant, or allows what the node asks of it; this adds that."""
+    graph = graph if graph is not None else load_graph(assistant)
+    structural = validate_graph(graph)
+    references = await reference_issues(session, assistant.id, graph)
+    return ValidationResult(
+        errors=[*structural.errors, *references], warnings=list(structural.warnings)
+    )
 
 
 # ── CRUD ─────────────────────────────────────────────────────
@@ -104,11 +131,20 @@ async def get(session: AsyncSession, *, org_id: uuid.UUID, assistant_id: uuid.UU
     return assistant
 
 
-async def list_for_org(session: AsyncSession, org_id: uuid.UUID) -> list[Assistant]:
-    rows = await session.scalars(
-        select(Assistant).where(Assistant.org_id == org_id).order_by(Assistant.updated_at.desc())
+async def list_for_org(
+    session: AsyncSession, org_id: uuid.UUID, *, limit: int = 50, cursor: str | None = None
+) -> PageResult[Assistant]:
+    # Most recently edited first. `updated_at` is mutable, so an assistant
+    # edited while someone pages through the list jumps to page 1 and can be
+    # missed on page 2. Accepted: it is back on top at the next refresh, and
+    # "recently worked on first" is what this list is for.
+    return await keyset_page(
+        session,
+        select(Assistant).where(Assistant.org_id == org_id),
+        [Assistant.updated_at, Assistant.id],
+        limit=limit,
+        cursor=cursor,
     )
-    return list(rows)
 
 
 async def update_meta(
@@ -138,6 +174,12 @@ async def update_meta(
         ip=ip,
     )
     await session.commit()
+    # `updated_at` is set by the database on UPDATE, so after the commit it is
+    # expired; reading it while building the response was a lazy load outside
+    # the async context (MissingGreenlet, a 500 on every rename). Postgres
+    # happens to return it with the UPDATE, which is why the dev stack never
+    # showed it; nothing tested a rename before the role matrix did.
+    await session.refresh(assistant)
     return assistant
 
 
@@ -148,11 +190,13 @@ async def save_draft_graph(
     session: AsyncSession, assistant: Assistant, graph: Graph
 ) -> DraftGraphSaveResult:
     assistant.draft_graph = _dump(graph)
-    validation = validate_graph(graph)
     config: AssistantConfig | None = None
-    if validation.ok:
+    # Compile on *structure* alone: a bad reference must not freeze the draft
+    # config (and with it the panels) — it only has to block publishing.
+    if validate_graph(graph).ok:
         config = compile_graph(graph)
         assistant.draft_config = _dump(config)
+    validation = await full_validation(session, assistant, graph)
     await session.flush()
     await session.commit()
     return DraftGraphSaveResult(graph=graph, validation=validation, config=config)
@@ -170,8 +214,9 @@ async def save_draft_config(
     assistant.draft_config = _dump(config)
     assistant.draft_graph = _dump(graph)
     await session.flush()
+    validation = await full_validation(session, assistant, graph)
     await session.commit()
-    return DraftConfigSaveResult(config=config, graph=graph)
+    return DraftConfigSaveResult(config=config, graph=graph, validation=validation)
 
 
 # ── publish / versions ───────────────────────────────────────
@@ -186,7 +231,7 @@ async def publish(
     ip: str | None = None,
 ) -> AssistantVersion:
     graph = load_graph(assistant)
-    validation = validate_graph(graph)
+    validation = await full_validation(session, assistant, graph)
     if not validation.ok:
         raise BadRequest(
             "The draft graph has validation errors; fix them before publishing",
@@ -229,13 +274,17 @@ async def publish(
     return version
 
 
-async def list_versions(session: AsyncSession, assistant_id: uuid.UUID) -> list[AssistantVersion]:
-    rows = await session.scalars(
-        select(AssistantVersion)
-        .where(AssistantVersion.assistant_id == assistant_id)
-        .order_by(AssistantVersion.version_number.desc())
+async def list_versions(
+    session: AsyncSession, assistant_id: uuid.UUID, *, limit: int = 50, cursor: str | None = None
+) -> PageResult[AssistantVersion]:
+    # version_number is unique per assistant, so it is a total order alone.
+    return await keyset_page(
+        session,
+        select(AssistantVersion).where(AssistantVersion.assistant_id == assistant_id),
+        [AssistantVersion.version_number],
+        limit=limit,
+        cursor=cursor,
     )
-    return list(rows)
 
 
 async def get_version(
@@ -265,10 +314,89 @@ async def diff_versions(
     )
 
 
+async def delete(
+    session: AsyncSession,
+    assistant: Assistant,
+    *,
+    actor_user_id: uuid.UUID,
+    ip: str | None = None,
+) -> None:
+    """Delete an assistant and everything it owns (task 1.2 / plan §10).
+
+    The database cascade takes versions, conversations (with their messages,
+    runs and approvals), data sources, documents, chunks and connections.
+    Three things it cannot reach are handled here:
+
+    - **sealed credentials** — `db_connections -> secrets` is SET NULL the
+      other way round, so the cascade alone would orphan every ciphertext.
+      Deleted in the same commit.
+    - **uploaded files, session cache, scratch dirs** — outside Postgres.
+      Removed *after* the commit, best-effort: a storage outage then leaves
+      an orphaned file (logged), never rows pointing at deleted files.
+
+    Usage history deliberately survives, with the assistant reference nulled.
+    """
+    assistant_id = assistant.id
+    connections = (
+        await session.scalars(select(DbConnection).where(DbConnection.assistant_id == assistant_id))
+    ).all()
+    secret_ids = [
+        ref for c in connections for ref in (c.secret_ref, c.uri_secret_ref) if ref is not None
+    ]
+    object_keys = [
+        key
+        for key in (
+            await session.scalars(
+                select(DataSource.object_key).where(DataSource.assistant_id == assistant_id)
+            )
+        ).all()
+        if key
+    ]
+    conversation_ids = list(
+        (
+            await session.scalars(
+                select(Conversation.id).where(Conversation.assistant_id == assistant_id)
+            )
+        ).all()
+    )
+
+    await audit.record(
+        session,
+        action="assistant.delete",
+        org_id=assistant.org_id,
+        actor_user_id=actor_user_id,
+        target_type="assistant",
+        target_id=assistant_id,
+        meta={
+            "name": assistant.name,
+            "connections": len(connections),
+            "files": len(object_keys),
+            "conversations": len(conversation_ids),
+        },
+        ip=ip,
+    )
+    await session.delete(assistant)
+    await session.flush()
+    if secret_ids:
+        await session.execute(sa_delete(Secret).where(Secret.id.in_(secret_ids)))
+    await session.commit()
+
+    for key in object_keys:
+        try:
+            await delete_object(key)
+        except Exception as exc:
+            log.warning("assistant_delete_object_failed", key=key, error=str(exc)[:200])
+    for conversation_id in conversation_ids:
+        await session_store.delete(conversation_id)
+        chat.discard_scratch(conversation_id)
+
+
 __all__ = [
     "create",
+    "delete",
     "diff_versions",
     "draft_validation",
+    "full_validation",
     "get",
     "get_version",
     "list_for_org",

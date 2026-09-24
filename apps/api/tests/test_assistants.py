@@ -25,7 +25,7 @@ async def test_create_lists_and_gets_assistant(
     }
 
     listing = await client.get("/api/v1/assistants", headers=org_headers)
-    assert [a["slug"] for a in listing.json()] == ["support-bot"]
+    assert [a["slug"] for a in listing.json()["items"]] == ["support-bot"]
 
     got = await client.get(f"/api/v1/assistants/{body['id']}", headers=org_headers)
     assert got.status_code == 200
@@ -96,7 +96,7 @@ async def test_publish_rejects_invalid_then_versions_and_diffs(
     assert v2.json()["version_number"] == 2
 
     versions = await client.get(f"/api/v1/assistants/{aid}/versions", headers=org_headers)
-    assert [v["version_number"] for v in versions.json()] == [2, 1]
+    assert [v["version_number"] for v in versions.json()["items"]] == [2, 1]
 
     diff = await client.get(f"/api/v1/assistants/{aid}/versions/diff?a=1&b=2", headers=org_headers)
     assert diff.status_code == 200
@@ -129,3 +129,29 @@ async def test_cross_tenant_assistant_is_404(client: AsyncClient) -> None:
     # bob uses his own org header but alice's assistant id
     resp = await client.get(f"/api/v1/assistants/{a['id']}", headers=bob)
     assert resp.status_code == 404
+
+
+async def test_the_graph_diff_names_node_types(
+    client: AsyncClient, org_headers: dict[str, str]
+) -> None:
+    """A version diff that says `db` was added is unreadable; it must say what
+    kind of node that is. Ids are the canvas's own, so they survive publishes."""
+    a = (await client.post("/api/v1/assistants", json={"name": "D"}, headers=org_headers)).json()
+    aid = a["id"]
+    await client.post(
+        f"/api/v1/assistants/{aid}/versions", json={"note": "v1"}, headers=org_headers
+    )
+    cfg = a["draft_config"]
+    cfg["tools"]["calculator"] = {"enabled": True}
+    await client.put(f"/api/v1/assistants/{aid}/draft-config", json=cfg, headers=org_headers)
+    await client.post(
+        f"/api/v1/assistants/{aid}/versions", json={"note": "v2"}, headers=org_headers
+    )
+
+    diff = (
+        await client.get(f"/api/v1/assistants/{aid}/versions/diff?a=1&b=2", headers=org_headers)
+    ).json()["graph_diff"]
+    (added,) = diff["nodes_added"]
+    assert diff["node_types"][added] == "tool"
+    assert [added, "agent"] in diff["edges_added"]
+    assert diff["node_types"]["agent"] == "agent"

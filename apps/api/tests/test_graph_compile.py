@@ -25,11 +25,8 @@ def test_compile_rich_graph_projects_wired_nodes() -> None:
     assert c.subagents.retrieval is False
 
 
-def test_compile_is_deterministic() -> None:
-    g = rich_graph()
-    a = compile_graph(g).model_dump()
-    b = compile_graph(g).model_dump()
-    assert a == b
+# Determinism is tested for real in test_graph_properties.py: this test
+# compiled the *same object* twice, so it could never detect order dependence.
 
 
 def test_compile_rejects_invalid_graph() -> None:

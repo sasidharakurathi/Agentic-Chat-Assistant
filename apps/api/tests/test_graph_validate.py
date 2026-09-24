@@ -83,3 +83,46 @@ def test_duplicate_capability_ref_is_error() -> None:
     g.edges.append(Edge(source="db1", target="a"))
     g.edges.append(Edge(source="db2", target="a"))
     assert any(e.code == "duplicate_ref" for e in validate_graph(g).errors)
+
+
+# ── knowledge base singleton (task 2.13) ─────────────────────
+
+
+def test_a_second_knowledge_base_is_an_error_not_a_silent_no_op() -> None:
+    """compile_graph takes kb_nodes[0], so a second knowledge base's settings
+    would be dead config the user believes is live. Unreachable before 2.13
+    made these nodes creatable from the canvas."""
+    from app.graph.nodes import KnowledgeBaseNode
+
+    g = minimal_graph()
+    g.nodes.extend([KnowledgeBaseNode(id="kb1"), KnowledgeBaseNode(id="kb2")])
+    g.edges.extend([Edge(source="kb1", target="a"), Edge(source="kb2", target="a")])
+
+    res = validate_graph(g)
+    assert not res.ok
+    codes = [e.code for e in res.errors]
+    assert codes == ["duplicate_knowledge_base"]
+    # The *extra* node is flagged, not the one that actually takes effect.
+    assert [e.node_id for e in res.errors] == ["kb2"]
+
+
+def test_one_knowledge_base_is_still_fine() -> None:
+    from app.graph.nodes import KnowledgeBaseNode
+
+    g = minimal_graph()
+    g.nodes.append(KnowledgeBaseNode(id="kb1"))
+    g.edges.append(Edge(source="kb1", target="a"))
+    assert validate_graph(g).ok
+
+
+def test_data_source_must_go_through_a_knowledge_base() -> None:
+    """The edge allow-list the canvas now serves to the frontend: a data
+    source wired straight at the agent is illegal."""
+    from app.graph.nodes import DataSourceNode, DataSourceNodeData
+
+    g = minimal_graph()
+    g.nodes.append(DataSourceNode(id="ds1", data=DataSourceNodeData(data_source_id="abc")))
+    g.edges.append(Edge(source="ds1", target="a"))
+    res = validate_graph(g)
+    assert not res.ok
+    assert [e.code for e in res.errors] == ["illegal_edge"]

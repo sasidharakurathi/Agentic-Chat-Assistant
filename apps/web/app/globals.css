@@ -18,6 +18,16 @@
   --radius: 0.75rem;
   --shadow-color: oklch(0.2 0.01 0 / 0.08);
 
+  /* Form fields sit on a faint fill with a soft edge, rather than being a
+     hard grey outline on the page; the edge firms up on hover, and focus
+     is the primary colour with a soft halo. */
+  --field: oklch(0.985 0.002 0);
+  --field-border: oklch(0.885 0.004 0);
+  --field-border-hover: oklch(0.8 0.006 0);
+  /* Thin, low-contrast scrollbars: present when needed, never the loudest
+     thing on screen. */
+  --scrollbar-thumb: oklch(0.2 0.004 0 / 0.2);
+
   /* Categorical accent scale for canvas node types — one family, 8 hues
      evenly rotated 45° apart from the primary (tomato, 29°) around the
      wheel, all held at matched lightness/chroma so they read as a
@@ -25,6 +35,9 @@
   --node-agent: var(--primary);
   --node-guardrail: oklch(0.72 0.15 80);
   --node-kb: oklch(0.65 0.14 140);
+  /* Sits between kb (140) and tool (190) on purpose: a data source feeds the
+     knowledge base, so reading as its close relative is the right signal. */
+  --node-datasource: oklch(0.65 0.13 165);
   --node-tool: oklch(0.65 0.12 190);
   --node-database: oklch(0.6 0.14 240);
   --node-memory: oklch(0.6 0.15 275);
@@ -47,9 +60,15 @@
   --ring: oklch(0.68 0.19 29);
   --shadow-color: oklch(0 0 0 / 0.3);
 
+  --field: oklch(0.2 0.004 0);
+  --field-border: oklch(0.27 0.004 0);
+  --field-border-hover: oklch(0.36 0.006 0);
+  --scrollbar-thumb: oklch(0.96 0.002 0 / 0.18);
+
   --node-agent: var(--primary);
   --node-guardrail: oklch(0.78 0.14 80);
   --node-kb: oklch(0.7 0.14 140);
+  --node-datasource: oklch(0.7 0.13 165);
   --node-tool: oklch(0.7 0.12 190);
   --node-database: oklch(0.68 0.14 240);
   --node-memory: oklch(0.68 0.15 275);
@@ -63,6 +82,9 @@
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
   --color-border: var(--border);
+  --color-field: var(--field);
+  --color-field-border: var(--field-border);
+  --color-field-border-hover: var(--field-border-hover);
   --color-card: var(--card);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
@@ -73,6 +95,7 @@
   --color-node-agent: var(--node-agent);
   --color-node-guardrail: var(--node-guardrail);
   --color-node-kb: var(--node-kb);
+  --color-node-datasource: var(--node-datasource);
   --color-node-tool: var(--node-tool);
   --color-node-database: var(--node-database);
   --color-node-memory: var(--node-memory);
@@ -85,16 +108,35 @@
   --font-serif: var(--font-source-serif), ui-serif, Georgia, serif;
 }
 
-* {
-  border-color: var(--color-border);
-}
+/* Global element defaults live in the base layer. Outside any layer they
+   outrank every Tailwind utility (unlayered CSS beats layered CSS), and the
+   `* { border-color }` rule did exactly that: no `border-*` colour class in
+   the app ever applied, so every border was the same flat grey. */
+@layer base {
+  * {
+    border-color: var(--color-border);
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
 
-body {
-  background-color: var(--color-background);
-  color: var(--color-foreground);
-  font-family: var(--font-sans);
-}
+  /* Browser autofill paints its own light fill over the field, which in dark
+     mode is a white box with dark text. Keep our colours instead. */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus {
+    -webkit-text-fill-color: var(--color-foreground);
+    caret-color: var(--color-foreground);
+    box-shadow: 0 0 0 1000px var(--color-field) inset;
+    transition: background-color 9999s ease-out;
+  }
 
-::selection {
-  background-color: color-mix(in oklch, var(--primary) 30%, transparent);
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+  }
+
+  ::selection {
+    background-color: color-mix(in oklch, var(--primary) 30%, transparent);
+  }
 }

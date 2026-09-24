@@ -11,9 +11,7 @@ export default function AuthLayout({ children }: { children: ReactNode }) {
     >
       <div className="w-full max-w-sm">
         <div className="mb-8 text-center">
-          <span className="font-serif text-xl font-semibold tracking-tight">
-            Assistant Studio
-          </span>
+          <span className="font-serif text-xl font-semibold tracking-tight">Assistant Studio</span>
         </div>
         {children}
       </div>

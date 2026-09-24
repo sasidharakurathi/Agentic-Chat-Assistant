@@ -20,6 +20,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
+from mcp.types import ToolAnnotations
+
+from app.agent.post_tool import run_capability
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -33,6 +36,8 @@ class CapabilityTool:
     input_schema: dict[str, Any]
     handler: ToolHandler
     read_only: bool = True
+    #: Reaches beyond systems this deployment controls (the public web).
+    open_world: bool = False
 
     @property
     def qualified_name(self) -> str:
@@ -41,6 +46,17 @@ class CapabilityTool:
 
 def _text(s: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": s}]}
+
+
+def _err(s: str) -> dict[str, Any]:
+    """A refusal or failure, not an answer.
+
+    The `is_error` flag is what turns a tool result red in the UI and tells
+    the model it did not get what it asked for. Without it a guard's
+    "blocked: ..." string is delivered as a perfectly successful call, which
+    reads to a user as though the query ran.
+    """
+    return {"content": [{"type": "text", "text": s}], "is_error": True}
 
 
 # ── calculator ───────────────────────────────────────────────
@@ -79,11 +95,11 @@ def _safe_eval(node: ast.AST) -> float:
 async def _calculator(args: dict[str, Any]) -> dict[str, Any]:
     expr = str(args.get("expression", "")).strip()
     if not expr:
-        return _text("error: empty expression")
+        return _err("error: empty expression")
     try:
         result = _safe_eval(ast.parse(expr, mode="eval"))
     except (ValueError, SyntaxError, ZeroDivisionError, OverflowError) as exc:
-        return _text(f"error: {exc}")
+        return _err(f"error: {exc}")
     return _text(f"{expr} = {result}")
 
 
@@ -106,7 +122,7 @@ async def _datetime(args: dict[str, Any]) -> dict[str, Any]:
     try:
         tz = ZoneInfo(str(tz_name))
     except (ZoneInfoNotFoundError, ValueError):
-        return _text(f"error: unknown timezone {tz_name!r}")
+        return _err(f"error: unknown timezone {tz_name!r}")
     return _text(f"{tz_name}: {now_utc.astimezone(tz).isoformat()}")
 
 
@@ -121,15 +137,38 @@ DATETIME = CapabilityTool(
 ALL_CAPS: dict[str, CapabilityTool] = {t.name: t for t in (CALCULATOR, DATETIME)}
 
 
+def annotations_for(t: CapabilityTool) -> ToolAnnotations:
+    """MCP tool annotations (plan §4.3): what a tool may do, stated to the
+    model and the SDK instead of left for them to guess from the name.
+
+    `read_only` was already declared on every capability and then dropped on
+    the way into the SDK. A tool that can write (`sql_query`) is flagged
+    destructive; nothing here is idempotent unless it is read-only.
+    """
+    return ToolAnnotations(
+        read_only_hint=t.read_only,
+        destructive_hint=not t.read_only,
+        idempotent_hint=t.read_only,
+        open_world_hint=t.open_world,
+    )
+
+
 def build_caps_server(tools: list[CapabilityTool]) -> McpSdkServerConfig:
     """Wrap capability tools as a claude_agent_sdk in-process MCP server."""
-    sdk_tools = [tool(t.name, t.description, t.input_schema)(_wrap(t.handler)) for t in tools]
+    sdk_tools = [
+        tool(t.name, t.description, t.input_schema, annotations=annotations_for(t))(
+            _wrap(t.handler)
+        )
+        for t in tools
+    ]
     return create_sdk_mcp_server(name=CAPS_SERVER_NAME, version="0.1.0", tools=sdk_tools)
 
 
 def _wrap(handler: ToolHandler) -> ToolHandler:
     async def _inner(args: dict[str, Any]) -> dict[str, Any]:
-        return await handler(args)
+        # Every capability result is size-capped and secret-stripped on its
+        # way to the model (app/agent/post_tool.py).
+        return await run_capability(handler, args)
 
     return _inner
 
@@ -140,5 +179,6 @@ __all__ = [
     "CAPS_SERVER_NAME",
     "DATETIME",
     "CapabilityTool",
+    "annotations_for",
     "build_caps_server",
 ]

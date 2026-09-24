@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
     ActiveMembership,
@@ -10,12 +11,13 @@ from app.api.deps import (
     AssistantCtx,
     ClientIP,
     EditableAssistantCtx,
+    PageQuery,
     SessionDep,
 )
 from app.api.errors import BadRequest
 from app.graph.compile import GraphCompileError, compile_graph
 from app.graph.nodes import Graph
-from app.graph.validate import ValidationResult, validate_graph
+from app.graph.validate import ValidationResult
 from app.schemas.assistant import (
     AssistantCreate,
     AssistantDetail,
@@ -30,28 +32,36 @@ from app.schemas.assistant import (
     VersionSummary,
 )
 from app.schemas.assistant_config import AssistantConfig
+from app.schemas.common import Message, Page
 from app.services import assistants as svc
 
 router = APIRouter(prefix="/assistants", tags=["assistants"])
 
 
-def _detail(ctx: AssistantContext) -> AssistantDetail:
+async def _detail(ctx: AssistantContext, session: AsyncSession) -> AssistantDetail:
     a = ctx.assistant
     return AssistantDetail(
         **AssistantSummary.model_validate(a).model_dump(),
         draft_graph=svc.load_graph(a),
         draft_config=svc.load_config(a),
-        draft_validation=svc.draft_validation(a),
+        # With references, so an error survives a page reload rather than
+        # only appearing in the save response.
+        draft_validation=await svc.full_validation(session, a),
     )
 
 
 # ── collection ───────────────────────────────────────────────
 
 
-@router.get("", response_model=list[AssistantSummary])
-async def list_assistants(session: SessionDep, m: ActiveMembership) -> list[AssistantSummary]:
-    rows = await svc.list_for_org(session, m.org_id)
-    return [AssistantSummary.model_validate(a) for a in rows]
+@router.get("", response_model=Page[AssistantSummary])
+async def list_assistants(
+    session: SessionDep, m: ActiveMembership, page: PageQuery
+) -> Page[AssistantSummary]:
+    rows = await svc.list_for_org(session, m.org_id, limit=page.limit, cursor=page.cursor)
+    return Page(
+        items=[AssistantSummary.model_validate(a) for a in rows.items],
+        next_cursor=rows.next_cursor,
+    )
 
 
 @router.post("", response_model=AssistantDetail, status_code=status.HTTP_201_CREATED)
@@ -66,15 +76,15 @@ async def create_assistant(
         description=body.description,
         ip=ip,
     )
-    return _detail(AssistantContext(assistant=a, membership=m))
+    return await _detail(AssistantContext(assistant=a, membership=m), session)
 
 
 # ── single ───────────────────────────────────────────────────
 
 
 @router.get("/{assistant_id}", response_model=AssistantDetail)
-async def get_assistant(ctx: AssistantCtx) -> AssistantDetail:
-    return _detail(ctx)
+async def get_assistant(ctx: AssistantCtx, session: SessionDep) -> AssistantDetail:
+    return await _detail(ctx, session)
 
 
 @router.patch("/{assistant_id}", response_model=AssistantDetail)
@@ -90,10 +100,18 @@ async def update_assistant(
         actor_id=ctx.membership.user_id,
         ip=ip,
     )
-    return _detail(ctx)
+    return await _detail(ctx, session)
 
 
 # ── draft graph / config ─────────────────────────────────────
+
+
+@router.delete("/{assistant_id}", response_model=Message)
+async def delete_assistant(ctx: EditableAssistantCtx, session: SessionDep, ip: ClientIP) -> Message:
+    """Delete an assistant and everything it owns. Same rule as editing it:
+    its creator, or an admin."""
+    await svc.delete(session, ctx.assistant, actor_user_id=ctx.membership.user_id, ip=ip)
+    return Message(message="deleted")
 
 
 @router.get("/{assistant_id}/draft-graph", response_model=Graph)
@@ -119,8 +137,8 @@ async def put_draft_config(
 
 
 @router.post("/{assistant_id}/graph:validate", response_model=ValidationResult)
-async def dry_run_validate(body: Graph, ctx: AssistantCtx) -> ValidationResult:
-    return validate_graph(body)
+async def dry_run_validate(body: Graph, ctx: AssistantCtx, session: SessionDep) -> ValidationResult:
+    return await svc.full_validation(session, ctx.assistant, body)
 
 
 @router.post("/{assistant_id}/graph:compile", response_model=GraphCompileResult)
@@ -148,10 +166,15 @@ async def publish_version(
     return VersionDetail.model_validate(version)
 
 
-@router.get("/{assistant_id}/versions", response_model=list[VersionSummary])
-async def list_versions(ctx: AssistantCtx, session: SessionDep) -> list[VersionSummary]:
-    rows = await svc.list_versions(session, ctx.assistant.id)
-    return [VersionSummary.model_validate(v) for v in rows]
+@router.get("/{assistant_id}/versions", response_model=Page[VersionSummary])
+async def list_versions(
+    ctx: AssistantCtx, session: SessionDep, page: PageQuery
+) -> Page[VersionSummary]:
+    rows = await svc.list_versions(session, ctx.assistant.id, limit=page.limit, cursor=page.cursor)
+    return Page(
+        items=[VersionSummary.model_validate(v) for v in rows.items],
+        next_cursor=rows.next_cursor,
+    )
 
 
 @router.get("/{assistant_id}/versions/diff", response_model=VersionDiff)

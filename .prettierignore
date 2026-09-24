@@ -7,3 +7,5 @@ coverage/
 package-lock.json
 apps/api/
 docs/
+packages/shared/openapi.json
+packages/shared/src/api.gen.ts

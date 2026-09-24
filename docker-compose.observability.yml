@@ -1,12 +1,94 @@
-# Optional Langfuse stack for LLM tracing. Enable with:
-#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
-# Wired into the API from Phase 1 via LANGFUSE_* env vars.
+# Optional Langfuse stack for LLM tracing (task 1.9). Enable with:
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml --profile observability up -d
+#
+# Langfuse v3: the first major version with an OpenTelemetry ingestion
+# endpoint (/api/public/otel, from 3.22). v2, which this file used to pin,
+# could not receive the API's spans at all. v3 needs ClickHouse plus its own
+# Postgres, Redis and S3 bucket; they are separate services here so Langfuse
+# never shares state (or a Redis eviction policy) with the platform.
+#
+# The project and its API keys are created headlessly on first boot
+# (LANGFUSE_INIT_*), so the API can export at once with these .env values:
+#   LANGFUSE_HOST=http://localhost:3001
+#   LANGFUSE_PUBLIC_KEY=pk-lf-local-dev
+#   LANGFUSE_SECRET_KEY=sk-lf-local-dev
+# (From inside the `apps` profile containers the host is http://langfuse-web:3000.)
+# Local-only defaults: change every one before exposing this anywhere.
 
 name: assistant-studio
 
+x-langfuse-env: &langfuse-env
+  DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+  NEXTAUTH_URL: http://localhost:${LANGFUSE_PORT:-3001}
+  SALT: ${LANGFUSE_SALT:-dev-langfuse-salt-change-me}
+  # 64 hex chars (openssl rand -hex 32).
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+  TELEMETRY_ENABLED: "false"
+  CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+  CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: clickhouse
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  REDIS_HOST: langfuse-redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: langfuse-redis
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: langfuse-minio
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: langfuse-minio
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+
+x-langfuse-deps: &langfuse-deps
+  langfuse-db:
+    condition: service_healthy
+  langfuse-redis:
+    condition: service_healthy
+  langfuse-minio:
+    condition: service_healthy
+  langfuse-clickhouse:
+    condition: service_healthy
+
 services:
+  langfuse-web:
+    image: langfuse/langfuse:3
+    profiles: ["observability"]
+    depends_on: *langfuse-deps
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-dev-langfuse-secret-change-me}
+      LANGFUSE_INIT_ORG_ID: assistant-studio
+      LANGFUSE_INIT_ORG_NAME: Assistant Studio
+      LANGFUSE_INIT_PROJECT_ID: assistant-studio-dev
+      LANGFUSE_INIT_PROJECT_NAME: assistant-studio-dev
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PUBLIC_KEY:-pk-lf-local-dev}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_SECRET_KEY:-sk-lf-local-dev}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@example.com}
+      LANGFUSE_INIT_USER_NAME: admin
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-change-me-local-only}
+    ports:
+      - "${LANGFUSE_PORT:-3001}:3000"
+
+  # Turns ingested events into ClickHouse rows. Without it traces are
+  # accepted (207) but never appear in the UI.
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    profiles: ["observability"]
+    depends_on: *langfuse-deps
+    environment:
+      <<: *langfuse-env
+
   langfuse-db:
     image: postgres:16-alpine
+    profiles: ["observability"]
     environment:
       POSTGRES_USER: langfuse
       POSTGRES_PASSWORD: langfuse
@@ -19,19 +101,53 @@ services:
       timeout: 3s
       retries: 20
 
-  langfuse:
-    image: langfuse/langfuse:2
-    depends_on:
-      langfuse-db:
-        condition: service_healthy
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.3
+    profiles: ["observability"]
+    user: "101:101"
     environment:
-      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
-      NEXTAUTH_URL: http://localhost:3001
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-dev-langfuse-secret-change-me}
-      SALT: ${LANGFUSE_SALT:-dev-langfuse-salt-change-me}
-      TELEMETRY_ENABLED: "false"
-    ports:
-      - "${LANGFUSE_PORT:-3001}:3000"
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - langfuseclickhouse:/var/lib/clickhouse
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  langfuse-redis:
+    image: redis:7-alpine
+    profiles: ["observability"]
+    # noeviction: Langfuse keeps its ingestion queue here.
+    command: ["redis-server", "--requirepass", "langfuse-redis", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "langfuse-redis", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Chainguard's build, as Langfuse's own compose uses: MinIO no longer
+  # publishes community images to Docker Hub, so minio/minio cannot be pulled
+  # on a fresh machine.
+  langfuse-minio:
+    image: cgr.dev/chainguard/minio:latest
+    profiles: ["observability"]
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" /data'
+    environment:
+      MINIO_ROOT_USER: langfuse
+      MINIO_ROOT_PASSWORD: langfuse-minio
+    volumes:
+      - langfuseminio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
 volumes:
   langfusedbdata:
+  langfuseclickhouse:
+  langfuseminio:

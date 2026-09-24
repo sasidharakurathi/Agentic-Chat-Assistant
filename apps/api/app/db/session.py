@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from functools import lru_cache
+from typing import Any
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -26,7 +28,20 @@ def get_engine() -> AsyncEngine:
     if url.startswith("sqlite"):
         # SQLite: no pooling knobs; allow use across the asyncio loop's threads.
         kwargs.pop("pool_pre_ping", None)
-    return create_async_engine(url, **kwargs)
+    engine = create_async_engine(url, **kwargs)
+    if url.startswith("sqlite"):
+        # SQLite ignores foreign keys — including every ON DELETE rule —
+        # unless told otherwise, per connection. Without this the unit tier
+        # (which runs on SQLite) had never enforced a single FK or cascade, so
+        # a missing or wrong ON DELETE could not fail a test.
+        event.listen(engine.sync_engine, "connect", _sqlite_enforce_foreign_keys)
+    return engine
+
+
+def _sqlite_enforce_foreign_keys(dbapi_connection: Any, _record: Any) -> None:
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
 
 
 @lru_cache

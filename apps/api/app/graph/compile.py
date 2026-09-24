@@ -8,7 +8,7 @@ first if you want the warnings too).
 
 from __future__ import annotations
 
-from app.graph.nodes import DataSourceNode, Graph
+from app.graph.nodes import DataSourceNode, Graph, OutputNode
 from app.graph.validate import validate_graph
 from app.schemas.assistant_config import (
     AssistantConfig,
@@ -69,6 +69,26 @@ def _reaches(start: str, target: str, adj: dict[str, list[str]]) -> bool:
     return False
 
 
+def _subagents(
+    graph: Graph, agent_id: str, models: ModelRoles
+) -> tuple[SubagentsConfig, ModelRoles]:
+    """Which subagent roles are on, and the subagent model role with a node's
+    `model` / `max_turns` overrides applied (they used to be dropped)."""
+    sub = SubagentsConfig(retrieval=False, sql=False, research=False)
+    nodes = [n for n in graph.nodes if n.type == "subagent" and agent_id in graph.outgoers(n.id)]
+    for n in nodes:
+        setattr(sub, n.data.role, True)
+    # One subagent model role serves every subagent, so one node's overrides
+    # apply: the retrieval node's (the one the runtime builds), else the first.
+    lead = next((n for n in nodes if n.data.role == "retrieval"), None) or next(iter(nodes), None)
+    if lead is None or (lead.data.model is None and lead.data.max_turns is None):
+        return sub, models
+    spec = (lead.data.model or models.subagent).model_copy(deep=True)
+    if lead.data.max_turns is not None:
+        spec = spec.model_copy(update={"max_turns": lead.data.max_turns})
+    return sub, models.model_copy(update={"subagent": spec})
+
+
 def compile_graph(graph: Graph) -> AssistantConfig:
     result = validate_graph(graph)
     if not result.ok:
@@ -84,7 +104,9 @@ def compile_graph(graph: Graph) -> AssistantConfig:
 
     # ── models (agent node, router node overrides) ───────────
     models = agent_node.data.models.model_copy(deep=True)
-    router_nodes = [n for n in graph.nodes if n.type == "router"]
+    # Wired to the agent like every other capability. An unwired router used
+    # to rewrite models.router anyway, with no orphan warning to say so.
+    router_nodes = [n for n in graph.nodes if n.type == "router" and wired_to_agent(n.id)]
     if router_nodes:
         models = ModelRoles(
             router=router_nodes[0].data.model.model_copy(deep=True),
@@ -104,6 +126,12 @@ def compile_graph(graph: Graph) -> AssistantConfig:
     )
 
     # ── rag (knowledge_base node + feeding data_source nodes) ─
+    # The output node's `citations` is the answer-side switch: numbered
+    # citations are shown only if both it and the knowledge base allow them.
+    # It was written by the projection and read by nothing.
+    output_citations = next(
+        (n.data.citations for n in graph.nodes if isinstance(n, OutputNode)), True
+    )
     kb_nodes = [n for n in graph.nodes if n.type == "knowledge_base" and wired_to_agent(n.id)]
     if kb_nodes:
         kb = kb_nodes[0]
@@ -119,11 +147,11 @@ def compile_graph(graph: Graph) -> AssistantConfig:
             chunking=kb.data.chunking.model_copy(deep=True),
             contextual_retrieval=kb.data.contextual_retrieval,
             retrieval=kb.data.retrieval.model_copy(deep=True),
-            citations=kb.data.citations,
+            citations=kb.data.citations and output_citations,
             source_ids=source_ids,
         )
     else:
-        rag = RagConfig()
+        rag = RagConfig(citations=output_citations)
 
     # ── databases ────────────────────────────────────────────
     databases = sorted(
@@ -169,10 +197,7 @@ def compile_graph(graph: Graph) -> AssistantConfig:
     )
 
     # ── subagents ────────────────────────────────────────────
-    sub = SubagentsConfig(retrieval=False, sql=False, research=False)
-    for n in graph.nodes:
-        if n.type == "subagent" and agent_id in graph.outgoers(n.id):
-            setattr(sub, n.data.role, True)
+    sub, models = _subagents(graph, agent_id, models)
 
     return AssistantConfig(
         models=models,

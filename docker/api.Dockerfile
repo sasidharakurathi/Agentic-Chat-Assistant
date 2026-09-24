@@ -13,7 +13,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 WORKDIR /build
 COPY apps/api/pyproject.toml apps/api/README.md ./apps/api/
 COPY apps/api/app ./apps/api/app
-RUN pip install ./apps/api
+# --extra-index-url pulls the CPU-only torch wheel (sentence-transformers
+# dependency) instead of the much larger default CUDA build.
+RUN pip install "./apps/api[observability]" --extra-index-url https://download.pytorch.org/whl/cpu
 
 # ── runtime ──────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
@@ -22,12 +24,11 @@ ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Node + the Claude Code CLI back the Anthropic Agent SDK (used from Phase 1).
-# Pin the CLI version when Phase 1 wires the SDK in.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm curl \
-    && rm -rf /var/lib/apt/lists/*
-
+# No Node.js: claude-agent-sdk ships the Claude Code CLI inside the wheel, as
+# a self-contained native binary (claude_agent_sdk/_bundled/claude), and it is
+# pinned by the SDK's own version in pyproject.toml. This image used to apt-get
+# nodejs, npm and curl for a CLI it never used. Verified by running the bundled
+# binary with node off the PATH.
 RUN groupadd --system app && useradd --system --gid app --home /app app
 COPY --from=builder /opt/venv /opt/venv
 COPY --chown=app:app apps/api /app/apps/api

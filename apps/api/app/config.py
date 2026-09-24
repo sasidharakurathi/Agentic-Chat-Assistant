@@ -55,6 +55,10 @@ class Settings(BaseSettings):
 
     # ── Object storage ───────────────────────────────────────
     s3_endpoint: str = "http://localhost:9000"
+    # Where the *browser* can reach object storage, when that differs from
+    # where the API reaches it (inside Docker the API uses http://minio:9000,
+    # which no browser can resolve). Empty = same as s3_endpoint.
+    s3_public_endpoint: str = ""
     s3_region: str = "us-east-1"
     s3_bucket: str = "assistant-uploads"
     s3_access_key: str = "minioadmin"
@@ -64,10 +68,23 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     voyage_api_key: str = ""
     rag_offline: bool = False
+    #: Most that contextual retrieval may spend indexing one source. Over it
+    #: (by estimate, before anything is spent) the source is indexed without
+    #: context lines rather than not at all (plan §5.1 step 4).
+    ingest_context_budget_usd: float = 1.0
+    #: How long one ingestion job may run before the worker stops it.
+    ingest_job_timeout_s: int = 3600
 
     # ── Agent runtime ────────────────────────────────────────
     agent_max_concurrency: int = 8
+    #: How long a message waits for a free turn slot before getting "busy".
+    agent_queue_wait_s: float = 30.0
+    #: Per-request timeout the Claude CLI uses (its API_TIMEOUT_MS).
+    agent_api_timeout_ms: int = 120_000
     approval_timeout_s: int = 300
+    #: How old a cached database schema may get before the agent's next
+    #: introspection refreshes it (plan 6.2: "auto-refresh TTL configurable").
+    schema_cache_ttl_s: int = 86_400
     # auto = real SDK when ANTHROPIC_API_KEY is set (and not APP_ENV=test), else fake
     agent_driver: Literal["auto", "claude", "fake"] = "auto"
 

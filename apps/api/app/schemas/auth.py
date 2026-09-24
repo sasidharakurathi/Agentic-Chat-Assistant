@@ -5,7 +5,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, EmailStr, Field
 
-from app.schemas.common import ORMModel
+from app.schemas.common import ApiModel, ORMModel
 
 
 class RegisterRequest(BaseModel):
@@ -23,7 +23,7 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
-class TokenPair(BaseModel):
+class TokenPair(ApiModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
@@ -44,7 +44,7 @@ class MembershipOut(ORMModel):
     role: str
 
 
-class MeResponse(BaseModel):
+class MeResponse(ApiModel):
     user: UserOut
     memberships: list[MembershipOut]
 

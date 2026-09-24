@@ -166,7 +166,7 @@ process with full access to tenant context and DB pools — no extra network hop
 | Queue / cache | Redis 7 + Arq | ingestion, eval runs, schema refresh, summarization. |
 | Object storage | MinIO (S3 API) | swap for real S3 via env. |
 | Auth | custom JWT (access 15 min / refresh 30 d), argon2id | `python-jose` or `pyjwt` + `argon2-cffi`. |
-| Frontend | Next.js 15 (App Router), React 19, TypeScript, Tailwind, shadcn/ui | streaming chat via `EventSource`/`fetch`+ReadableStream. |
+| Frontend | Next.js 15 (App Router), React 19, TypeScript, Tailwind, shadcn-style primitives (hand-written, no Radix; ADR 0001) | streaming chat via `EventSource`/`fetch`+ReadableStream. |
 | Graph canvas | React Flow (`@xyflow/react`) | node-graph builder; custom node types; `dagre`/`elkjs` for auto-layout. |
 | Observability | OpenTelemetry SDK, Langfuse (optional), structlog | Langfuse in a compose profile. |
 | Crypto | `cryptography` (Fernet/AESGCM) for envelope encryption | master key from `APP_KEK` env / mounted secret. |
@@ -871,7 +871,7 @@ Legend: **P0** must-ship for the phase demo · **P1** should · **P2** stretch.
 | 0.1 | Monorepo scaffold; `pyproject`, `package.json`, ruff/mypy/eslint/prettier, pre-commit, `justfile`. | P0 |
 | 0.2 | `docker-compose.yml` base (postgres+pgvector, redis, minio); make targets `up/down/logs/migrate`. | P0 |
 | 0.3 | FastAPI skeleton: settings, async DB engine/session, Alembic, error handlers, request-id + structlog, `/healthz` `/readyz`. | P0 |
-| 0.4 | Next.js 15 skeleton: Tailwind, shadcn/ui, `@xyflow/react`, layout, theme, API client, auth pages shell. | P0 |
+| 0.4 | Next.js 15 skeleton: Tailwind, shadcn-style primitives (ADR 0001), `@xyflow/react`, layout, theme, API client, auth pages shell. | P0 |
 | 0.5 | Models + migrations for identity/tenancy (§2.1); seed script (demo org/user). | P0 |
 | 0.6 | Auth: register/login/refresh/logout/me; argon2id; JWT; refresh rotation + reuse detection. | P0 |
 | 0.7 | RBAC dependency + org scoping; audit-log writer. | P0 |

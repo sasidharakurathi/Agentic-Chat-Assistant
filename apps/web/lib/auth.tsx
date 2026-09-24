@@ -19,16 +19,23 @@ import {
   type Me,
   type Org,
 } from "@/lib/api";
+import { safeNext } from "@/lib/safe-next";
+
+export { safeNext };
 
 type AuthState = {
   ready: boolean;
   user: Me["user"] | null;
   orgs: Org[];
   activeOrgId: string | null;
+  /** The signed-in user's role in the active org. */
+  activeRole: string | null;
   setActiveOrg: (id: string) => void;
-  login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string, name: string) => Promise<void>;
-  logout: () => void;
+  /** `next`: where to land afterwards (e.g. back on an invite link). */
+  login: (email: string, password: string, next?: string | null) => Promise<void>;
+  register: (email: string, password: string, name: string, next?: string | null) => Promise<void>;
+  /** Sign out, then land on the login page, which returns to `next` after. */
+  logout: (next?: string) => void;
   refresh: () => Promise<void>;
 };
 
@@ -40,6 +47,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<Me["user"] | null>(null);
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [activeOrgId, setActiveOrgId] = useState<string | null>(null);
+  const [memberships, setMemberships] = useState<Me["memberships"]>([]);
 
   const load = useCallback(async () => {
     if (!tokenStore.access) {
@@ -49,6 +57,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const [me, orgList] = await Promise.all([authApi.me(), orgsApi.list()]);
       setUser(me.user);
+      setMemberships(me.memberships);
       setOrgs(orgList);
       const stored = orgStore.get();
       const valid = orgList.find((o) => o.id === stored)?.id ?? orgList[0]?.id ?? null;
@@ -72,37 +81,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setActiveOrgId(id);
   }, []);
 
-  const afterAuth = useCallback(async () => {
-    await load();
-    router.push("/assistants");
-  }, [load, router]);
+  const afterAuth = useCallback(
+    async (next?: string | null) => {
+      await load();
+      router.push(safeNext(next) ?? "/assistants");
+    },
+    [load, router],
+  );
 
   const login = useCallback(
-    async (email: string, password: string) => {
+    async (email: string, password: string, next?: string | null) => {
       tokenStore.set(await authApi.login(email, password));
-      await afterAuth();
+      await afterAuth(next);
     },
     [afterAuth],
   );
 
   const register = useCallback(
-    async (email: string, password: string, name: string) => {
+    async (email: string, password: string, name: string, next?: string | null) => {
       tokenStore.set(await authApi.register(email, password, name));
-      await afterAuth();
+      await afterAuth(next);
     },
     [afterAuth],
   );
 
-  const logout = useCallback(() => {
-    const rt = tokenStore.refresh;
-    if (rt) void authApi.logout(rt).catch(() => {});
-    tokenStore.clear();
-    orgStore.clear();
-    setUser(null);
-    setOrgs([]);
-    setActiveOrgId(null);
-    router.replace("/login");
-  }, [router]);
+  const logout = useCallback(
+    (next?: string) => {
+      const rt = tokenStore.refresh;
+      if (rt) void authApi.logout(rt).catch(() => {});
+      tokenStore.clear();
+      orgStore.clear();
+      setUser(null);
+      setOrgs([]);
+      setMemberships([]);
+      setActiveOrgId(null);
+      const back = safeNext(next);
+      router.replace(back ? `/login?next=${encodeURIComponent(back)}` : "/login");
+    },
+    [router],
+  );
 
   const value = useMemo<AuthState>(
     () => ({
@@ -110,13 +127,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       orgs,
       activeOrgId,
+      activeRole: memberships.find((m) => m.org_id === activeOrgId)?.role ?? null,
       setActiveOrg,
       login,
       register,
       logout,
       refresh: load,
     }),
-    [ready, user, orgs, activeOrgId, setActiveOrg, login, register, logout, load],
+    [ready, user, orgs, activeOrgId, memberships, setActiveOrg, login, register, logout, load],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

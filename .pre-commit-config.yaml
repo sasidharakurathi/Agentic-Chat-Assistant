@@ -1,0 +1,46 @@
+# Fast checks on the files being committed (task 0.1). The full gate is still
+# scripts/check.ps1 (and CI): types, tests, the OpenAPI contract, migrations.
+#
+#   pip install -e "apps/api[dev]"   # brings pre-commit
+#   pre-commit install               # once per clone
+#   pre-commit run --all-files       # on demand
+#
+# Check-only on purpose: a hook that rewrites files mid-commit leaves the
+# commit and the working tree disagreeing. Fix with `ruff check --fix`,
+# `ruff format` and `npm run format`, then commit again.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      # A committed key is a leaked key, even after the commit is undone.
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Same ruff as apps/api's dev dependency.
+    rev: v0.16.5
+    # No --config: with it, ruff resolves `src` and `per-file-ignores` against
+    # the working directory (the repo root), not apps/api. Without it, each
+    # file gets the nearest pyproject.toml, exactly as a run inside apps/api.
+    hooks:
+      - id: ruff-check
+        files: ^apps/api/
+      - id: ruff-format
+        files: ^apps/api/
+        args: [--check]
+
+  - repo: local
+    hooks:
+      # The repo's own Prettier (and Tailwind plugin), via npm, so it reads
+      # .prettierrc.json and both ignore files exactly as `npm run format` does.
+      - id: prettier
+        name: prettier --check
+        language: system
+        entry: npx prettier --check --ignore-path .gitignore --ignore-path .prettierignore
+        files: \.(ts|tsx|js|jsx|json|md|css)$

@@ -1,11 +1,12 @@
-"""Fast-path cache for the Agent SDK's ``session_id`` (per conversation).
+"""Cache of the Agent SDK's ``session_id`` (per conversation).
 
-Postgres (``Conversation.sdk_session_id``) is the durable source of truth —
-it's written in the same commit as the rest of a turn's outcome, so resume
-never breaks even if Redis is unreachable or empty (cold cache, restart,
-eviction). Redis just saves a DB round trip on the hot path and is treated as
-disposable: every operation here swallows *any* failure (not just
-``RedisError`` — a stale connection can also surface as a plain
+Postgres (``Conversation.sdk_session_id``) is the source of truth and decides
+which session a turn resumes (``chat._session_to_resume``); this copy is
+written after each turn's commit and repaired whenever it disagrees, so it
+can be stale or missing without consequence. (The chat path loads the row
+anyway, so today the cache saves no round trip; it is kept in step for
+readers that don't.) It is treated as disposable: every operation here
+swallows *any* failure (not just ``RedisError`` — a stale connection can also surface as a plain
 ``ConnectionError``/``RuntimeError``, e.g. after a network blip) and logs a
 warning instead of failing the turn. On failure we also drop the cached
 client so the next call opens a fresh connection instead of retrying a
@@ -22,7 +23,7 @@ from app.logging import get_logger
 log = get_logger(__name__)
 
 _KEY_PREFIX = "sdk-session:"
-_TTL_SECONDS = 60 * 24 * 3600  # 60 days of inactivity before we drop the cache entry
+_TTL_SECONDS = 60 * 24 * 3600  # 60 days after the last turn (rewritten every turn)
 
 
 def _key(conversation_id: uuid.UUID) -> str:
@@ -47,4 +48,12 @@ async def set(conversation_id: uuid.UUID, sdk_session_id: str) -> None:
         get_redis.cache_clear()
 
 
-__all__ = ["get", "set"]
+async def delete(conversation_id: uuid.UUID) -> None:
+    try:
+        await get_redis().delete(_key(conversation_id))
+    except Exception as exc:
+        log.warning("session_store_delete_failed", error=str(exc))
+        get_redis.cache_clear()
+
+
+__all__ = ["delete", "get", "set"]

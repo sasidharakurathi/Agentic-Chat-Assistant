@@ -46,7 +46,17 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL")
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="New conversation")
+    #: An identifier from the embedding application for its own end user
+    #: (plan §2.5), so it can list "this user's conversations" without keeping
+    #: its own mapping. Opaque to us; never shown to the model.
+    external_user_ref: Mapped[str | None] = mapped_column(String(200), index=True)
     sdk_session_id: Mapped[str | None] = mapped_column(String(128))
+    # {"markers": {chunk_id: n}, "next": n} — the citation numbers already
+    # handed out in this conversation. Lives here rather than being rebuilt
+    # per turn because the SDK session is resumed: the model's context still
+    # contains earlier turns' numbered kb_search results, so a marker has to
+    # keep meaning the same chunk for as long as that context does.
+    citation_state: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[ConversationStatus] = mapped_column(
         SAEnum(ConversationStatus, name="conversation_status", native_enum=False, length=20),
         nullable=False,
@@ -113,6 +123,54 @@ class Run(UUIDPrimaryKeyMixin, Base):
         default=RunStatus.ok,
     )
     error: Mapped[str | None] = mapped_column(Text)
+    #: The OpenTelemetry trace id when tracing is on, else a minted one in the
+    #: same format. Also bound into every log line of the turn.
+    trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    # Microseconds from Python, like Message: runs are listed newest-first,
+    # and SQLite's CURRENT_TIMESTAMP (one-second resolution) left two turns in
+    # the same second ordered by their random UUIDs.
     created_at: Mapped[datetime] = mapped_column(
-        TZDateTime(), server_default=func.now(), nullable=False
+        TZDateTime(),
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class ToolCall(UUIDPrimaryKeyMixin, Base):
+    """One tool call a turn made (plan §2.5, PostToolUse (c)).
+
+    Tool calls also ride on the assistant message's `blocks` for the UI, but
+    that is a JSON column shaped for rendering. This is the queryable record:
+    which tools run, how often, how long they take and how often they fail,
+    per org and per conversation. Inputs are redacted and outputs are the
+    capped previews, as streamed.
+    """
+
+    __tablename__ = "tool_calls"
+
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: The SDK's tool_use_id.
+    call_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    tool_name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    #: "caps" for platform capabilities, "builtin" for SDK tools, else the MCP
+    #: server's name.
+    server: Mapped[str] = mapped_column(String(100), nullable=False)
+    input: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    output: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(String(20))
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime(),
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        nullable=False,
     )

@@ -12,11 +12,13 @@ os.environ.setdefault("DATABASE_URL", f"sqlite+aiosqlite:///{_TMP / 'test.db'}")
 os.environ.setdefault("JWT_SECRET", "test-secret-value-that-is-long-enough-xxxxxxxx")
 os.environ.setdefault("LOG_FORMAT", "console")
 
+
 import pytest  # noqa: E402
 from app.db.base import Base  # noqa: E402
-from app.db.session import get_engine  # noqa: E402
+from app.db.session import get_engine, get_sessionmaker  # noqa: E402
 from app.main import app  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +30,13 @@ async def _fresh_schema() -> AsyncIterator[None]:
     yield
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+
+
+@pytest.fixture
+async def db_session() -> AsyncIterator[AsyncSession]:
+    """A raw session for tests that hit models directly, bypassing the API."""
+    async with get_sessionmaker()() as session:
+        yield session
 
 
 @pytest.fixture

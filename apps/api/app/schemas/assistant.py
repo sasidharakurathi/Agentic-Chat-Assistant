@@ -9,7 +9,7 @@ from app.graph.nodes import Graph
 from app.graph.validate import ValidationResult
 from app.models.assistant import AssistantStatus
 from app.schemas.assistant_config import AssistantConfig
-from app.schemas.common import ORMModel
+from app.schemas.common import ApiModel, ORMModel
 from app.services.diff import DiffEntry, GraphDiff
 
 
@@ -43,19 +43,22 @@ class AssistantDetail(AssistantSummary):
     draft_validation: ValidationResult
 
 
-class DraftGraphSaveResult(BaseModel):
+class DraftGraphSaveResult(ApiModel):
     graph: Graph
     validation: ValidationResult
     # The recompiled config — present only when the graph validates.
     config: AssistantConfig | None = None
 
 
-class DraftConfigSaveResult(BaseModel):
+class DraftConfigSaveResult(ApiModel):
     config: AssistantConfig
     graph: Graph
+    #: Returned like the graph save's, so a Panels edit refreshes the error and
+    #: warning badges instead of leaving the last canvas save's result showing.
+    validation: ValidationResult
 
 
-class GraphCompileResult(BaseModel):
+class GraphCompileResult(ApiModel):
     config: AssistantConfig
 
 
@@ -76,7 +79,7 @@ class VersionDetail(VersionSummary):
     config: AssistantConfig
 
 
-class VersionDiff(BaseModel):
+class VersionDiff(ApiModel):
     from_version: int
     to_version: int
     config_diff: list[DiffEntry]

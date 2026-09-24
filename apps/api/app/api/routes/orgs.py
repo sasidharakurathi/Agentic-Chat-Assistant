@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
-from typing import Annotated
+from datetime import UTC, datetime
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, status
 
-from app.api.deps import ClientIP, CurrentUser, OrgMembership, SessionDep, require_role
+from app.api.deps import (
+    ClientIP,
+    CurrentUser,
+    OrgMembership,
+    PageQuery,
+    SessionDep,
+    require_role,
+)
 from app.models.enums import MemberRole
 from app.models.user import User
-from app.schemas.common import Message
+from app.schemas.common import Page
 from app.schemas.org import (
     AuditEntryOut,
+    InviteAccepted,
     InviteCreate,
     InviteOut,
+    InvitePreview,
     MemberOut,
     OrgCreate,
     OrgOut,
@@ -26,13 +35,16 @@ from app.services import usage as usage_service
 router = APIRouter(tags=["orgs"])
 
 RequireAdmin = Depends(require_role(MemberRole.admin))
-RequireOwner = Depends(require_role(MemberRole.owner))
+# There is deliberately no RequireOwner here any more. It was declared and
+# applied to no route, which read as an enforced owner gate that did not
+# exist. "Owner required" is only true when a change *touches* owner, which a
+# route dependency cannot see — see `orgs_service._authorise_role_change`.
 
 
-@router.get("/orgs", response_model=list[OrgOut])
-async def list_orgs(user: CurrentUser, session: SessionDep) -> list[OrgOut]:
-    orgs = await orgs_service.list_for_user(session, user.id)
-    return [OrgOut.model_validate(o) for o in orgs]
+@router.get("/orgs", response_model=Page[OrgOut])
+async def list_orgs(user: CurrentUser, session: SessionDep, page: PageQuery) -> Page[OrgOut]:
+    orgs = await orgs_service.list_for_user(session, user.id, limit=page.limit, cursor=page.cursor)
+    return Page(items=[OrgOut.model_validate(o) for o in orgs.items], next_cursor=orgs.next_cursor)
 
 
 @router.post("/orgs", response_model=OrgOut, status_code=status.HTTP_201_CREATED)
@@ -43,17 +55,21 @@ async def create_org(
     return OrgOut.model_validate(org)
 
 
-@router.get("/orgs/{org_id}/members", response_model=list[MemberOut])
+@router.get("/orgs/{org_id}/members", response_model=Page[MemberOut])
 async def list_members(
     org_id: Annotated[uuid.UUID, Path()],
     _membership: OrgMembership,
     session: SessionDep,
-) -> list[MemberOut]:
-    rows = await orgs_service.list_members(session, org_id)
-    return [
-        MemberOut(user_id=u.id, email=u.email, name=u.name, role=m.role, joined_at=m.created_at)
-        for u, m in rows
-    ]
+    page: PageQuery,
+) -> Page[MemberOut]:
+    rows = await orgs_service.list_members(session, org_id, limit=page.limit, cursor=page.cursor)
+    return Page(
+        items=[
+            MemberOut(user_id=u.id, email=u.email, name=u.name, role=m.role, joined_at=m.created_at)
+            for u, m in rows.items
+        ],
+        next_cursor=rows.next_cursor,
+    )
 
 
 @router.patch(
@@ -118,12 +134,35 @@ async def create_invite(
     )
 
 
-@router.post("/invites/{token}/accept", response_model=Message)
+@router.get("/invites/{token}", response_model=InvitePreview)
+async def preview_invite(token: Annotated[str, Path()], session: SessionDep) -> InvitePreview:
+    """Unauthenticated on purpose: the invitee may not have an account yet,
+    and needs to know which email to sign in with. The token is 32 random
+    bytes and single-use, so holding it is the authorisation."""
+    invite, org = await orgs_service.preview_invite(session, raw_token=token)
+    state: Literal["pending", "accepted", "expired"] = (
+        "accepted"
+        if invite.accepted_at is not None
+        else "expired"
+        if invite.expires_at <= datetime.now(UTC)
+        else "pending"
+    )
+    return InvitePreview(
+        org_name=org.name,
+        email=invite.email,
+        role=invite.role,
+        expires_at=invite.expires_at,
+        status=state,
+    )
+
+
+@router.post("/invites/{token}/accept", response_model=InviteAccepted)
 async def accept_invite(
     token: Annotated[str, Path()], user: CurrentUser, session: SessionDep, ip: ClientIP
-) -> Message:
-    await orgs_service.accept_invite(session, raw_token=token, user=user, ip=ip)
-    return Message(message="joined organization")
+) -> InviteAccepted:
+    membership = await orgs_service.accept_invite(session, raw_token=token, user=user, ip=ip)
+    _, org = await orgs_service.preview_invite(session, raw_token=token)
+    return InviteAccepted(org_id=org.id, org_name=org.name, role=membership.role)
 
 
 @router.get("/orgs/{org_id}/usage", response_model=UsageRollupResponse)
@@ -143,14 +182,18 @@ async def get_usage(
 
 @router.get(
     "/orgs/{org_id}/audit-log",
-    response_model=list[AuditEntryOut],
+    response_model=Page[AuditEntryOut],
     dependencies=[RequireAdmin],
 )
 async def list_audit_log(
     org_id: Annotated[uuid.UUID, Path()],
     session: SessionDep,
-    limit: Annotated[int, Query(ge=1, le=500)] = 100,
-    offset: Annotated[int, Query(ge=0)] = 0,
-) -> list[AuditEntryOut]:
-    entries = await orgs_service.list_audit(session, org_id=org_id, limit=limit, offset=offset)
-    return [AuditEntryOut.model_validate(e) for e in entries]
+    page: PageQuery,
+) -> Page[AuditEntryOut]:
+    entries = await orgs_service.list_audit(
+        session, org_id=org_id, limit=page.limit, cursor=page.cursor
+    )
+    return Page(
+        items=[AuditEntryOut.model_validate(e) for e in entries.items],
+        next_cursor=entries.next_cursor,
+    )

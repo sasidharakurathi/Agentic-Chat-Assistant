@@ -28,6 +28,12 @@ DEFAULT_MODEL_BY_ROLE: dict[str, str] = {
     "judge": "claude-opus-5",
 }
 
+# The cheap model used by non-chat internals (contextual-retrieval prefixes,
+# task 2.6). Named here rather than inline so this module stays the only
+# place a model-id string lives — and so its cost lands in PRICE_PER_MTOK
+# instead of silently pricing at zero.
+CONTEXTUALIZE_MODEL = "claude-haiku-4-5"
+
 # Rough USD-per-1M-token rates, for pre-flight budget estimates only (not billing).
 # Kept here so there is one place to update when prices change.
 PRICE_PER_MTOK: dict[str, tuple[float, float]] = {
@@ -38,14 +44,26 @@ PRICE_PER_MTOK: dict[str, tuple[float, float]] = {
 }
 
 
+# USD per 1M tokens for embedding and rerank models, from Voyage's pricing
+# page (docs.voyageai.com/docs/pricing, checked 2026-09-24). The local models
+# cost nothing and are deliberately absent: their usage is still recorded,
+# priced at zero.
+RAG_PRICE_PER_MTOK: dict[str, float] = {
+    "voyage-3-large": 0.18,
+    "rerank-2.5": 0.05,
+}
+
+
 def is_allowed(model: str) -> bool:
     return model in ALLOWED_MODELS
 
 
 __all__ = [
     "ALLOWED_MODELS",
+    "CONTEXTUALIZE_MODEL",
     "DEFAULT_MODEL_BY_ROLE",
     "PRICE_PER_MTOK",
+    "RAG_PRICE_PER_MTOK",
     "ModelRole",
     "is_allowed",
 ]
