@@ -35,6 +35,7 @@ def all_up(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     monkeypatch.setattr(health, "_redis", _ok)
     monkeypatch.setattr(health, "_storage", _ok)
     monkeypatch.setattr(health, "_agent_cli", _ok)
+    monkeypatch.setattr(health, "_mcp_runner", _ok)
     return monkeypatch
 
 
@@ -45,11 +46,17 @@ async def test_every_dependency_is_reported(
     assert resp.status_code == 200
     assert resp.json() == {
         "status": "ok",
-        "checks": {"database": "ok", "redis": "ok", "storage": "ok", "agent_cli": "ok"},
+        "checks": {
+            "database": "ok",
+            "redis": "ok",
+            "storage": "ok",
+            "agent_cli": "ok",
+            "mcp_runner": "ok",
+        },
     }
 
 
-@pytest.mark.parametrize("check", ["_redis", "_storage"])
+@pytest.mark.parametrize("check", ["_redis", "_storage", "_mcp_runner"])
 async def test_a_degradable_dependency_down_is_degraded_not_unready(
     client: AsyncClient, all_up: pytest.MonkeyPatch, check: str
 ) -> None:
@@ -98,3 +105,16 @@ def test_the_sdks_bundled_cli_is_found() -> None:
     """The real lookup, against the installed SDK (it bundles a native CLI)."""
     path = health.claude_cli_path()
     assert path is not None and "claude" in path.lower()
+
+
+async def test_a_loop_that_cannot_spawn_is_unready_for_the_real_driver(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """uvicorn --reload on Windows picks a loop that cannot start the CLI."""
+    monkeypatch.setattr(health, "_redis", _ok)
+    monkeypatch.setattr(health, "_storage", _ok)
+    monkeypatch.setattr(health, "get_driver", ClaudeSDKDriver)
+    monkeypatch.setattr(health, "loop_can_spawn", lambda: False)
+    resp = await client.get("/readyz")
+    assert resp.status_code == 503
+    assert "without --reload" in resp.json()["checks"]["agent_cli"]

@@ -32,6 +32,9 @@ x-api-env: &api-env
   LANGFUSE_HOST: ${LANGFUSE_DOCKER_HOST:-${LANGFUSE_HOST:-}}
   LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
   LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+  # Local-command MCP servers run in the mcp-runner container (task 4.4).
+  MCP_RUNNER_URL: http://mcp-runner:8100
+  MCP_RUNNER_TOKEN: ${MCP_RUNNER_TOKEN:-}
 
 services:
   postgres:
@@ -108,6 +111,8 @@ services:
       <<: *api-env
     ports:
       - "${API_PORT:-8000}:8000"
+    # `default` for the datastores and the web; `mcp` to reach the runner.
+    networks: [default, mcp]
     depends_on:
       postgres:
         condition: service_healthy
@@ -133,6 +138,7 @@ services:
     environment:
       <<: *api-env
       RUN_MIGRATIONS: "0"
+    networks: [default, mcp]
     depends_on:
       postgres:
         condition: service_healthy
@@ -140,6 +146,35 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+
+  # Runs local-command (stdio) MCP servers, so untrusted code never runs in
+  # the api container, which holds APP_KEK and every credential (task 4.4).
+  # This container holds none of them: only its own token. It is locked
+  # down at the container level:
+  #   - no route out: the `mcp` network is internal, so servers can reach the
+  #     api's side of the bridge and nothing else. That also means `npx`
+  #     cannot download a package at runtime; see docs/EXPLAINER.md §10.6;
+  #   - non-root, read-only filesystem, a size-capped /tmp for each server's
+  #     private directory, every Linux capability dropped, no privilege
+  #     escalation, and caps on processes, memory and CPU for the container
+  #     as a whole. Each server gets its own limits on top (app/mcp/jail.py).
+  mcp-runner:
+    build:
+      context: .
+      dockerfile: docker/mcp-runner.Dockerfile
+    profiles: ["apps"]
+    environment:
+      MCP_RUNNER_TOKEN: ${MCP_RUNNER_TOKEN:-}
+      MCP_RUNNER_NETWORK: none
+    networks: [mcp]
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 512
+    mem_limit: 2g
+    cpus: 2
 
   web:
     build:
@@ -189,6 +224,12 @@ services:
       retries: 20
     volumes:
       - mongodata:/data/db
+
+networks:
+  default: {}
+  # The runner's only network. `internal` means no route to the outside.
+  mcp:
+    internal: true
 
 volumes:
   mysqldata:

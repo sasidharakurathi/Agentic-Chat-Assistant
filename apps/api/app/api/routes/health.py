@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import platform
 import shutil
+import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -13,9 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import __version__
 from app.agent.driver import ClaudeSDKDriver, get_driver
 from app.api.deps import SessionDep
+from app.config import settings
 from app.db.redis import get_redis
 from app.logging import get_logger
 from app.schemas.common import HealthResponse, ReadyResponse
+from app.services import mcp_runner
 from app.storage import probe_bucket
 
 router = APIRouter(tags=["health"])
@@ -65,10 +68,37 @@ async def _storage() -> str:
     return "ok"
 
 
+def loop_can_spawn() -> bool:
+    """Whether the running event loop can start subprocesses. On Windows only
+    the Proactor loop can, and uvicorn picks the Selector loop under
+    `--reload` (see `app/devserver.py` for why dev-api.ps1 does not use it)."""
+    # `sys.platform`, not `platform.system()`: the type checker understands
+    # this check, so the Windows-only class type-checks on Linux too.
+    if sys.platform != "win32":
+        return True
+    return isinstance(asyncio.get_running_loop(), asyncio.ProactorEventLoop)
+
+
 async def _agent_cli() -> str:
     if not isinstance(get_driver(), ClaudeSDKDriver):
         return "skipped: offline driver"
-    return "ok" if claude_cli_path() else "error: Claude CLI not found"
+    if not claude_cli_path():
+        return "error: Claude CLI not found"
+    if not loop_can_spawn():
+        return (
+            "error: this server's event loop cannot start the Claude CLI; "
+            "run uvicorn without --reload (scripts/dev-api.ps1 restarts it on changes)"
+        )
+    return "ok"
+
+
+async def _mcp_runner() -> str:
+    """Local-command MCP servers run in the runner (task 4.4). Not critical:
+    without it only those servers are unavailable."""
+    if not settings.mcp_runner_url:
+        return "skipped: not configured"
+    await mcp_runner.health()
+    return "ok"
 
 
 async def _run(name: str, check: Callable[[], Awaitable[str]]) -> tuple[str, str]:
@@ -95,6 +125,7 @@ async def readyz(session: SessionDep, response: Response) -> ReadyResponse:
         _run("redis", _redis),
         _run("storage", _storage),
         _run("agent_cli", _agent_cli),
+        _run("mcp_runner", _mcp_runner),
     )
     checks = dict(results)
     failed = {name for name, value in checks.items() if value.startswith("error")}

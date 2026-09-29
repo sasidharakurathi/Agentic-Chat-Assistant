@@ -191,13 +191,18 @@ def _project(config: AssistantConfig, existing_graph: Graph | None) -> Graph:
         edges.append(Edge(source=nid, target=i_agent))
         y += 110
 
-    for mid in config.mcp_servers:
-        nid = ident(("mcp_server", mid), f"mcp:{mid}")
+    for ref in config.mcp_servers:
+        nid = ident(("mcp_server", ref.id), f"mcp:{ref.id}")
         nodes.append(
             McpServerNode(
                 id=nid,
                 position=at(nid, _COL_CAP, y),
-                data=McpServerNodeData(mcp_server_id=mid),
+                data=McpServerNodeData(
+                    mcp_server_id=ref.id,
+                    tool_allowlist=list(ref.tools),
+                    approval=ref.approval,
+                    tool_approvals=dict(ref.tool_approvals),
+                ),
             )
         )
         edges.append(Edge(source=nid, target=i_agent))

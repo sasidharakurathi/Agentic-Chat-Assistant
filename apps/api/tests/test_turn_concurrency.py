@@ -99,3 +99,4 @@ def test_the_cli_gets_a_timeout_and_no_telemetry() -> None:
     assert env["API_TIMEOUT_MS"].isdigit()
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert env["DISABLE_TELEMETRY"] == "1"
+    assert env["CLAUDE_CODE_SSE_PORT"] == "", "never linked to a developer's IDE"

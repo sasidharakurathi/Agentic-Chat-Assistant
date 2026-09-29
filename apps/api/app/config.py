@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
 import secrets
 import warnings
 from functools import lru_cache
@@ -67,6 +69,7 @@ class Settings(BaseSettings):
     # ── Providers ────────────────────────────────────────────
     anthropic_api_key: str = ""
     voyage_api_key: str = ""
+    #: Offline mode: local embedder/reranker, and no web search (plan §10).
     rag_offline: bool = False
     #: Most that contextual retrieval may spend indexing one source. Over it
     #: (by estimate, before anything is spent) the source is indexed without
@@ -88,6 +91,18 @@ class Settings(BaseSettings):
     # auto = real SDK when ANTHROPIC_API_KEY is set (and not APP_ENV=test), else fake
     agent_driver: Literal["auto", "claude", "fake"] = "auto"
 
+    # ── MCP servers (Phase 4) ────────────────────────────────
+    #: Accept plain-http MCP URLs. Off by default: headers usually carry a
+    #: credential. For a local test server only.
+    mcp_allow_insecure_urls: bool = False
+    #: The MCP runner (task 4.4): stdio servers run there, not in the API.
+    mcp_runner_url: str = "http://127.0.0.1:8100"
+    #: Shared with the runner only. Required in production; in development,
+    #: derived from this deployment's own secrets when unset (see below).
+    mcp_runner_token: str = ""
+    #: How long one MCP tool call may take before the model is told it failed.
+    mcp_call_timeout_s: float = 120.0
+
     # ── Observability ────────────────────────────────────────
     otel_exporter_otlp_endpoint: str = ""
     langfuse_public_key: str = ""
@@ -103,6 +118,17 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+    @property
+    def mcp_runner_token_effective(self) -> str:
+        """The runner token to use. Outside production an unset one is derived
+        from APP_KEK (or JWT_SECRET), so a local runner started with
+        `scripts/dev-mcp-runner.ps1` agrees with the API without anyone
+        editing `.env`. The runner never sees the key it came from."""
+        if self.mcp_runner_token or self.is_production:
+            return self.mcp_runner_token
+        seed = (self.app_kek or self.jwt_secret).encode()
+        return hmac.new(seed, b"assistant-studio/mcp-runner-token", hashlib.sha256).hexdigest()
 
     @property
     def cors_origin_list(self) -> list[str]:

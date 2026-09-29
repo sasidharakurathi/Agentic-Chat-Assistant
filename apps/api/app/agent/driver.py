@@ -12,14 +12,16 @@ after it has persisted the message + run rows.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 from app.agent.approvals import CanUseTool, build_can_use_tool
-from app.agent.caps import ALL_CAPS
+from app.agent.caps import ALL_CAPS, CapabilityTool
 from app.agent.events import (
     AgentEvent,
     ErrorEvent,
@@ -56,6 +58,17 @@ def _cap_result(result: dict[str, Any]) -> tuple[str, str]:
     return text, ("error" if result.get("is_error") else "success")
 
 
+_SEARCH_TRIGGER = re.compile(r"^\s*search(?:\s+twice)?\s*:\s*", re.IGNORECASE)
+
+
+def _search_query(prompt: str) -> str:
+    """The query a real model would send: the question, without the
+    "search:" / "search twice:" trigger. Sending the whole prompt made the
+    trigger words part of the query, and the reranker scored passages
+    against "search twice: …" low enough to drop them all."""
+    return _SEARCH_TRIGGER.sub("", prompt).strip() or prompt
+
+
 async def _fake_search(
     prompt: str, kb_search_tool: Any, reply: list[str]
 ) -> AsyncIterator[AgentEvent]:
@@ -63,7 +76,8 @@ async def _fake_search(
     calls in one turn are the only way to exercise citation markers
     continuing across calls ([1][2] then [3][4]) rather than restarting — the
     property the whole registry exists for — without a real model."""
-    queries = [prompt, prompt + " (follow-up)"] if "twice" in prompt.lower() else [prompt]
+    query = _search_query(prompt)
+    queries = [query, query + " (follow-up)"] if "twice" in prompt.lower() else [query]
     for n, query in enumerate(queries, start=1):
         call_id = f"fake-{n}"
         yield ToolCallEvent(id=call_id, name="mcp__caps__kb_search", input={"query": query})
@@ -81,18 +95,94 @@ async def _fake_delegation(
     (`parent_id`), and its findings as that call's result. Only the main
     agent's text is the answer; the findings go into `reply`."""
     task = "fake-task-1"
+    query = _search_query(prompt)
     yield ToolCallEvent(
         id=task, name=SUBAGENT_TOOL, input={"subagent_type": "retrieval", "prompt": prompt}
     )
     yield TokenEvent(text="Searching the knowledge base. ", parent_id=task)
     yield ToolCallEvent(
-        id="fake-sub-1", name="mcp__caps__kb_search", input={"query": prompt}, parent_id=task
+        id="fake-sub-1", name="mcp__caps__kb_search", input={"query": query}, parent_id=task
     )
-    result = await run_capability(kb_search_tool.handler, {"query": prompt})
+    result = await run_capability(kb_search_tool.handler, {"query": query})
     text, status = _cap_result(result)
     yield ToolResultEvent(id="fake-sub-1", status=status, output=text, parent_id=task)
     yield TokenEvent(text="Kept the passages that bear on it.", parent_id=task)
     yield ToolResultEvent(id=task, status=status, output=text)
+    reply.append(text)
+
+
+def _mcp_call(prompt: str, spec: RuntimeSpec) -> tuple[CapabilityTool, dict[str, Any]] | None:
+    """`mcp: github.search {"q": "x"}` -> that tool and its input, when this
+    turn offers it."""
+    lowered = prompt.lower()
+    if "mcp:" not in lowered:
+        return None
+    rest = prompt[lowered.index("mcp:") + 4 :].strip()
+    target, _, raw = rest.partition(" ")
+    server, _, tool = target.partition(".")
+    cap = next((t for t in spec.caps_tools if t.server == server and t.name == tool), None)
+    if cap is None:
+        return None
+    try:
+        args = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        args = {}
+    return cap, args if isinstance(args, dict) else {}
+
+
+def _permitted_call(prompt: str, spec: RuntimeSpec) -> tuple[CapabilityTool, dict[str, Any]] | None:
+    """The permission-checked call a prompt asks for, if this turn offers it."""
+    lowered = prompt.lower()
+    tools = {t.qualified_name: t for t in spec.caps_tools}
+    mcp = _mcp_call(prompt, spec)
+    if mcp is not None:
+        return mcp
+    http = tools.get("mcp__caps__http_request")
+    if http is not None and "http:" in lowered:
+        return http, _http_args(prompt)
+    sql = tools.get("mcp__caps__sql_query")
+    if sql is not None and "sql:" in lowered:
+        statement = prompt[lowered.index("sql:") + 4 :].strip()
+        return sql, {"connection_id": spec.sql_connection_hint or "", "sql": statement}
+    return None
+
+
+def _http_args(prompt: str) -> dict[str, Any]:
+    """`http: POST https://x.test/api {"a": 1}` -> the tool's input."""
+    rest = prompt[prompt.lower().index("http:") + 5 :].strip().split(None, 2)
+    method = "GET"
+    if rest and rest[0].upper() in ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+        method = rest.pop(0).upper()
+    args: dict[str, Any] = {"method": method, "url": rest[0] if rest else ""}
+    if len(rest) > 1:
+        args["body"] = " ".join(rest[1:])
+    return args
+
+
+async def _fake_permitted_call(
+    name: str,
+    args: dict[str, Any],
+    cap: CapabilityTool,
+    can_use_tool: CanUseTool | None,
+    reply: list[str],
+) -> AsyncIterator[AgentEvent]:
+    """One tool call that goes through `can_use_tool` first, as the SDK does:
+    a denial becomes a `denied` result, and `updated_input` is what runs."""
+    yield ToolCallEvent(id="fake-1", name=name, input=args)
+    if can_use_tool is not None:
+        # The SDK passes the call's id in the context; so does this, so the
+        # permission lands on the right audit row.
+        ctx = SimpleNamespace(tool_use_id="fake-1")
+        decision = await can_use_tool(name, args, ctx)  # type: ignore[arg-type]
+        if type(decision).__name__ != "PermissionResultAllow":
+            message = getattr(decision, "message", "") or "not permitted"
+            yield ToolResultEvent(id="fake-1", status="denied", output=message)
+            reply.append(f"I couldn't run that: {message}")
+            return
+        args = getattr(decision, "updated_input", None) or args
+    result = await run_capability(cap.handler, args)
+    text, status = _cap_result(result)
+    yield ToolResultEvent(id="fake-1", status=status, output=text)
     reply.append(text)
 
 
@@ -115,7 +205,7 @@ class FakeDriver:
         calc_allowed = "mcp__caps__calculator" in spec.enabled_tools
         expr_match = re.search(r"(-?\d[\d\s.+\-*/%()]*\d|\d)", prompt)
         kb_search_tool = next((t for t in spec.caps_tools if t.name == "kb_search"), None)
-        sql_tool = next((t for t in spec.caps_tools if t.name == "sql_query"), None)
+        permitted = _permitted_call(prompt, spec)
 
         reply_parts: list[str]
         if (
@@ -143,32 +233,17 @@ class FakeDriver:
             reply_parts = []
             async for ev in _fake_search(prompt, kb_search_tool, reply_parts):
                 yield ev
-        elif sql_tool is not None and "sql:" in prompt.lower():
-            # "sql: <statement>" runs the real sql_query tool through the real
-            # permission callback — which is what makes the human-in-the-loop
-            # approval flow (task 3.8) exercisable without spending credits.
-            statement = prompt[prompt.lower().index("sql:") + 4 :].strip()
-            args = {"connection_id": spec.sql_connection_hint or "", "sql": statement}
-            yield ToolCallEvent(id="fake-1", name="mcp__caps__sql_query", input=args)
-
-            allowed = True
-            deny_message = ""
-            if can_use_tool is not None:
-                decision = await can_use_tool("mcp__caps__sql_query", args, None)  # type: ignore[arg-type]
-                allowed = type(decision).__name__ == "PermissionResultAllow"
-                deny_message = getattr(decision, "message", "") or "not permitted"
-                # The SDK runs `updated_input` when one is returned; so must
-                # the fake, or it tests a different contract.
-                args = getattr(decision, "updated_input", None) or args
-
-            if not allowed:
-                yield ToolResultEvent(id="fake-1", status="denied", output=deny_message)
-                reply_parts = [f"I couldn't run that: {deny_message}"]
-            else:
-                result = await run_capability(sql_tool.handler, args)
-                text, status = _cap_result(result)
-                yield ToolResultEvent(id="fake-1", status=status, output=text)
-                reply_parts = [text]
+        elif permitted is not None:
+            # A tool that goes through the real permission callback, as the
+            # SDK's calls do: "mcp: <server>.<tool> {json}", "http: [METHOD]
+            # <url> [body]" or "sql: <statement>". This is what makes the
+            # approval flow exercisable without spending credits.
+            cap, args = permitted
+            reply_parts = []
+            async for ev in _fake_permitted_call(
+                cap.qualified_name, args, cap, can_use_tool, reply_parts
+            ):
+                yield ev
         else:
             reply_parts = [
                 "(fake driver)",

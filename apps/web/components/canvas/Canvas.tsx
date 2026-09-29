@@ -4,19 +4,23 @@ import {
   Background,
   Controls,
   ReactFlow,
+  applyEdgeChanges,
+  applyNodeChanges,
   type Connection,
   type Edge,
+  type EdgeChange,
   type IsValidConnection,
   type Node,
+  type NodeChange,
   type NodeMouseHandler,
   type NodeTypes,
 } from "@xyflow/react";
 import { useTheme } from "next-themes";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { GraphIssues } from "@/components/canvas/graph-sync";
 import { StudioNode } from "@/components/canvas/StudioNode";
-import { toFlow } from "@/components/canvas/graph-sync";
+import { mergeFlowNodes, toFlow } from "@/components/canvas/graph-sync";
 import type { Graph, GraphSchema } from "@/lib/api";
 
 const nodeTypes: NodeTypes = { studio: StudioNode };
@@ -49,14 +53,52 @@ export function Canvas({
   onDeleteEdges?: (edges: { source: string; target: string }[]) => void;
 }) {
   const { resolvedTheme } = useTheme();
-  const { nodes, edges } = useMemo(
+  const flow = useMemo(
     () => toFlow(graph, issues, sourceLabels ?? {}),
     [graph, issues, sourceLabels],
   );
 
-  const styled = useMemo(
-    () => nodes.map((n) => ({ ...n, selected: n.id === selectedId })),
-    [nodes, selectedId],
+  // React Flow's own copy of the nodes and edges. It reports each node's
+  // measured size, drags and selection through onNodesChange / onEdgesChange,
+  // and hides a node until it has a size. The canvas used to pass the graph's
+  // nodes straight through with no change handler, so every graph update (a
+  // delete, a save, data arriving after mount) rebuilt the nodes without a
+  // size and left them invisible until a tab switch remounted the canvas.
+  const [nodes, setNodes] = useState<Node[]>([]);
+  const [edges, setEdges] = useState<Edge[]>([]);
+
+  useEffect(() => {
+    setNodes((prev) => mergeFlowNodes(prev, flow.nodes, selectedId));
+  }, [flow.nodes, selectedId]);
+  useEffect(() => {
+    setEdges((prev) => {
+      const selected = new Set(prev.filter((e) => e.selected).map((e) => e.id));
+      return flow.edges.map((e) => (selected.has(e.id) ? { ...e, selected: true } : e));
+    });
+  }, [flow.edges]);
+
+  // Removals are not applied here: they go through onNodesDelete /
+  // onEdgesDelete to the graph, which is the source of truth, and come back
+  // through the effects above.
+  const onNodesChange = useCallback(
+    (changes: NodeChange[]) =>
+      setNodes((ns) =>
+        applyNodeChanges(
+          changes.filter((c) => c.type !== "remove"),
+          ns,
+        ),
+      ),
+    [],
+  );
+  const onEdgesChange = useCallback(
+    (changes: EdgeChange[]) =>
+      setEdges((es) =>
+        applyEdgeChanges(
+          changes.filter((c) => c.type !== "remove"),
+          es,
+        ),
+      ),
+    [],
   );
 
   const typeOf = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n.type])), [graph.nodes]);
@@ -84,10 +126,12 @@ export function Canvas({
   const handleNodeClick: NodeMouseHandler = (_, node) => onSelect(node.id);
 
   return (
-    <div className="h-full w-full">
+    <div className="studio-canvas h-full w-full">
       <ReactFlow
-        nodes={styled}
+        nodes={nodes}
         edges={edges}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
         nodeTypes={nodeTypes}
         onNodeClick={handleNodeClick}
         onPaneClick={() => onSelect(null)}
@@ -98,6 +142,12 @@ export function Canvas({
         onEdgesDelete={(es: Edge[]) =>
           onDeleteEdges?.(es.map((e) => ({ source: e.source, target: e.target })))
         }
+        // Wiring: releasing anywhere within 40px of an input connects to it,
+        // and a click on an output then an input works as well as a drag.
+        connectionRadius={40}
+        connectOnClick
+        connectionLineStyle={{ stroke: "var(--primary)", strokeWidth: 2 }}
+        defaultEdgeOptions={{ interactionWidth: 24 }}
         colorMode={resolvedTheme === "dark" ? "dark" : "light"}
         fitView
         proOptions={{ hideAttribution: true }}

@@ -8,9 +8,14 @@ Write-Host "==> ruff" -ForegroundColor Cyan
 Invoke-Native $py "-m" "ruff" "check" "apps/api"
 Invoke-Native $py "-m" "ruff" "format" "--check" "apps/api"
 
-Write-Host "==> mypy" -ForegroundColor Cyan
+Write-Host "==> mypy (this platform, then Linux as CI and the containers run it)" -ForegroundColor Cyan
 Push-Location (Join-Path $root "apps\api")
-try { Invoke-Native $py "-m" "mypy" "app" "scripts" }
+try {
+    Invoke-Native $py "-m" "mypy" "app" "scripts"
+    # Windows-only and POSIX-only code both exist (the MCP jail, the event
+    # loop check); a Windows-only run never type-checks the Linux branch.
+    Invoke-Native $py "-m" "mypy" "app" "scripts" "--platform" "linux"
+}
 finally { Pop-Location }
 
 Write-Host "==> pytest" -ForegroundColor Cyan

@@ -140,6 +140,39 @@ class ToggleTool(_Strict):
     enabled: bool = False
 
 
+_TOOL_NAME_RE = r"^[A-Za-z0-9_-]{1,64}$"
+
+
+class McpServerRef(_Strict):
+    """One registered MCP server, as this assistant version uses it (tasks 4.6 / 4.7).
+
+    `tools` is the allowlist: only these, and only if the server still lists
+    them, are offered to the model. Empty means none; nothing from a server
+    is usable until someone chooses it.
+
+    Approval, most specific first: `tool_approvals[tool]`, then `approval`
+    for the server, then the assistant's `approval_policy.mcp_default`
+    (see `approvals.mcp_mode`). `None` means "not set here".
+    """
+
+    id: Annotated[str, Field(pattern=r"^[0-9a-fA-F-]{8,64}$")]
+    tools: list[Annotated[str, Field(pattern=_TOOL_NAME_RE)]] = Field(default_factory=list)
+    approval: ApprovalMode | None = None
+    tool_approvals: dict[Annotated[str, Field(pattern=_TOOL_NAME_RE)], ApprovalMode] = Field(
+        default_factory=dict
+    )
+
+    @field_validator("tools")
+    @classmethod
+    def _sorted_unique(cls, v: list[str]) -> list[str]:
+        return sorted(set(v))
+
+    @field_validator("tool_approvals")
+    @classmethod
+    def _sorted(cls, v: dict[str, ApprovalMode]) -> dict[str, ApprovalMode]:
+        return dict(sorted(v.items()))
+
+
 class ToolsConfig(_Strict):
     web_search: WebSearchTool = Field(default_factory=WebSearchTool)
     http_request: HttpRequestTool = Field(default_factory=HttpRequestTool)
@@ -187,7 +220,7 @@ class AssistantConfig(_Strict):
     rag: RagConfig = Field(default_factory=RagConfig)
     databases: list[DatabaseRef] = Field(default_factory=list)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
-    mcp_servers: list[Annotated[str, Field(pattern=_UUID_RE)]] = Field(default_factory=list)
+    mcp_servers: list[McpServerRef] = Field(default_factory=list)
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     approval_policy: ApprovalPolicy = Field(default_factory=ApprovalPolicy)
@@ -197,13 +230,23 @@ class AssistantConfig(_Strict):
         conn_ids = [d.connection_id for d in self.databases]
         if len(conn_ids) != len(set(conn_ids)):
             raise ValueError("duplicate database connection_id in databases[]")
-        if len(self.mcp_servers) != len(set(self.mcp_servers)):
+        mcp_ids = [m.id for m in self.mcp_servers]
+        if len(mcp_ids) != len(set(mcp_ids)):
             raise ValueError("duplicate id in mcp_servers[]")
         # Order of these reference lists is not semantic — canonicalize it so two
         # configs authored in different orders compare equal (and round-trip).
         self.databases.sort(key=lambda d: d.connection_id)
-        self.mcp_servers.sort()
+        self.mcp_servers.sort(key=lambda m: m.id)
         return self
+
+    @field_validator("mcp_servers", mode="before")
+    @classmethod
+    def _ids_become_refs(cls, v: object) -> object:
+        """Configs saved before task 4.6 held bare ids. They load as servers
+        with no tools allowed, which is what they meant: nothing ran."""
+        if isinstance(v, list):
+            return [{"id": item} if isinstance(item, str) else item for item in v]
+        return v
 
 
 def default_config() -> AssistantConfig:

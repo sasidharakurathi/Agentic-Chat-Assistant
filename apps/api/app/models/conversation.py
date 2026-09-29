@@ -126,6 +126,8 @@ class Run(UUIDPrimaryKeyMixin, Base):
     #: The OpenTelemetry trace id when tracing is on, else a minted one in the
     #: same format. Also bound into every log line of the turn.
     trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    #: The published version that answered; None when the draft did.
+    version_number: Mapped[int | None] = mapped_column(Integer)
     # Microseconds from Python, like Message: runs are listed newest-first,
     # and SQLite's CURRENT_TIMESTAMP (one-second resolution) left two turns in
     # the same second ordered by their random UUIDs.
@@ -168,6 +170,10 @@ class ToolCall(UUIDPrimaryKeyMixin, Base):
     output: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str | None] = mapped_column(String(20))
     latency_ms: Mapped[int | None] = mapped_column(Integer)
+    #: How the call came to run, or not (task 4.7): "auto" (no one needed
+    #: asking), "approved", "declined", "expired", "interrupted" or
+    #: "refused" (policy or credential). Null for tools that never ask.
+    permission: Mapped[str | None] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime(),
         default=lambda: datetime.now(UTC),

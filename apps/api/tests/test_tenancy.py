@@ -55,6 +55,7 @@ def test_every_tenant_table_is_covered() -> None:
         "documents",
         "chunks",
         "db_connections",
+        "mcp_servers",
         "approvals",
         "usage_events",
         "memberships",
@@ -263,4 +264,41 @@ async def test_inviting_is_for_admins(client: AsyncClient, role: str, expected: 
         json={"email": f"new-{role}@example.com", "role": "member"},
         headers=h[role],
     )
+    assert r.status_code == expected, r.text
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [("owner", 201), ("admin", 201), ("member", 403), ("outsider", 404)],
+)
+async def test_registering_an_mcp_server_on_someone_elses_assistant(
+    client: AsyncClient, role: str, expected: int
+) -> None:
+    _, h, aid = await _actors(client)
+    r = await client.post(
+        f"/api/v1/assistants/{aid}/mcp-servers",
+        json={"name": "tools", "transport": "http", "url": "https://mcp.example.com/mcp"},
+        headers=h[role],
+    )
+    assert r.status_code == expected, r.text
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [("admin", 200), ("member", 403), ("outsider", 404)],
+)
+async def test_checking_an_mcp_server_on_someone_elses_assistant(
+    client: AsyncClient, role: str, expected: int
+) -> None:
+    """Checking a server connects to it with its stored credentials (and, for
+    a local command, starts it), so only editors may."""
+    _, h, aid = await _actors(client)
+    sid = (
+        await client.post(
+            f"/api/v1/assistants/{aid}/mcp-servers",
+            json={"name": "tools", "transport": "http", "url": "https://mcp.example.com/mcp"},
+            headers=h["owner"],
+        )
+    ).json()["id"]
+    r = await client.post(f"/api/v1/assistants/{aid}/mcp-servers/{sid}:health", headers=h[role])
     assert r.status_code == expected, r.text

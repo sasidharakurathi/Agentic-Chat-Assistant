@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { toolLabel } from "@/lib/tool-label";
 import { ApiError, approvals, type ApprovalRisk } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -39,9 +40,13 @@ function useCountdown(expiresAt: string | null): number | null {
 export function ApprovalCard({
   approval,
   onDecided,
+  onGone,
 }: {
   approval: PendingApproval;
   onDecided: (decision: "approved" | "denied") => void;
+  /** The server no longer has this approval pending (it expired, the turn
+   *  was stopped, or someone else answered): the card should go. */
+  onGone?: (reason: string) => void;
 }) {
   const [busy, setBusy] = useState<"approved" | "denied" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -55,14 +60,17 @@ export function ApprovalCard({
       await approvals.resolve(approval.approval_id, decision);
       onDecided(decision);
     } catch (err) {
-      // The most likely failure is that it already expired or someone else
-      // answered — say which, rather than "something went wrong".
+      if (err instanceof ApiError && err.code === "approval_not_pending" && onGone) {
+        onGone(err.message);
+        return;
+      }
+      // Anything else: say what happened, rather than "something went wrong".
       setError(err instanceof ApiError ? err.message : "Could not record that decision.");
       setBusy(null);
     }
   };
 
-  const tool = approval.tool.replace(/^mcp__caps__/, "");
+  const tool = toolLabel(approval.tool);
 
   return (
     <div

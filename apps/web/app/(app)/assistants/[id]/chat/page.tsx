@@ -4,6 +4,7 @@ import Link from "next/link";
 import { use, useCallback, useEffect, useState } from "react";
 
 import { ChatThread } from "@/components/chat/ChatThread";
+import { LoadFailed, loadFailure, type LoadFailure } from "@/components/load-state";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { useConfirm, usePrompt } from "@/components/ui/dialog";
 import { ApiError, assistants, conversations, type Conversation } from "@/lib/api";
@@ -17,8 +18,17 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const [loading, setLoading] = useState(true);
   const [more, setMore] = useState<string | null>(null);
 
+  const [failure, setFailure] = useState<LoadFailure | null>(null);
+
   const load = useCallback(async () => {
-    const [a, page] = await Promise.all([assistants.get(id), conversations.list(id)]);
+    let a, page;
+    try {
+      [a, page] = await Promise.all([assistants.get(id), conversations.list(id)]);
+    } catch (err) {
+      setFailure(loadFailure(err));
+      setLoading(false);
+      return;
+    }
     setName(a.name);
     setRows(page.items);
     setMore(page.next_cursor);
@@ -52,14 +62,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const askTitle = usePrompt();
 
   const rename = useCallback(
-    async (c: Conversation) => {
+    async (c: Conversation, preset?: string) => {
+      // `/rename <title>` passes the title; the Rename button asks for one.
       const title = (
-        await askTitle({
+        preset ??
+        (await askTitle({
           title: "Rename conversation",
           label: "Title",
           defaultValue: c.title,
           confirmLabel: "Rename",
-        })
+        }))
       )?.trim();
       if (!title || title === c.title) return;
       setError(null);
@@ -95,6 +107,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     [rows, active, confirm],
   );
 
+  const current = rows.find((r) => r.id === active);
+
+  if (failure) return <LoadFailed failure={failure} what="assistant" />;
   if (loading) return <div className="text-muted-foreground p-10 text-sm">Loading…</div>;
 
   return (
@@ -162,7 +177,15 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       </aside>
       <div className="min-w-0 flex-1">
         {active ? (
-          <ChatThread key={active} conversationId={active} assistantId={id} />
+          <ChatThread
+            key={active}
+            conversationId={active}
+            assistantId={id}
+            title={current?.title ?? "Conversation"}
+            onNewChat={() => void newChat()}
+            onRename={(title) => current && void rename(current, title)}
+            onArchive={() => current && void archive(current)}
+          />
         ) : (
           <div className="flex h-full items-center justify-center">
             <button className={buttonVariants()} onClick={() => void newChat()}>

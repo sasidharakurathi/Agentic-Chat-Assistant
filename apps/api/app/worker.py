@@ -15,7 +15,7 @@ import logging
 import uuid
 from typing import Any, ClassVar
 
-from arq import func
+from arq import cron, func
 from arq.connections import RedisSettings
 
 from app.config import settings
@@ -68,6 +68,47 @@ async def refresh_schema_job(ctx: dict[str, Any], connection_id: str) -> None:
             log.info("schema_refresh_failed", connection_id=connection_id, error=exc.message)
 
 
+#: How many remote MCP servers the sweep checks at once.
+MCP_SWEEP_CONCURRENCY = 4
+
+
+async def mcp_health_sweep(ctx: dict[Any, Any], *_args: Any, **_kwargs: Any) -> None:
+    """Check every enabled remote (http/sse) MCP server, so the MCP tab shows
+    a server that went down without anyone pressing Check (plan §7.2).
+
+    Local-command servers are left out: checking one means starting it, and
+    starting every stdio server on a timer would be the runner's heaviest
+    work for the least information. They are checked when used or when
+    someone presses Check.
+    """
+    import anyio
+    from sqlalchemy import select
+
+    from app.models.integration import McpServer, McpTransport
+    from app.services import mcp_discovery
+
+    async with get_sessionmaker()() as session:
+        ids = (
+            await session.scalars(
+                select(McpServer.id).where(
+                    McpServer.enabled.is_(True), McpServer.transport != McpTransport.stdio
+                )
+            )
+        ).all()
+    limiter = anyio.Semaphore(MCP_SWEEP_CONCURRENCY)
+
+    async def one(server_id: uuid.UUID) -> None:
+        async with limiter, get_sessionmaker()() as session:
+            server = await session.get(McpServer, server_id)
+            if server is not None:
+                await mcp_discovery.check(session, server)
+
+    async with anyio.create_task_group() as tg:
+        for server_id in ids:
+            tg.start_soon(one, server_id)
+    log.info("mcp_health_sweep", checked=len(ids))
+
+
 class WorkerSettings:
     functions: ClassVar = [
         # Arq's default job timeout is 300 s. Indexing a long document on the
@@ -76,9 +117,12 @@ class WorkerSettings:
         func(ingest_data_source_job, timeout=settings.ingest_job_timeout_s),
         refresh_schema_job,
     ]
+    cron_jobs: ClassVar = [
+        cron(mcp_health_sweep, minute={0, 15, 30, 45}, run_at_startup=False, timeout=600),
+    ]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
 
 
-__all__ = ["WorkerSettings", "ingest_data_source_job", "refresh_schema_job"]
+__all__ = ["WorkerSettings", "ingest_data_source_job", "mcp_health_sweep", "refresh_schema_job"]

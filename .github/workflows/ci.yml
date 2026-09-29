@@ -95,8 +95,8 @@ jobs:
         run: npm audit --audit-level=high
 
   # The images were never built by anything, so a broken Dockerfile could sit
-  # undetected until someone tried to deploy. Build both, then prove each one
-  # actually starts: build success alone says nothing about the entrypoint.
+  # undetected until someone tried to deploy. Build all three, then prove each
+  # one actually starts: build success alone says nothing about the entrypoint.
   docker:
     runs-on: ubuntu-latest
     steps:
@@ -125,6 +125,33 @@ jobs:
           push: false
           cache-from: type=gha,scope=api
           cache-to: type=gha,mode=max,scope=api
+
+      - name: Build MCP runner image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/mcp-runner.Dockerfile
+          tags: assistant-studio-mcp-runner:ci
+          load: true
+          push: false
+          cache-from: type=gha,scope=mcp-runner
+          cache-to: type=gha,mode=max,scope=mcp-runner
+
+      # Run it the way docker-compose.yml does (internal-only network,
+      # read-only, no capabilities, no privilege escalation) and prove, from
+      # inside, that a server started through it gets every limit, none of
+      # the runner's environment, a private directory and no internet.
+      - name: Sandbox-test the MCP runner image
+        run: |
+          docker network create --internal mcp-ci
+          docker run -d --name mcp-runner --network mcp-ci --read-only \
+            --tmpfs /tmp:size=512m,mode=1777 --cap-drop ALL \
+            --security-opt no-new-privileges:true --pids-limit 512 --memory 2g \
+            -e MCP_RUNNER_TOKEN=ci-runner-token-0123456789 -e MCP_RUNNER_NETWORK=none \
+            -v "$PWD/apps/api/tests/fixtures:/fixtures:ro" \
+            assistant-studio-mcp-runner:ci
+          sleep 3
+          docker exec mcp-runner python /fixtures/runner_probe.py || { docker logs mcp-runner; exit 1; }
 
       - name: Smoke-test the web image
         run: |

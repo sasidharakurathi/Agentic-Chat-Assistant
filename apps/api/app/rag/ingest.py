@@ -47,7 +47,7 @@ from app.rag.chunking import ChunkSpan, chunk_document
 from app.rag.contextualize import ContextResult, apply_prefix, get_contextualizer
 from app.rag.embedders import Embedder, get_embedder
 from app.rag.embedders.voyage import batches
-from app.rag.fetch import fetch_url_text
+from app.rag.fetch import UrlFetchError, fetch_url_text
 from app.rag.parsers import ParsedDocument, parse_by_mime, parse_text
 from app.rag.usage import Meter
 from app.rag.vectorstore import ChunkRecord, PgVectorStore
@@ -127,7 +127,10 @@ async def _fetch(source: DataSource) -> Fetched:
     if source.type == DataSourceType.url:
         if not source.uri:
             raise IngestError("url data source has no uri")
-        text = await fetch_url_text(source.uri)
+        try:
+            text = await fetch_url_text(source.uri)
+        except UrlFetchError as exc:
+            raise IngestError(str(exc)) from exc
         if not text.strip():
             raise IngestError(f"no extractable content at {source.uri}")
         return Fetched(ParsedDocument(text=text, title=source.name), "text/html", _sha(text))

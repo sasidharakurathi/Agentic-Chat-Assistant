@@ -2,32 +2,43 @@
 
 import { useState } from "react";
 
+import { BUILTIN_TOOLS, TOOL_LABEL } from "@/components/config/tool-settings";
 import { Button } from "@/components/ui/button";
-import type { DataSource, DbConnection } from "@/lib/api";
+import type { DataSource, DbConnection, McpServer } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /** What the canvas can add today.
  *
- *  The RAG node types (Phase 2) plus `database` (Phase 3). `tool`,
- *  `mcp_server` and `subagent` are still absent: they reference things that
- *  do not exist yet (an MCP server registration, a user-composed subagent),
- *  and offering them would let someone build a graph that can never
- *  validate. They arrive with their own phases.
+ *  The RAG node types (Phase 2), `database` (Phase 3) and the built-in
+ *  `tool`s (Phase 4). `mcp_server` arrives once servers can be registered,
+ *  and `subagent` with Phase 5: offering them before then would let someone
+ *  build a graph that can never validate.
  */
 export function NodePalette({
   sources,
   databases,
   hasKnowledgeBase,
+  toolsOnCanvas = [],
+  mcpServers = [],
   onAddKnowledgeBase,
   onAddDataSource,
   onAddDatabase,
+  onAddTool,
+  onAddMcpServer,
 }: {
   sources: DataSource[];
   databases: DbConnection[];
   hasKnowledgeBase: boolean;
+  /** Tool keys already on the canvas; a second node for one would be
+   *  rejected by validation, so those are shown as added instead. */
+  toolsOnCanvas?: string[];
   onAddKnowledgeBase: () => void;
   onAddDataSource: (dataSourceId: string) => void;
   onAddDatabase: (connectionId: string) => void;
+  onAddTool?: (key: string) => void;
+  /** Registered MCP servers (the MCP tab); one node each. */
+  mcpServers?: McpServer[];
+  onAddMcpServer?: (serverId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -105,6 +116,50 @@ export function NodePalette({
               </button>
             ))}
           </div>
+
+          {onAddTool && (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-muted-foreground text-xs font-medium">Tools</p>
+              {BUILTIN_TOOLS.map((key) => {
+                const added = toolsOnCanvas.includes(key);
+                return (
+                  <button
+                    key={key}
+                    onClick={() => onAddTool(key)}
+                    className="border-border hover:bg-muted flex items-center gap-2 rounded-md border px-2 py-1.5 text-left text-xs"
+                  >
+                    <span className="bg-node-tool inline-block h-2 w-2 shrink-0 rounded-full" />
+                    <span className="truncate">{TOOL_LABEL[key]}</span>
+                    {added && <span className="text-muted-foreground ml-auto shrink-0">added</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {onAddMcpServer && (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-muted-foreground text-xs font-medium">MCP servers</p>
+              {mcpServers.length === 0 && (
+                <p className="text-muted-foreground text-xs">
+                  None yet — add one in the <strong>MCP</strong> tab.
+                </p>
+              )}
+              {mcpServers.map((server) => (
+                <button
+                  key={server.id}
+                  onClick={() => onAddMcpServer(server.id)}
+                  className="border-border hover:bg-muted flex items-center gap-2 rounded-md border px-2 py-1.5 text-left text-xs"
+                >
+                  <span className="bg-node-mcp inline-block h-2 w-2 shrink-0 rounded-full" />
+                  <span className="truncate">{server.name}</span>
+                  <span className="text-muted-foreground ml-auto shrink-0">
+                    {server.tools.length} tools
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
 
           <p className="text-muted-foreground text-xs">
             Drag from a node&apos;s right edge to its target to wire it up.

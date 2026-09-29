@@ -1026,7 +1026,12 @@ Legend: **P0** must-ship for the phase demo · **P1** should · **P2** stretch.
 3. Contextual-retrieval cost vs. benefit on the reference corpus — measure in Phase 2,
    keep the toggle.
 4. Whether `mcp-runner` should be a sidecar container or per-server ephemeral containers
-   (decide in Phase 4 based on the sandboxing spike).
+   (decide in Phase 4 based on the sandboxing spike). **Decided (task 4.4):** one sidecar
+   container, one jailed process per session. Per-server containers would mean giving the
+   API the Docker socket, which is root on the host. See EXPLAINER §10.6.
+10. Allowlisted egress for stdio MCP servers (plan §7.2): the runner is offline by default,
+    with an all-or-nothing opt-in network (`docker-compose.mcp-egress.yml`). Per-server
+    destination allowlists need a filtering egress proxy; not built yet.
 5. Multi-worker approval routing: sticky-by-conversation vs. Redis pub/sub — validate under
    load in Phase 6.
 6. Data retention defaults and a deletion/export API (candidate for a fast-follow after v1).

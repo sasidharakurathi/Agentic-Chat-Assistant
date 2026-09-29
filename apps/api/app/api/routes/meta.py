@@ -5,6 +5,7 @@ from typing import Any, get_args
 from fastapi import APIRouter
 
 from app.agent.models import ALLOWED_MODELS, DEFAULT_MODEL_BY_ROLE
+from app.config import settings
 from app.graph.nodes import NodeType
 from app.graph.validate import ALLOWED_EDGES, SINGLETON_TYPES
 from app.schemas.assistant_config import config_json_schema, default_config
@@ -21,6 +22,9 @@ async def get_config_schema() -> dict[str, Any]:
         "default": default_config().model_dump(mode="json"),
         "allowed_models": sorted(ALLOWED_MODELS),
         "default_model_by_role": DEFAULT_MODEL_BY_ROLE,
+        # Offline mode (RAG_OFFLINE=1) switches web search off instance-wide,
+        # whatever an assistant's config says; the panels say so.
+        "offline": settings.rag_offline,
     }
 
 

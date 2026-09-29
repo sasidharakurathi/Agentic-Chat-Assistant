@@ -38,10 +38,13 @@ class CapabilityTool:
     read_only: bool = True
     #: Reaches beyond systems this deployment controls (the public web).
     open_world: bool = False
+    #: The in-process SDK server it belongs to: `caps` for the platform's
+    #: own tools, a registered MCP server's name for its tools (task 4.6).
+    server: str = CAPS_SERVER_NAME
 
     @property
     def qualified_name(self) -> str:
-        return f"mcp__{CAPS_SERVER_NAME}__{self.name}"
+        return f"mcp__{self.server}__{self.name}"
 
 
 def _text(s: str) -> dict[str, Any]:
@@ -153,7 +156,7 @@ def annotations_for(t: CapabilityTool) -> ToolAnnotations:
     )
 
 
-def build_caps_server(tools: list[CapabilityTool]) -> McpSdkServerConfig:
+def build_sdk_server(name: str, tools: list[CapabilityTool]) -> McpSdkServerConfig:
     """Wrap capability tools as a claude_agent_sdk in-process MCP server."""
     sdk_tools = [
         tool(t.name, t.description, t.input_schema, annotations=annotations_for(t))(
@@ -161,7 +164,20 @@ def build_caps_server(tools: list[CapabilityTool]) -> McpSdkServerConfig:
         )
         for t in tools
     ]
-    return create_sdk_mcp_server(name=CAPS_SERVER_NAME, version="0.1.0", tools=sdk_tools)
+    return create_sdk_mcp_server(name=name, version="0.1.0", tools=sdk_tools)
+
+
+def build_caps_server(tools: list[CapabilityTool]) -> McpSdkServerConfig:
+    return build_sdk_server(CAPS_SERVER_NAME, tools)
+
+
+def build_sdk_servers(tools: list[CapabilityTool]) -> dict[str, McpSdkServerConfig]:
+    """One in-process server per `server` name: `caps`, plus one for each
+    registered MCP server this turn uses."""
+    groups: dict[str, list[CapabilityTool]] = {}
+    for t in tools:
+        groups.setdefault(t.server, []).append(t)
+    return {name: build_sdk_server(name, group) for name, group in groups.items()}
 
 
 def _wrap(handler: ToolHandler) -> ToolHandler:
@@ -181,4 +197,6 @@ __all__ = [
     "CapabilityTool",
     "annotations_for",
     "build_caps_server",
+    "build_sdk_server",
+    "build_sdk_servers",
 ]

@@ -5,6 +5,7 @@ including in the browser's dry runs. That also means it never looked at what a
 node *points at*. This module is the other half: it resolves every
 `connection_id` and `data_source_id` against this assistant's own rows and
 reports what does not hold up, as ordinary graph errors on the offending node.
+MCP server nodes (Phase 4) are checked the same way.
 
 Scoped to the assistant, not merely the org: a connection another assistant
 owns is not this one's to wire in, even inside the same organization.
@@ -18,9 +19,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.datasources.sql_guard import Permissions
-from app.graph.nodes import DatabaseNode, DataSourceNode, Graph
+from app.graph.nodes import DatabaseNode, DataSourceNode, Graph, McpServerNode
 from app.graph.validate import GraphIssue
-from app.models.integration import DbConnection
+from app.models.integration import DbConnection, McpServer
 from app.models.rag import DataSource
 
 
@@ -53,6 +54,17 @@ async def _source_ids(
         select(DataSource.id).where(
             DataSource.id.in_(wanted), DataSource.assistant_id == assistant_id
         )
+    )
+    return set(rows.all())
+
+
+async def _server_ids(
+    session: AsyncSession, assistant_id: uuid.UUID, wanted: set[uuid.UUID]
+) -> set[uuid.UUID]:
+    if not wanted:
+        return set()
+    rows = await session.scalars(
+        select(McpServer.id).where(McpServer.id.in_(wanted), McpServer.assistant_id == assistant_id)
     )
     return set(rows.all())
 
@@ -103,6 +115,23 @@ async def reference_issues(
                     message="This data source does not exist on this assistant. "
                     "Pick one from the Sources tab, or remove the node.",
                     node_id=ds_node.id,
+                )
+            )
+
+    mcp_nodes = [n for n in graph.nodes if isinstance(n, McpServerNode)]
+    servers = await _server_ids(
+        session, assistant_id, {u for n in mcp_nodes if (u := _as_uuid(n.data.mcp_server_id))}
+    )
+    for mcp_node in mcp_nodes:
+        mid = _as_uuid(mcp_node.data.mcp_server_id)
+        # A malformed id is already an error from the graph validator.
+        if mid is not None and mid not in servers:
+            issues.append(
+                GraphIssue(
+                    code="unknown_mcp_server",
+                    message="This MCP server is not registered on this assistant. "
+                    "Pick one from the MCP servers tab, or remove the node.",
+                    node_id=mcp_node.id,
                 )
             )
     return issues

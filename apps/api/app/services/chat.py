@@ -224,12 +224,24 @@ async def archive(
 
 
 async def _config_for(session: AsyncSession, conv: Conversation) -> AssistantConfig:
-    if conv.assistant_version_id is not None:
-        version = await session.get(AssistantVersion, conv.assistant_version_id)
-        if version is not None:
-            return AssistantConfig.model_validate(version.config)
+    """The config this turn runs with: the assistant's current published
+    version, or its draft while nothing is published.
+
+    Read at every turn. Conversations used to keep the version that was live
+    when they started, so publishing a fix reached only new conversations and
+    an existing one went on answering with the old prompt and tools. The
+    conversation now records the version it is on, and each run the version
+    that answered it (`runs.version_number`), so a change in behaviour can be
+    traced to a publish.
+    """
     assistant = await session.get(Assistant, conv.assistant_id)
     assert assistant is not None
+    if assistant.current_version_id is not None:
+        version = await session.get(AssistantVersion, assistant.current_version_id)
+        if version is not None:
+            conv.assistant_version_id = version.id
+            return AssistantConfig.model_validate(version.config)
+    conv.assistant_version_id = None
     return AssistantConfig.model_validate(assistant.draft_config)
 
 
@@ -578,10 +590,16 @@ async def _finalize(
     session.add(asst_msg)
     await session.flush()
 
+    version = (
+        await session.get(AssistantVersion, conv.assistant_version_id)
+        if conv.assistant_version_id is not None
+        else None
+    )
     run = Run(
         conversation_id=conv.id,
         message_id=asst_msg.id,
         org_id=conv.org_id,
+        version_number=version.version_number if version is not None else None,
         model=config.models.main.model,
         effort=config.models.main.effort,
         driver=o.driver_name,
@@ -623,6 +641,7 @@ async def _finalize(
                 output=call.get("output"),
                 status=call.get("status"),
                 latency_ms=o.tool_latency_ms.get(str(call.get("id"))),
+                permission=o.permissions.get(str(call.get("id"))),
             )
         )
     if o.web_searches:

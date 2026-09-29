@@ -17,6 +17,7 @@ import anyio
 from sqlalchemy import select
 
 from app.agent.approvals import ApprovalRequest, build_can_use_tool, redact
+from app.agent.caps_mcp import McpToolset, build_mcp_toolset
 from app.agent.citations import Citation, CitationRegistry
 from app.agent.driver import get_driver
 from app.agent.events import (
@@ -76,6 +77,9 @@ class TurnOutcome:
     #: tool call id -> wall-clock ns at the call, for its trace span.
     tool_started_ns: dict[str, int] = field(default_factory=dict)
     web_searches: int = 0
+    #: tool call id -> how it was permitted ("auto", "approved", "declined",
+    #: "expired", "interrupted", "refused"); stored on its audit row.
+    permissions: dict[str, str] = field(default_factory=dict)
 
 
 class Turn:
@@ -192,6 +196,9 @@ class Turn:
             return {str(cid): engine.value for cid, engine in rows.all()}
 
     async def stream(self) -> AsyncGenerator[AgentEvent, None]:
+        # Tools from the assistant's MCP servers (task 4.6). Their
+        # connections open on first use and are closed when the turn ends.
+        mcp = await build_mcp_toolset(self._config, self._assistant_id)
         spec = build_runtime_spec(
             self._config,
             assistant_id=self._assistant_id,
@@ -199,6 +206,7 @@ class Turn:
             citations=self.registry,
             budget_remaining_usd=self._budget_remaining,
             db_engines=await self._db_engines(),
+            mcp_tools=mcp.tools,
         )
         driver = get_driver()
         self.outcome.driver_name = driver.name
@@ -207,6 +215,10 @@ class Turn:
             self._approvals,
             self._config.databases,
             credential_allows=self._credential_allows,
+            http=self._config.tools.http_request,
+            read_only_mcp=frozenset(t.qualified_name for t in mcp.tools if t.read_only),
+            mcp_modes=mcp.modes,
+            permissions=self.outcome.permissions,
         )
 
         # The pump feeds the same queue `emit()` writes to, so an approval
@@ -247,7 +259,7 @@ class Turn:
                     # Interrupted, and the driver did not stop by itself in
                     # time. `finally` cancels the pump.
                     break
-                event = _preview(cast(AgentEvent, item))
+                event = self._annotate(_preview(cast(AgentEvent, item)))
                 self._absorb(event)
                 yield event
 
@@ -279,26 +291,36 @@ class Turn:
             self.outcome.error = "cancelled"
             raise
         finally:
-            # The pump owns the driver's generator; cancelling it is what
-            # closes the SDK client (and releases any approval wait) when a
-            # client disconnects mid-turn.
-            if not task.done():
-                task.cancel()
-            # Wait for that cleanup *shielded*, and with a deadline.
-            #
-            # Unshielded, this await sits inside Starlette's cancelled anyio
-            # scope, which re-cancels this task on every await — and asyncio
-            # forwards each of those cancellations to the task being awaited.
-            # The pump was re-cancelled straight through its own cleanup, so a
-            # pending approval was never expired (reproduced over live HTTP; a
-            # one-shot `task.cancel()` in a test cannot show it). Shielding
-            # stops the forwarding; the deadline keeps a hung CLI from hanging
-            # the request forever.
-            with (
-                anyio.move_on_after(PUMP_SHUTDOWN_TIMEOUT_S, shield=True),
-                contextlib.suppress(asyncio.CancelledError, Exception),
-            ):
-                await task
+            await self._shut_down(task, mcp)
+
+    async def _shut_down(self, task: asyncio.Task[None], mcp: McpToolset) -> None:
+        # The pump owns the driver's generator; cancelling it is what
+        # closes the SDK client (and releases any approval wait) when a
+        # client disconnects mid-turn.
+        if not task.done():
+            task.cancel()
+        # Wait for that cleanup *shielded*, and with a deadline.
+        #
+        # Unshielded, this await sits inside Starlette's cancelled anyio
+        # scope, which re-cancels this task on every await — and asyncio
+        # forwards each of those cancellations to the task being awaited.
+        # The pump was re-cancelled straight through its own cleanup, so a
+        # pending approval was never expired (reproduced over live HTTP; a
+        # one-shot `task.cancel()` in a test cannot show it). Shielding
+        # stops the forwarding; the deadline keeps a hung CLI from hanging
+        # the request forever.
+        with (
+            anyio.move_on_after(PUMP_SHUTDOWN_TIMEOUT_S, shield=True),
+            contextlib.suppress(asyncio.CancelledError, Exception),
+        ):
+            await task
+        # After the driver has stopped calling tools: close this turn's
+        # MCP connections (and so stop any local-command servers).
+        with (
+            anyio.move_on_after(PUMP_SHUTDOWN_TIMEOUT_S, shield=True),
+            contextlib.suppress(Exception),
+        ):
+            await mcp.aclose()
 
     def _absorb(self, ev: AgentEvent) -> None:
         o = self.outcome
@@ -342,12 +364,21 @@ class Turn:
         self.outcome.tool_started_ns[ev.id] = time.time_ns()
         log.info("tool_started", tool=ev.name, call_id=ev.id)
 
+    def _annotate(self, ev: AgentEvent) -> AgentEvent:
+        """A tool result carries how its call was permitted (task 4.7), so the
+        client can show it without waiting for the stored message."""
+        if isinstance(ev, ToolResultEvent) and ev.id in self.outcome.permissions:
+            return ev.model_copy(update={"permission": self.outcome.permissions[ev.id]})
+        return ev
+
     def _absorb_result(self, ev: ToolResultEvent) -> None:
         o = self.outcome
         for call in o.tool_calls:
             if call["id"] == ev.id:
                 call["status"] = ev.status
                 call["output"] = ev.output
+                if ev.id in o.permissions:
+                    call["permission"] = o.permissions[ev.id]
         started = self._tool_started.pop(ev.id, None)
         if started is not None:
             o.tool_latency_ms[ev.id] = int((time.perf_counter() - started) * 1000)

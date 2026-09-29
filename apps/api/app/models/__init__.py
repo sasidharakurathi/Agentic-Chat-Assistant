@@ -23,6 +23,9 @@ from app.models.integration import (
     DbConnectionStatus,
     DbEngine,
     DbSchemaCache,
+    McpServer,
+    McpServerStatus,
+    McpTransport,
 )
 from app.models.invite import Invite
 from app.models.membership import Membership
@@ -54,6 +57,9 @@ __all__ = [
     "DbSchemaCache",
     "Document",
     "Invite",
+    "McpServer",
+    "McpServerStatus",
+    "McpTransport",
     "MemberRole",
     "Membership",
     "Message",

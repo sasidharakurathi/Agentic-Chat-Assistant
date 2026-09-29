@@ -53,6 +53,8 @@ export function RunDetails({
                 {run.status}
                 {run.error ? ` — ${run.error}` : ""}
               </dd>
+              <dt className="text-muted-foreground">Version</dt>
+              <dd>{run.version_number != null ? `v${run.version_number}` : "draft"}</dd>
               <dt className="text-muted-foreground">Model</dt>
               <dd>
                 {run.model ?? "—"}

@@ -339,6 +339,84 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/assistants/{assistant_id}/mcp-servers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Servers */
+        get: operations["list_servers_api_v1_assistants__assistant_id__mcp_servers_get"];
+        put?: never;
+        /** Create Server */
+        post: operations["create_server_api_v1_assistants__assistant_id__mcp_servers_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/assistants/{assistant_id}/mcp-servers/{server_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Server */
+        get: operations["get_server_api_v1_assistants__assistant_id__mcp_servers__server_id__get"];
+        put?: never;
+        post?: never;
+        /** Delete Server */
+        delete: operations["delete_server_api_v1_assistants__assistant_id__mcp_servers__server_id__delete"];
+        options?: never;
+        head?: never;
+        /** Update Server */
+        patch: operations["update_server_api_v1_assistants__assistant_id__mcp_servers__server_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/assistants/{assistant_id}/mcp-servers/{server_id}:discover-tools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Discover Tools
+         * @description Connect, list the server's tools, and store them on the server.
+         */
+        post: operations["discover_tools_api_v1_assistants__assistant_id__mcp_servers__server_id__discover_tools_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/assistants/{assistant_id}/mcp-servers/{server_id}:health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check Server
+         * @description Connect and complete the MCP handshake; record the outcome on the
+         *     server. For a local command, this starts it in the runner.
+         */
+        post: operations["check_server_api_v1_assistants__assistant_id__mcp_servers__server_id__health_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/assistants/{assistant_id}/versions": {
         parameters: {
             query?: never;
@@ -636,6 +714,49 @@ export interface paths {
         put?: never;
         /** Accept Invite */
         post: operations["accept_invite_api_v1_invites__token__accept_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mcp-presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Presets
+         * @description A short catalog of well-known MCP servers, to fill the Add form with
+         *     (task 4.8). Secrets are named, never supplied.
+         */
+        get: operations["list_presets_api_v1_mcp_presets_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mcp-runner": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Runner Status
+         * @description Whether local-command (stdio) servers can run, and how well they are
+         *     contained, so the MCP tab can say so instead of letting a partial
+         *     sandbox pass as a full one.
+         */
+        get: operations["runner_status_api_v1_mcp_runner_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1025,7 +1146,7 @@ export interface components {
             databases?: components["schemas"]["DatabaseRef-Input"][];
             guardrails?: components["schemas"]["Guardrails-Input"];
             /** Mcp Servers */
-            mcp_servers?: string[];
+            mcp_servers?: components["schemas"]["McpServerRef-Input"][];
             memory?: components["schemas"]["MemoryConfig-Input"];
             models?: components["schemas"]["ModelRoles-Input"];
             rag?: components["schemas"]["RagConfig-Input"];
@@ -1050,7 +1171,7 @@ export interface components {
             databases: components["schemas"]["DatabaseRef-Output"][];
             guardrails: components["schemas"]["Guardrails-Output"];
             /** Mcp Servers */
-            mcp_servers: string[];
+            mcp_servers: components["schemas"]["McpServerRef-Output"][];
             memory: components["schemas"]["MemoryConfig-Output"];
             models: components["schemas"]["ModelRoles-Output"];
             rag: components["schemas"]["RagConfig-Output"];
@@ -2261,6 +2382,123 @@ export interface components {
             /** Password */
             password: string;
         };
+        /**
+         * McpCheckResult
+         * @description The outcome of a health check or a tool discovery (task 4.5).
+         *
+         *     `ok: false` with a reason, not an HTTP error: a wrong header or a server
+         *     that is down is a normal thing to find while setting one up, and a 500
+         *     would make the form look broken instead of the server.
+         */
+        McpCheckResult: {
+            /**
+             * Elapsed Ms
+             * @default 0
+             */
+            elapsed_ms: number;
+            /** Error */
+            error: string | null;
+            /** Ok */
+            ok: boolean;
+            /** Skipped */
+            skipped: string[];
+            /** Tool Count */
+            tool_count: number | null;
+        };
+        /** McpPresetField */
+        McpPresetField: {
+            /** Hint */
+            hint: string;
+            /** Name */
+            name: string;
+        };
+        /**
+         * McpPresetOut
+         * @description One entry of the catalog (task 4.8): what the Add form is filled with.
+         */
+        McpPresetOut: {
+            /** Args */
+            args: string[];
+            /** Command */
+            command: string | null;
+            /** Description */
+            description: string;
+            /** Docs Url */
+            docs_url: string;
+            /** Env */
+            env: components["schemas"]["McpPresetField"][];
+            /** Headers */
+            headers: components["schemas"]["McpPresetField"][];
+            /** Key */
+            key: string;
+            /** Name */
+            name: string;
+            /**
+             * Needs Network
+             * @default true
+             */
+            needs_network: boolean;
+            /** Title */
+            title: string;
+            /**
+             * Transport
+             * @enum {string}
+             */
+            transport: "stdio" | "http" | "sse";
+            /** Url */
+            url: string | null;
+        };
+        /**
+         * McpRunnerStatus
+         * @description Where local-command servers run, and what protects them there.
+         */
+        McpRunnerStatus: {
+            /** Applied */
+            applied: string[];
+            /** Error */
+            error: string | null;
+            /**
+             * Full Sandbox
+             * @default false
+             */
+            full_sandbox: boolean;
+            /** Network */
+            network: string | null;
+            /** Platform */
+            platform: string | null;
+            /** Reachable */
+            reachable: boolean;
+        };
+        /** McpServerCreate */
+        McpServerCreate: {
+            /** Args */
+            args?: string[];
+            /** Command */
+            command?: string | null;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Env */
+            env?: {
+                [key: string]: string;
+            };
+            /** Headers */
+            headers?: {
+                [key: string]: string;
+            };
+            /** Name */
+            name: string;
+            sandbox?: components["schemas"]["SandboxLimits"] | null;
+            /**
+             * Transport
+             * @enum {string}
+             */
+            transport: "stdio" | "http" | "sse";
+            /** Url */
+            url?: string | null;
+        };
         /** McpServerNode */
         "McpServerNode-Input": {
             data: components["schemas"]["McpServerNodeData-Input"];
@@ -2287,30 +2525,178 @@ export interface components {
         };
         /** McpServerNodeData */
         "McpServerNodeData-Input": {
-            /**
-             * Approval
-             * @default require
-             * @enum {string}
-             */
-            approval: "auto" | "require" | "deny";
+            /** Approval */
+            approval?: ("auto" | "require" | "deny") | null;
             /** Mcp Server Id */
             mcp_server_id: string;
             /** Tool Allowlist */
             tool_allowlist?: string[];
+            /** Tool Approvals */
+            tool_approvals?: {
+                [key: string]: "auto" | "require" | "deny";
+            };
         };
         /** McpServerNodeData */
         "McpServerNodeData-Output": {
-            /**
-             * Approval
-             * @default require
-             * @enum {string}
-             */
-            approval: "auto" | "require" | "deny";
+            /** Approval */
+            approval: ("auto" | "require" | "deny") | null;
             /** Mcp Server Id */
             mcp_server_id: string;
             /** Tool Allowlist */
             tool_allowlist: string[];
+            /** Tool Approvals */
+            tool_approvals: {
+                [key: string]: "auto" | "require" | "deny";
+            };
         };
+        /**
+         * McpServerRef
+         * @description One registered MCP server, as this assistant version uses it (tasks 4.6 / 4.7).
+         *
+         *     `tools` is the allowlist: only these, and only if the server still lists
+         *     them, are offered to the model. Empty means none; nothing from a server
+         *     is usable until someone chooses it.
+         *
+         *     Approval, most specific first: `tool_approvals[tool]`, then `approval`
+         *     for the server, then the assistant's `approval_policy.mcp_default`
+         *     (see `approvals.mcp_mode`). `None` means "not set here".
+         */
+        "McpServerRef-Input": {
+            /** Approval */
+            approval?: ("auto" | "require" | "deny") | null;
+            /** Id */
+            id: string;
+            /** Tool Approvals */
+            tool_approvals?: {
+                [key: string]: "auto" | "require" | "deny";
+            };
+            /** Tools */
+            tools?: string[];
+        };
+        /**
+         * McpServerRef
+         * @description One registered MCP server, as this assistant version uses it (tasks 4.6 / 4.7).
+         *
+         *     `tools` is the allowlist: only these, and only if the server still lists
+         *     them, are offered to the model. Empty means none; nothing from a server
+         *     is usable until someone chooses it.
+         *
+         *     Approval, most specific first: `tool_approvals[tool]`, then `approval`
+         *     for the server, then the assistant's `approval_policy.mcp_default`
+         *     (see `approvals.mcp_mode`). `None` means "not set here".
+         */
+        "McpServerRef-Output": {
+            /** Approval */
+            approval: ("auto" | "require" | "deny") | null;
+            /** Id */
+            id: string;
+            /** Tool Approvals */
+            tool_approvals: {
+                [key: string]: "auto" | "require" | "deny";
+            };
+            /** Tools */
+            tools: string[];
+        };
+        /**
+         * McpServerStatus
+         * @enum {string}
+         */
+        McpServerStatus: "unknown" | "ok" | "error";
+        /**
+         * McpServerSummary
+         * @description Everything safe to show. Header and environment values are absent by
+         *     construction: there is no field that could carry them.
+         */
+        McpServerSummary: {
+            /** Args */
+            args: string[];
+            /**
+             * Assistant Id
+             * Format: uuid
+             */
+            assistant_id: string;
+            /** Command */
+            command: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Env Keys */
+            env_keys: string[];
+            /** Error */
+            error: string | null;
+            /** Header Names */
+            header_names: string[];
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Last Checked At */
+            last_checked_at: string | null;
+            /** Name */
+            name: string;
+            sandbox: components["schemas"]["SandboxLimits"];
+            status: components["schemas"]["McpServerStatus"];
+            /** Tools */
+            tools: components["schemas"]["McpToolOut"][];
+            /** Tools Discovered At */
+            tools_discovered_at: string | null;
+            transport: components["schemas"]["McpTransport"];
+            /** Url */
+            url: string | null;
+        };
+        /**
+         * McpServerUpdate
+         * @description Omit a field to leave it alone. `headers` / `env`: send an object to
+         *     replace them all, `{}` to clear them. The transport cannot change; delete
+         *     and re-add the server instead.
+         */
+        McpServerUpdate: {
+            /** Args */
+            args?: string[] | null;
+            /** Command */
+            command?: string | null;
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Env */
+            env?: {
+                [key: string]: string;
+            } | null;
+            /** Headers */
+            headers?: {
+                [key: string]: string;
+            } | null;
+            /** Name */
+            name?: string | null;
+            sandbox?: components["schemas"]["SandboxLimits"] | null;
+            /** Url */
+            url?: string | null;
+        };
+        /** McpToolOut */
+        McpToolOut: {
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+            /** Input Schema */
+            input_schema: {
+                [key: string]: unknown;
+            };
+            /** Name */
+            name: string;
+            /** Read Only */
+            read_only: boolean | null;
+        };
+        /**
+         * McpTransport
+         * @enum {string}
+         */
+        McpTransport: "stdio" | "http" | "sse";
         /** MemberOut */
         MemberOut: {
             /** Email */
@@ -2656,6 +3042,13 @@ export interface components {
         Page_DbConnectionSummary_: {
             /** Items */
             items: components["schemas"]["DbConnectionSummary"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** Page[McpServerSummary] */
+        Page_McpServerSummary_: {
+            /** Items */
+            items: components["schemas"]["McpServerSummary"][];
             /** Next Cursor */
             next_cursor: string | null;
         };
@@ -3013,6 +3406,8 @@ export interface components {
             tokens_out: number;
             /** Trace Id */
             trace_id: string | null;
+            /** Version Number */
+            version_number: number | null;
         };
         /**
          * RunOut
@@ -3058,6 +3453,8 @@ export interface components {
             tokens_out: number;
             /** Trace Id */
             trace_id: string | null;
+            /** Version Number */
+            version_number: number | null;
         };
         /**
          * RunStatus
@@ -3079,6 +3476,44 @@ export interface components {
             output: string | null;
             /** Status */
             status: string | null;
+        };
+        /** SandboxLimits */
+        SandboxLimits: {
+            /**
+             * Cpu Seconds
+             * @default 600
+             */
+            cpu_seconds: number;
+            /**
+             * Idle Timeout S
+             * @default 600
+             */
+            idle_timeout_s: number;
+            /**
+             * Max File Mb
+             * @default 64
+             */
+            max_file_mb: number;
+            /**
+             * Max Open Files
+             * @default 256
+             */
+            max_open_files: number;
+            /**
+             * Max Processes
+             * @default 128
+             */
+            max_processes: number;
+            /**
+             * Memory Mb
+             * @default 1024
+             */
+            memory_mb: number;
+            /**
+             * Wall Clock S
+             * @default 3600
+             */
+            wall_clock_s: number;
         };
         /** SubagentNode */
         "SubagentNode-Input": {
@@ -4449,6 +4884,255 @@ export interface operations {
             };
         };
     };
+    list_servers_api_v1_assistants__assistant_id__mcp_servers_get: {
+        parameters: {
+            query?: {
+                /** @description `next_cursor` from the previous page. */
+                cursor?: string | null;
+                /** @description Items per page. */
+                limit?: number;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                assistant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_McpServerSummary_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_server_api_v1_assistants__assistant_id__mcp_servers_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                assistant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["McpServerCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpServerSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_server_api_v1_assistants__assistant_id__mcp_servers__server_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                assistant_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpServerSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_server_api_v1_assistants__assistant_id__mcp_servers__server_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                assistant_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Message"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_server_api_v1_assistants__assistant_id__mcp_servers__server_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                assistant_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["McpServerUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpServerSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    discover_tools_api_v1_assistants__assistant_id__mcp_servers__server_id__discover_tools_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                assistant_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpCheckResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    check_server_api_v1_assistants__assistant_id__mcp_servers__server_id__health_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                assistant_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpCheckResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_versions_api_v1_assistants__assistant_id__versions_get: {
         parameters: {
             query?: {
@@ -5131,6 +5815,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["InviteAccepted"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_presets_api_v1_mcp_presets_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpPresetOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    runner_status_api_v1_mcp_runner_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpRunnerStatus"];
                 };
             };
             /** @description Validation Error */

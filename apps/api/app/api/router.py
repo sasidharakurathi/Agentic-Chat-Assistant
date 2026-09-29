@@ -10,6 +10,7 @@ from app.api.routes import (
     data_sources,
     db_connections,
     health,
+    mcp_servers,
     meta,
     orgs,
 )
@@ -25,6 +26,7 @@ api_v1.include_router(assistants.router)
 api_v1.include_router(conversations.router)
 api_v1.include_router(data_sources.router)
 api_v1.include_router(db_connections.router)
+api_v1.include_router(mcp_servers.router)
 api_v1.include_router(approvals.router)
 api_v1.include_router(meta.router)
 

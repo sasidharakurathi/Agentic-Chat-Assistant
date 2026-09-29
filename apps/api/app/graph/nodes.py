@@ -96,7 +96,10 @@ class ToolNodeData(_Strict):
 class McpServerNodeData(_Strict):
     mcp_server_id: str
     tool_allowlist: list[str] = Field(default_factory=list)
-    approval: ApprovalMode = "require"
+    #: The server's rule for this version; None means the assistant default.
+    approval: ApprovalMode | None = None
+    #: Per-tool rules, over the server's (task 4.7).
+    tool_approvals: dict[str, ApprovalMode] = Field(default_factory=dict)
 
 
 class SubagentNodeData(_Strict):

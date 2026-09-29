@@ -60,7 +60,8 @@ def build_subagent_specs(config: AssistantConfig) -> list[SubagentSpec]:
     Retrieval is gated on the knowledge base actually existing, not just on
     the toggle: an enabled retrieval subagent with ``rag.enabled = False``
     would be handed no tools at all and would burn a turn discovering that.
-    The graph validator warns about the same shape (``bare_subagent``).
+    The graph validator warns about the same shape
+    (``subagent_without_knowledge_base``).
     """
     specs: list[SubagentSpec] = []
     if config.subagents.retrieval and config.rag.enabled:

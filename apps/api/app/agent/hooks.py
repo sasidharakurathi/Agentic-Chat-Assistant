@@ -11,12 +11,18 @@ Where each hook duty from the plan is actually enforced:
   through the same code.
 - **PostToolUse: record the call and its cost.** In `chat._finalize`: a row in
   `tool_calls` per call, with latency, and web searches on the usage ledger.
+- **PreToolUse: web search limits.** The SDK has no option for
+  `tools.web_search.max_uses` or `allowed_domains`, so the gate enforces them:
+  it counts searches in the turn and refuses past the limit, and it rewrites
+  each search's input so its `allowed_domains` stay inside the configured
+  list.
 - **Stop: finalize the turn.** `chat.run_message` finalizes in a shielded
   block on every exit path, including a client disconnect, where a Stop hook
   would never run at all.
 
-MCP servers users register (Phase 4) do not pass through
-`run_capability`; their outputs will need a real PostToolUse hook here.
+Tools from MCP servers users register (task 4.6) are platform capabilities
+too (`app/agent/caps_mcp.py`), so their results take the same post-tool
+step; no separate PostToolUse hook is needed.
 """
 
 from __future__ import annotations
@@ -27,11 +33,36 @@ from claude_agent_sdk import HookMatcher
 from claude_agent_sdk.types import HookEvent
 
 from app.logging import get_logger
+from app.schemas.assistant_config import WebSearchTool
+from app.security.ssrf import host_allowed, normalize_domain
 
 log = get_logger(__name__)
 
 
-def build_tool_gate(permitted: frozenset[str]) -> Any:
+#: The SDK built-in for web search (duplicated from options to avoid a cycle).
+WEB_SEARCH = "WebSearch"
+
+
+def constrain_web_search(tool_input: dict[str, Any], allowed: list[str]) -> dict[str, Any] | None:
+    """The search input with its domains held inside `allowed`, or None when
+    no allowlist is configured (nothing to change).
+
+    The model may narrow the list further, never widen it. Domains it asks
+    for that fall outside the list are dropped; if none are left, the whole
+    configured list is used. `blocked_domains` is removed because the search
+    API refuses a request that sets both.
+    """
+    configured = [normalize_domain(d) for d in allowed if normalize_domain(d)]
+    if not configured:
+        return None
+    requested = [normalize_domain(str(d)) for d in (tool_input.get("allowed_domains") or [])]
+    narrowed = [d for d in requested if d and host_allowed(d, configured)]
+    out = {k: v for k, v in tool_input.items() if k != "blocked_domains"}
+    out["allowed_domains"] = narrowed or configured
+    return out
+
+
+def build_tool_gate(permitted: frozenset[str], web_search: WebSearchTool | None = None) -> Any:
     """A `PreToolUse` hook that denies any tool this assistant has not enabled.
 
     `can_use_tool` alone cannot be the final gate: the CLI only consults it for
@@ -44,25 +75,59 @@ def build_tool_gate(permitted: frozenset[str]) -> Any:
     Returning "allow" here would skip that callback entirely.
     """
 
+    searches = 0
+
     async def gate(input_data: Any, _tool_use_id: str | None, _context: Any) -> dict[str, Any]:
+        nonlocal searches
         name = str(input_data.get("tool_name", ""))
-        if name in permitted:
-            return {}
-        log.warning("tool_blocked_by_gate", tool=name)
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": f"{name} is not enabled for this assistant.",
-            }
-        }
+        if name not in permitted:
+            log.warning("tool_blocked_by_gate", tool=name)
+            return _deny(f"{name} is not enabled for this assistant.")
+        if name == WEB_SEARCH and web_search is not None:
+            # One gate per turn (options are built per turn), subagents
+            # included, so this counts every search the turn makes.
+            searches += 1
+            if searches > web_search.max_uses:
+                log.info("web_search_limit", max_uses=web_search.max_uses)
+                return _deny(
+                    f"This assistant allows {web_search.max_uses} web searches per turn, "
+                    "and they have been used. Answer from what you already found."
+                )
+            tool_input = input_data.get("tool_input") or {}
+            constrained = constrain_web_search(dict(tool_input), web_search.allowed_domains)
+            if constrained is not None:
+                # `updatedInput` only applies alongside a decision. "allow"
+                # is safe for WebSearch: `can_use_tool` treats it as a
+                # no-action tool and would allow it anyway.
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                        "updatedInput": constrained,
+                    }
+                }
+        return {}
 
     return gate
 
 
-def build_hooks(permitted: frozenset[str]) -> dict[HookEvent, list[HookMatcher]]:
+def _deny(reason: str) -> dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+def build_hooks(
+    permitted: frozenset[str], web_search: WebSearchTool | None = None
+) -> dict[HookEvent, list[HookMatcher]]:
     """The `hooks` option for `ClaudeAgentOptions`."""
-    return {"PreToolUse": [HookMatcher(matcher=None, hooks=[build_tool_gate(permitted)])]}
+    return {
+        "PreToolUse": [HookMatcher(matcher=None, hooks=[build_tool_gate(permitted, web_search)])]
+    }
 
 
-__all__ = ["build_hooks", "build_tool_gate"]
+__all__ = ["build_hooks", "build_tool_gate", "constrain_web_search"]

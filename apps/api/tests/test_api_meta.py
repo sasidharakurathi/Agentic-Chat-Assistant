@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import get_args
 
+import pytest
+from app.config import settings
 from app.graph.nodes import NodeType
 from app.graph.validate import ALLOWED_EDGES, SINGLETON_TYPES
 from httpx import AsyncClient
@@ -22,6 +24,16 @@ async def test_config_schema_exposes_a_schema_and_a_usable_default(client: Async
     assert body["schema"]["type"] == "object"
     assert body["default"]["rag"]["enabled"] is False
     assert "claude-sonnet-5" in body["allowed_models"]
+
+
+@pytest.mark.parametrize("offline", [True, False])
+async def test_config_schema_says_whether_the_instance_is_offline(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, offline: bool
+) -> None:
+    """The web-search settings warn when offline mode has switched it off."""
+    monkeypatch.setattr(settings, "rag_offline", offline)
+    body = (await client.get("/api/v1/meta/config-schema")).json()
+    assert body["offline"] is offline
 
 
 async def test_graph_schema_matches_the_validators_own_rules(client: AsyncClient) -> None:

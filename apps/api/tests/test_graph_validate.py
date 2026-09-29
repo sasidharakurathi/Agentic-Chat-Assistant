@@ -21,7 +21,9 @@ def test_minimal_and_rich_graphs_validate() -> None:
     assert validate_graph(minimal_graph()).ok
     r = validate_graph(rich_graph())
     assert r.ok, r.errors
-    assert r.warnings == []
+    # Its database works (it reaches the agent through the subagent); the
+    # `sql` subagent role itself does nothing until Phase 5, and says so.
+    assert [w.code for w in r.warnings] == ["subagent_not_available"]
 
 
 def test_missing_agent_is_an_error() -> None:
@@ -58,13 +60,36 @@ def test_cycle_detected() -> None:
     assert any(e.code in {"cycle", "illegal_edge"} for e in validate_graph(g).errors)
 
 
-def test_bare_subagent_is_warning_in_v1() -> None:
+def test_a_subagent_role_that_does_nothing_yet_is_a_warning() -> None:
     g = minimal_graph()
     g.nodes.append(SubagentNode(id="s", data=SubagentNodeData(role="sql")))
     g.edges.append(Edge(source="s", target="a"))
     res = validate_graph(g)
     assert res.ok
-    assert any(w.code == "bare_subagent" for w in res.warnings)
+    assert _subagent_warnings(res) == ["subagent_not_available"]
+
+
+def test_a_retrieval_subagent_without_a_knowledge_base_is_flagged() -> None:
+    g = minimal_graph()
+    g.nodes.append(SubagentNode(id="s", data=SubagentNodeData(role="retrieval")))
+    g.edges.append(Edge(source="s", target="a"))
+    assert _subagent_warnings(validate_graph(g)) == ["subagent_without_knowledge_base"]
+
+
+def test_a_retrieval_subagent_with_a_knowledge_base_is_fine() -> None:
+    """It gets the knowledge-base tools itself; nothing needs wiring into it.
+    This used to warn "no capability wired into it" on a correct setup."""
+    from app.graph.nodes import KnowledgeBaseNode, KnowledgeBaseNodeData
+
+    g = minimal_graph()
+    g.nodes.append(KnowledgeBaseNode(id="kb", data=KnowledgeBaseNodeData()))
+    g.nodes.append(SubagentNode(id="s", data=SubagentNodeData(role="retrieval")))
+    g.edges += [Edge(source="kb", target="a"), Edge(source="s", target="a")]
+    assert _subagent_warnings(validate_graph(g)) == []
+
+
+def _subagent_warnings(res: object) -> list[str]:
+    return [w.code for w in res.warnings if w.code.startswith("subagent")]  # type: ignore[attr-defined]
 
 
 def test_orphan_capability_is_warning_not_error() -> None:

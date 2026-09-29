@@ -9,7 +9,24 @@ export type ToolCallView = {
   output?: string;
   parent_id?: string | null;
   subagent_text?: string;
+  /** How it was permitted (task 4.7): auto, approved, declined, expired,
+   *  interrupted or refused. Absent for calls that never ask. */
+  permission?: string | null;
 };
+
+const PERMISSION_TEXT: Record<string, string> = {
+  auto: "Ran without asking",
+  approved: "Approved by a person",
+  declined: "Declined by a person",
+  expired: "Declined: nobody answered in time",
+  interrupted: "Stopped before anyone answered",
+  refused: "Not allowed by this assistant's rules",
+};
+
+/** The audit line a tool card shows, or null. */
+export function permissionText(permission?: string | null): string | null {
+  return permission ? (PERMISSION_TEXT[permission] ?? permission) : null;
+}
 
 /** Top-level calls in order, and each delegation call's nested calls. A call
  *  whose parent is not in the list (a partial stream) stays top-level rather

@@ -6,6 +6,7 @@ import {
   addEdge,
   edgeKey,
   indexIssues,
+  mergeFlowNodes,
   nextNodeId,
   removeNodes,
   STRUCTURAL_NODE_TYPES,
@@ -171,5 +172,24 @@ describe("small helpers", () => {
     const g = pipeline();
     expect(addEdge(g, "kb", "ag")).toBe(g);
     expect(addEdge(g, "kb", "out").edges).toHaveLength(g.edges.length + 1);
+  });
+});
+
+describe("mergeFlowNodes", () => {
+  it("keeps each surviving node's measured size across a graph update", () => {
+    const before = toFlow(pipeline()).nodes.map((n) => ({
+      ...n,
+      measured: { width: 120, height: 40 },
+    }));
+    const after = toFlow(removeNodes(pipeline(), ["kb"])).nodes;
+    const merged = mergeFlowNodes(before, after, "ag");
+    expect(merged.map((n) => n.id)).not.toContain("kb");
+    expect(merged.every((n) => n.measured?.width === 120)).toBe(true);
+    expect(merged.filter((n) => n.selected).map((n) => n.id)).toEqual(["ag"]);
+  });
+
+  it("leaves a new node unmeasured, for React Flow to measure", () => {
+    const merged = mergeFlowNodes([], toFlow(pipeline()).nodes, null);
+    expect(merged.every((n) => n.measured === undefined && !n.selected)).toBe(true);
   });
 });

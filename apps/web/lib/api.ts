@@ -17,12 +17,30 @@ export type ApiErrorBody = {
   request_id?: string;
 };
 
+/** The reasons behind a 422, in the server's own words.
+ *
+ *  A validation failure's message is always "Request validation failed";
+ *  what actually went wrong (a URL carrying a key, a bad name) is in
+ *  `details.errors[].msg`. Forms showed only the generic line. Pydantic
+ *  prefixes a validator's text with "Value error, ", which is dropped. */
+export function validationMessage(details: unknown): string | null {
+  const errors = (details as { errors?: { msg?: unknown }[] } | undefined)?.errors;
+  if (!Array.isArray(errors)) return null;
+  const msgs = errors
+    .map((e) => (typeof e?.msg === "string" ? e.msg.replace(/^Value error, /, "") : ""))
+    .filter(Boolean);
+  return msgs.length ? [...new Set(msgs)].join(" ") : null;
+}
+
 export class ApiError extends Error {
   code: string;
   status: number;
   details?: unknown;
   constructor(status: number, body: ApiErrorBody) {
-    super(body?.error?.message ?? `HTTP ${status}`);
+    super(
+      (body?.error?.code === "validation_error" && validationMessage(body.error.details)) ||
+        (body?.error?.message ?? `HTTP ${status}`),
+    );
     this.name = "ApiError";
     this.status = status;
     this.code = body?.error?.code ?? "unknown";
@@ -306,10 +324,13 @@ export type GraphSchema = {
 
 export const meta = {
   configSchema: () =>
-    request<{ schema: unknown; default: AssistantConfig; allowed_models: string[] }>(
-      "/api/v1/meta/config-schema",
-      { org: false },
-    ),
+    request<{
+      schema: unknown;
+      default: AssistantConfig;
+      allowed_models: string[];
+      /** RAG_OFFLINE=1: web search is off on this instance. */
+      offline?: boolean;
+    }>("/api/v1/meta/config-schema", { org: false }),
   graphSchema: () => request<GraphSchema>("/api/v1/meta/graph-schema", { org: false }),
 };
 
@@ -431,6 +452,45 @@ export const dbConnections = {
     request<DbSchema>(`/api/v1/assistants/${assistantId}/db-connections/${id}/schema`),
 };
 
+export type McpServer = S["McpServerSummary"];
+export type McpTool = McpServer["tools"][number];
+export type McpRunnerStatus = S["McpRunnerStatus"];
+export type McpCheckResult = S["McpCheckResult"];
+export type McpPreset = S["McpPresetOut"];
+export type SandboxLimits = S["SandboxLimits"];
+
+export const mcpServers = {
+  list: (assistantId: string) =>
+    collectAll((c) =>
+      request<Page<McpServer>>(paged(`/api/v1/assistants/${assistantId}/mcp-servers`, c, 200)),
+    ),
+  create: (assistantId: string, body: Record<string, unknown>) =>
+    request<McpServer>(`/api/v1/assistants/${assistantId}/mcp-servers`, { body }),
+  update: (assistantId: string, id: string, body: Record<string, unknown>) =>
+    request<McpServer>(`/api/v1/assistants/${assistantId}/mcp-servers/${id}`, {
+      method: "PATCH",
+      body,
+    }),
+  remove: (assistantId: string, id: string) =>
+    request<{ message: string }>(`/api/v1/assistants/${assistantId}/mcp-servers/${id}`, {
+      method: "DELETE",
+    }),
+  /** Connect and complete the MCP handshake (starts a local command). */
+  health: (assistantId: string, id: string) =>
+    request<McpCheckResult>(`/api/v1/assistants/${assistantId}/mcp-servers/${id}:health`, {
+      method: "POST",
+    }),
+  /** Connect, list the server's tools, and store them. */
+  discover: (assistantId: string, id: string) =>
+    request<McpCheckResult>(`/api/v1/assistants/${assistantId}/mcp-servers/${id}:discover-tools`, {
+      method: "POST",
+    }),
+  /** A short catalog of well-known servers (task 4.8). */
+  presets: () => request<McpPreset[]>(`/api/v1/mcp-presets`),
+  /** Where local-command servers run, and how well they are contained. */
+  runner: () => request<McpRunnerStatus>(`/api/v1/mcp-runner`),
+};
+
 export const approvals = {
   /** Pending approvals for a conversation. Needed because the SSE event only
    *  reaches whoever was watching the stream — a reload must not orphan a
@@ -510,7 +570,15 @@ export type ChatEvent =
       input: Record<string, unknown>;
       parent_id?: string | null;
     }
-  | { type: "tool_result"; id: string; status: string; output: string; parent_id?: string | null }
+  | {
+      type: "tool_result";
+      id: string;
+      status: string;
+      output: string;
+      parent_id?: string | null;
+      /** How the call was permitted (task 4.7). */
+      permission?: string | null;
+    }
   | ({ type: "citation" } & Citation)
   | {
       type: "approval_required";

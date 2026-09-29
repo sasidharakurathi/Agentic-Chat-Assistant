@@ -57,6 +57,8 @@ class RunOut(ORMModel):
     conversation_id: uuid.UUID
     message_id: uuid.UUID | None
     trace_id: str | None
+    #: The published version that answered; null when the draft did.
+    version_number: int | None
     model: str | None
     effort: str | None
     driver: str | None

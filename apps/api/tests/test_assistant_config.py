@@ -54,9 +54,10 @@ def test_reference_lists_are_canonicalized() -> None:
         }
     )
     assert [d.connection_id for d in c.databases] == ["a", "b"]
-    assert c.mcp_servers == [
-        "11111111-1111-1111-1111-111111111111",
-        "22222222-2222-2222-2222-222222222222",
+    # Bare ids (configs saved before task 4.6) load as servers with no tools.
+    assert [(m.id, m.tools) for m in c.mcp_servers] == [
+        ("11111111-1111-1111-1111-111111111111", []),
+        ("22222222-2222-2222-2222-222222222222", []),
     ]
     assert c.rag.source_ids == ["s1", "s2"]
 

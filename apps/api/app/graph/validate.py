@@ -7,6 +7,8 @@ not here.
 
 from __future__ import annotations
 
+import re
+
 from pydantic import Field
 
 from app.graph.nodes import AnyNode, Graph, NodeType
@@ -202,28 +204,53 @@ def validate_graph(graph: Graph) -> ValidationResult:
     return res
 
 
+def _subagent_issue(
+    node: AnyNode,
+    graph: Graph,
+    type_of: dict[str, NodeType],
+    agent_id: str,
+    adj: dict[str, list[str]],
+) -> GraphIssue | None:
+    """What a subagent node will actually do, when that is nothing.
+
+    In v1 a subagent is a built-in pattern with its own toolset: retrieval
+    always gets the knowledge-base tools (`agent/subagents.py`). The old
+    warning ("no capability wired into it") fired for every retrieval
+    subagent, including correctly configured ones, and never mentioned the
+    two cases that really leave it inert.
+    """
+    role = node.data.role  # type: ignore[union-attr]
+    if role == "retrieval":
+        kb_live = any(
+            type_of[k] == "knowledge_base" and _reaches(k, {agent_id}, adj) for k in type_of
+        )
+        if kb_live:
+            return None
+        return GraphIssue(
+            code="subagent_without_knowledge_base",
+            message=(
+                "the retrieval subagent has nothing to search: wire a knowledge base "
+                "to the agent, or it is skipped"
+            ),
+            node_id=node.id,
+        )
+    return GraphIssue(
+        code="subagent_not_available",
+        message=f"the {role} subagent arrives in Phase 5; until then it has no effect",
+        node_id=node.id,
+    )
+
+
 def _reachability_warnings(
     graph: Graph, agent_id: str, adj: dict[str, list[str]], res: ValidationResult
 ) -> None:
     type_of = {n.id: n.type for n in graph.nodes}
 
     for n in graph.nodes:
-        # In v1 a subagent is a built-in pattern (retrieval / sql / research) that
-        # gets a standard toolset from the runtime, so a bare one is only a hint;
-        # task 5.10 (user-composed subagents) will likely promote it to an error.
-        if n.type == "subagent" and not (
-            {type_of[s] for s in graph.incomers(n.id)} & _CAPABILITY_TYPES
-        ):
-            res.warnings.append(
-                GraphIssue(
-                    code="bare_subagent",
-                    message=(
-                        f"subagent {n.id!r} has no capability wired into it "
-                        "(uses the default toolset)"
-                    ),
-                    node_id=n.id,
-                )
-            )
+        if n.type == "subagent":
+            issue = _subagent_issue(n, graph, type_of, agent_id, adj)
+            if issue is not None:
+                res.warnings.append(issue)
         if n.type in _CAPABILITY_TYPES and not _reaches(n.id, {agent_id}, adj):
             res.warnings.append(
                 GraphIssue(
@@ -262,6 +289,11 @@ def _reachability_warnings(
         )
 
 
+#: The shapes `AssistantConfig.mcp_servers` accepts.
+_UUID_SHAPE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
+_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
 def _dup_ref_check(graph: Graph, res: ValidationResult) -> None:
     seen_conn: set[str] = set()
     seen_tool: set[str] = set()
@@ -290,6 +322,29 @@ def _dup_ref_check(graph: Graph, res: ValidationResult) -> None:
                 )
             seen_tool.add(n.data.key)
         elif n.type == "mcp_server":
+            if not _UUID_SHAPE.fullmatch(n.data.mcp_server_id):
+                # Caught here, not only by the reference check: the compiled
+                # config requires a UUID, so a malformed one would otherwise
+                # fail compilation and the draft save with it.
+                res.errors.append(
+                    GraphIssue(
+                        code="unknown_mcp_server",
+                        message="This MCP server reference is not a valid id. "
+                        "Pick one from the MCP servers tab, or remove the node.",
+                        node_id=n.id,
+                    )
+                )
+            named = [*n.data.tool_allowlist, *n.data.tool_approvals]
+            bad = [t for t in named if not _TOOL_NAME.fullmatch(t)]
+            if bad:
+                res.errors.append(
+                    GraphIssue(
+                        code="invalid_mcp_tool",
+                        message=f"Not a valid MCP tool name: {', '.join(map(repr, bad[:5]))}. "
+                        "Choose tools from the server's discovered list.",
+                        node_id=n.id,
+                    )
+                )
             if n.data.mcp_server_id in seen_mcp:
                 res.errors.append(
                     GraphIssue(

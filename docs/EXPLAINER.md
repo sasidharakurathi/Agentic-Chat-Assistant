@@ -2959,3 +2959,1192 @@ sources, connections, usage, audit and invites.
 - **Not verified:** the Langfuse UI's rendering of a trace (signing in would
   mean typing a password into the browser). The API showed the stored tree
   instead.
+
+## 9. Fixes from the first manual test pass
+
+Before Phase 4, the whole of Phases 0–3 was tested by hand from
+`docs/MANUAL_TESTING.md`. Its data comes from `scripts/seed-testdata.ps1`,
+which runs `apps/api/scripts/seed_testdata.py` to write:
+
+- eight documents in `testdata/manual/docs` (PDF, DOCX, HTML, Markdown and
+  text), including a prompt-injection sample and one very large file;
+- a SQLite shop;
+- a Postgres `testshop` database with a read-only role;
+- a MySQL `appdb`;
+- a Mongo `testshop`.
+
+Engines that aren't running are skipped. The pass produced thirteen reports.
+This section takes them in order, together with one earlier report: slow
+ingestion that looked like Windows Defender.
+
+### 9.1 Ingestion pegging the CPU
+
+Task Manager showed Defender busy while sources were processing, but the
+cause was ours. Several ingestion jobs each ran `bge-m3` on the CPU at once,
+each with the library's default batch. Every job took every core, and
+Defender's real-time scanning added to the load rather than causing it.
+
+`app/rag/embedders/local_bge.py` now holds a process-wide `_ENCODE_LOCK`
+around `model.encode`, and encodes in batches of `BATCH_SIZE = 8`. Jobs take
+turns instead of thrashing, and a search between two batches waits for at
+most one small batch.
+
+Test: `tests/test_local_embedder_limits.py` runs concurrent jobs and checks
+that they encode one at a time, in small batches.
+
+### 9.2 The canvas (reports 1–3)
+
+**Nodes missing until you changed tabs, and missing after a delete.**
+React Flow v12 in controlled mode measures a node, then reports the size back
+through `onNodesChange`. It keeps the node hidden until that size arrives.
+The canvas passed `nodes` without an `onNodesChange`, so a node was shown
+only if some later re-render happened to carry a measured copy. Switching
+tabs remounted the canvas and got lucky; a delete rebuilt the list from the
+graph and dropped every size.
+
+The fix is in `components/canvas/Canvas.tsx`:
+
+- it keeps local node and edge state and applies React Flow's changes to it
+  (`applyNodeChanges`, `applyEdgeChanges`), except removals, which go through
+  the graph like every other edit;
+- when the graph changes, `mergeFlowNodes` (`graph-sync.ts`) rebuilds the
+  nodes and copies each node's `measured` size across.
+
+**Linking was fiddly.** The handles were 6 px targets. Now:
+
+- they are 12 px, with an invisible 6 px ring (`::after`) that widens the
+  hit area;
+- they turn the primary colour on hover or while dragging from them;
+- a valid target turns green and a wrong one red;
+- `connectionRadius={40}` snaps a drop that lands near a handle;
+- `connectOnClick` lets you click one handle, then another;
+- edges have a 24 px hit width, so they are easy to select and delete.
+
+The CSS is deliberately unlayered in `globals.css` and scoped under
+`.studio-canvas`. React Flow's own stylesheet is unlayered, and a Tailwind
+`@layer` rule loses to any unlayered rule whatever its specificity.
+
+### 9.3 The chat (reports 4, 5, 13)
+
+**A working indicator.** While a turn runs, the assistant bubble shows
+`TypingDots` (three pulsing dots, `role="status"`, labelled "Working") in
+place of "…". The spend meter shows a pulsing **running** badge. Both honour
+`prefers-reduced-motion`.
+
+**Markdown.** Assistant answers and `kb_search` results now go through
+`components/chat/Markdown.tsx`: react-markdown with GitHub tables and lists.
+It never renders raw HTML, so a model or a retrieved document can't inject
+markup.
+
+Citations used to be spliced into plain text. Now
+`lib/markdown-citations.ts` rewrites each span the backend reported into a
+`[n](#cite-n)` link. It works from the end of the text backwards, so earlier
+offsets stay valid. The link renderer turns those links into the same chips
+the sources panel highlights. The UI still never guesses where a citation
+goes; it only uses the spans the server sent.
+
+**Found on the way.** The first version built its element renderers inside
+the component. Each render made new component types, so React threw away and
+rebuilt every rendered message on every keystroke in the message box. A
+MutationObserver in the browser caught the card's DOM being re-added.
+
+Now the renderers live at module scope and read the chip state from a
+context, and parsing sits behind `memo`. Typing in the box now touches no
+message DOM.
+
+**Slash commands.** `lib/slash-commands.ts` parses the box, and
+`ChatThread` runs the commands. Nothing typed as a command reaches the
+model.
+
+| Command | Does |
+|---|---|
+| `/help` | lists the commands |
+| `/new`, `/clear` | start a new conversation |
+| `/rename <title>` | renames this one |
+| `/archive` | archives it |
+| `/retry` | resends your last message |
+| `/stop` | stops the running turn |
+| `/cost` | shows this conversation's spend |
+| `/export` | downloads it as Markdown |
+
+- Typing `/` opens a menu: ↑/↓ to move, Tab to complete, Enter to pick, Esc
+  to close.
+- An unknown command gets a toast rather than being sent.
+- `//` at the start sends a message that begins with a slash.
+- While a turn runs, only `/help`, `/stop`, `/cost` and `/export` run; the
+  others ask you to wait or stop it first.
+
+### 9.4 `search twice:` found nothing (report 6)
+
+The fake driver's search fixture sent the whole prompt as the query,
+including its trigger words, and `search twice: warranty accidental damage`
+scored below the cut-off. `_search_query` in `app/agent/driver.py` now strips
+the `search:` or `search twice:` prefix first. The same query about refunds
+scored 0.56 before the fix and 0.88 after it.
+
+### 9.5 Old conversations kept the old version (report 7)
+
+A conversation was bound to the version current when it started. Every
+later turn reused it, so publishing v2 changed nothing in existing chats.
+
+`_config_for` in `app/services/chat.py` now reads the assistant's
+`current_version_id` on every turn, and falls back to the draft if nothing
+is published. It keeps `conversation.assistant_version_id` pointing at the
+version in use.
+
+Each run records `version_number` (new column; migration `b6d8f0a2c469`).
+**Run details** shows it as `v2`, or **draft**, so you can see which version
+answered.
+
+Test: `tests/test_conversation_versions.py`. A conversation started on v1
+answers from v2 once v2 is published, runs show `[1, 1, 2]`, and a draft-only
+assistant gives `None`. Mutation-checked.
+
+### 9.6 "subagent has no capability wired" (report 8)
+
+It was a false alarm. The warning fired for every subagent with no
+capability edge into it. A retrieval subagent needs none of its own: it
+searches the assistant's knowledge base.
+
+`_subagent_issue` in `app/graph/validate.py` now warns only when the warning
+means something:
+
+- `subagent_without_knowledge_base`: a retrieval subagent on an assistant
+  with no knowledge base wired to the agent;
+- `subagent_not_available`: `sql` and `research` subagents, which Phase 3
+  doesn't run yet.
+
+### 9.7 Approvals after Stop and after a reload (reports 9, 10)
+
+**A stale card after Stop.** When a turn stopped, its approval was expired
+on the server, but the page kept the card it had drawn. Sending again added
+a second card, and clicking the old one said "already expired". Now:
+
+- after every turn that wasn't aborted by the page itself, `ChatThread`
+  reloads the pending approvals from the server;
+- `ApprovalCard` takes an `onGone` callback. When the server answers
+  `approval_not_pending`, the card removes itself instead of showing the
+  error.
+
+**Reload loses the card.** This is a limit of the current design, not a
+regression. A turn lives on the connection that streams it. A reload closes
+that connection, so the turn is aborted and its approval closed. The
+statement never runs, which is the safe outcome.
+
+Keeping turns alive across reloads and conversation switches, and running
+several at once, needs detached turns: the run continues server-side and the
+page re-attaches to it. That is the planned QOS work, scheduled after the
+phases. `MANUAL_TESTING.md` §6.5.5 now describes what actually happens.
+
+### 9.8 "Assistant not found" dev overlay (report 11)
+
+The build and chat pages let an `ApiError` from their first load escape into
+React. In development, Next.js shows that as its error overlay. The pages now
+catch it into `loadFailure(err)` and render `LoadFailed`
+(`components/load-state.tsx`). A 404 reads "This assistant can't be found",
+with a hint about the selected org and a link back. An outsider and a
+made-up id both get this page, since the API gives both the same 404 and
+doesn't reveal which one it is.
+
+### 9.9 "Failed to start Claude Code" on the real driver (report 12)
+
+**Why a CLI at all.** The Claude Agent SDK *is* the Claude Code agent loop,
+packaged as a library. The Python package ships a native `claude` binary
+inside `claude_agent_sdk/_bundled/`. `query()` starts it as a subprocess and
+talks to it over stdin/stdout. That process is where the agent loop, tool
+calls, hooks and permission prompts actually run.
+
+So "starting Claude Code" is the SDK working as designed. It isn't a
+separate product, and it isn't your own Claude Code install. The SDK only
+ever uses its bundled copy (`health.claude_cli_path`).
+
+**Why it failed.** On Windows, `uvicorn --reload` serves on a
+`SelectorEventLoop`, and that loop can't create subprocesses
+(`NotImplementedError`). Without `--reload` uvicorn uses the Proactor loop,
+which is why the CLI start worked in some runs and not others.
+
+The fix has three parts:
+
+- `scripts/dev-api.ps1` no longer uses `uvicorn --reload`. It runs
+  `watchfiles app.devserver.main app`: a fresh uvicorn process per code
+  change, which uses the platform's default loop (Proactor on Windows);
+- `/readyz` fails `agent_cli` with an instruction when the real driver is
+  selected on a loop that can't spawn;
+- the CLI's environment blanks `CLAUDE_CODE_SSE_PORT`, so a Claude Code
+  IDE session on the same machine can't make the bundled CLI try to attach
+  to it.
+
+Tests are in `tests/test_readiness.py` and `tests/test_turn_concurrency.py`.
+
+**Correction: the first fix broke on reload.** The first version kept
+`--reload` and forced the Proactor loop with `--loop
+app.loops:subprocess_capable_loop`. That passed every check made at the time,
+because they were all made on a freshly started server. The first code change
+after starting it took the API down: every request timed out, and the log
+showed `Accept failed on a socket … WinError 87`.
+
+The cause is how uvicorn's reloader works. It opens the listening socket once
+in the parent process and hands it to each new worker. A Windows socket can be
+tied to only one I/O completion port for its whole life. The first worker's
+Proactor loop claims it, and every worker after a reload fails to accept. That
+is why uvicorn picks the Selector loop under `--reload` in the first place.
+
+No event loop fixes both problems, so the reloader went. `app/devserver.py`
+holds the explanation. Verified: two forced restarts, each a new process
+answering `/healthz` and `/readyz`. `app/loops.py` was removed.
+
+### 9.10 What "verified" means here
+
+- **Unit and integration:**
+  - web: 72 tests;
+  - API: the affected suites (graph validate, subagents, versions,
+    readiness, turn concurrency, embedder limits);
+  - `scripts/check.ps1` in full.
+- **Live, no spend:**
+  - `/readyz` under `--reload`: the default loop gave 503 with the
+    instruction, and the Proactor loop gave ok (but see the correction in
+    §9.9: that setup failed after its first reload);
+  - a real-driver turn through the bundled CLI against a local fake API
+    finished with tokens, usage and done.
+- **Browser**, on the running stack with an injected session:
+  - canvas nodes visible on first load and after adding and removing a node;
+  - a handle turns the primary colour and grows on hover;
+  - the `/` menu filters as you type, and `/rename`, `/cost` and an unknown
+    command behave as described;
+  - typing dots and the running badge during a turn;
+  - `search twice:` returns the source (score 0.88);
+  - Run details shows **Version: draft**;
+  - the not-found page on both the chat and build routes, with no
+    uncaught error.
+- **Not verified in the browser:** the approval card after Stop. It needs a
+  write-enabled connection. The only one in the test org points at the
+  protected `demo` database, and sending an UPDATE at it was refused, so
+  this is left to the manual guide (§6.5.6) against `testshop`.
+
+## 10. Phase 4: tools and MCP
+
+Phase 4 lets an assistant act beyond its own data. It can call web APIs
+and search the web, and later use tools from MCP servers that a builder
+registers. This section grows task by task.
+
+### 10.1 `http_request` and the SSRF guard (task 4.1)
+
+**The guard: `app/security/ssrf.py`.** Two things fetch URLs that someone
+else chose, from inside our network:
+
+- the new `http_request` tool, where the model picks the URL;
+- URL data sources, where a builder picks it and the worker fetches it.
+
+Unguarded, "fetch this URL" includes `http://localhost:8000/…`, the Redis
+port, or `http://169.254.169.254/`, the cloud metadata service that hands out
+the machine's credentials. That attack is called server-side request
+forgery (SSRF). `safe_request` checks every hop of every request:
+
+- **Scheme** must be http or https.
+- **No credentials** in the URL (`user:pass@`).
+- **Domain allowlist**, when the assistant has one. The host must be an
+  allowed domain or a subdomain of one; `evil-example.com` does not match
+  `example.com`.
+- **Public addresses only.** Every address the name resolves to must be
+  globally routable. That rules out loopback, the private ranges,
+  link-local (where metadata services live), carrier-grade NAT, multicast
+  and reserved addresses. It also checks IPv4 addresses wrapped inside IPv6
+  (`::ffff:127.0.0.1`, 6to4, Teredo). A name that resolves to one public and
+  one private address is refused rather than gambled on.
+- **Connect to the address that was checked.** Resolving, checking, then
+  letting the HTTP client resolve again would allow DNS rebinding: a name
+  that answers with a public address for the check and a private one for
+  the connection. So the request goes to the checked IP. The original name
+  goes in the Host header and TLS SNI, and the certificate is still verified
+  against that name.
+- **Redirects are followed by hand**, each checked again. A public URL that
+  redirects to localhost is the classic bypass. A 303 turns a write into a
+  GET without a body, and `Authorization` and `Cookie` are dropped when a
+  redirect changes host.
+- **Caps:** a wall-clock timeout, and a byte limit on the body, read as a
+  stream so a huge response is never held in memory. Environment proxies
+  are ignored, because a proxy would resolve the name itself and undo the
+  pinning.
+
+**Found on the way.** URL data sources used plain
+`httpx.get(url, follow_redirects=True)`, with no address check and no size
+cap. A builder could have indexed our own API or the metadata service into a
+knowledge base. `app/rag/fetch.py` now goes through the same guard (5 MB,
+30 s, five redirects), and a refusal becomes the source's error message.
+
+**The tool: `app/agent/caps_http.py`.** Its inputs are `method`, `url`,
+`headers` and `body`. It returns the status line, the content type and size,
+the final URL if it was redirected, and the body:
+
+- JSON is pretty-printed;
+- other text is cut at 20,000 characters;
+- a binary body is described, not dumped;
+- a 4xx or 5xx status marks the call as an error.
+
+The tool is built per turn and closes over the assistant's allowlist, so the
+model can't widen it by asking. Its description tells the model which
+domains it may reach.
+
+**Approvals.** GET and HEAD only read, so they run without asking. Any other
+method changes something on another system. It takes the **stricter** of two
+settings: the tool's own (on its canvas node) and the assistant-wide
+`approval_policy.http_non_get`. Either one can insist on a human, and neither
+can quietly lift the other's requirement.
+
+The approval card shows the request as a person reads it: `POST <url>`, the
+headers (credential-shaped ones redacted), and the body. A refused request
+says which setting to change.
+
+**Web search limits.** `tools.web_search.max_uses` and `allowed_domains`
+existed in the config but never reached the SDK, which has no option for
+them. The PreToolUse gate (`app/agent/hooks.py`) now enforces both:
+
+- it counts searches in the turn, subagents included, and refuses past the
+  limit;
+- it rewrites each search's `allowed_domains` into the configured list. The
+  model may narrow the list, never widen it, and `blocked_domains` is
+  dropped because the search API refuses both together.
+
+**Offline testing.** The fake driver learned `http: [METHOD] <url> [body]`.
+Like `sql:`, it runs the real tool through the real permission callback, and
+the two now share one helper (`_fake_permitted_call`).
+
+### 10.2 Per-tool settings (task 4.2)
+
+**No `tool_integrations` table.** The plan sketched one, but a tool's
+settings already live in the assistant's config (`tools.*`). That config is
+versioned: publishing snapshots it, and a conversation runs on the version
+it uses. A table beside it would be a second copy that publishing doesn't
+freeze. So the settings stay in the config, and this task is about editing
+them.
+
+**Where you edit them:**
+
+- **Panels › Tools.** Each tool has a switch. Web search and HTTP requests
+  open their settings when on:
+  - web search: searches per turn and allowed domains;
+  - HTTP requests: allowed domains and what happens to requests that change
+    something ("Ask a person first" or "Never allow"; see the correction
+    below).
+- **Panels › Approvals** (new). The assistant-wide policy had no UI at all:
+  database writes, schema changes, HTTP writes, and the default for MCP
+  tools.
+- **Canvas.** The palette gained a Tools section; an added tool is wired to
+  the agent straight away. A tool node's drawer shows the same editors as
+  Panels (`components/config/tool-settings.tsx`), so the two can't disagree
+  about what a setting means.
+
+When the assistant-wide policy is stricter than the tool's setting, the
+editor says so and names where to change it.
+
+**Correction (found in 4.6).** These editors first offered "Run without
+asking" for HTTP writes, database writes and schema changes. It could never
+apply. The approval router lets `auto` skip the human for **low-risk** calls
+only (plan §4.4), and a write is never low risk, so it asked anyway. The
+option promised something the server would not do. Those settings now offer
+"Ask a person first" or "Never allow". A stored `auto` there behaves, and
+shows, as "ask". The one place `auto` is real is MCP tools a server
+declares read-only (§10.8).
+
+Domains are normalized as you type them: `https://API.GitHub.com/repos,
+*.example.org` saves as `api.github.com, example.org`, the same rule the
+server applies.
+
+### 10.3 The dev server, fixed properly
+
+Testing this phase exposed that the item-12 fix from §9.9 broke on the first
+code change. §9.9 now has the correction: `dev-api.ps1` restarts the whole
+API process with `watchfiles` instead of using `uvicorn --reload`.
+
+### 10.4 What "verified" means here (4.1–4.2)
+
+- **Tests:**
+  - `tests/test_ssrf.py`: 37 cases covering address classes, pinning (IPv4
+    and IPv6), each refusal happening before anything is sent, redirects
+    into the network and out of the allowlist, credential stripping, 303,
+    redirect loops, the byte cap, timeouts and reserved headers;
+  - `tests/test_http_tool.py`: 22 cases covering the tool's output, the
+    approval table, the card text, web search narrowing and counting, the
+    fake driver asking before a write, and URL sources refusing internal
+    addresses;
+  - web unit tests for domain parsing and the stricter-wins rule.
+- **Mutation-tested:** 20 mutants across the guard, approvals, the gate,
+  options and the RAG fetch. 19 were killed. The survivor (merge order of
+  the Host header) is equivalent, because reserved headers are already
+  stripped before the merge.
+- **Browser, live, fake driver, no spend:**
+  - Panels showed the new settings, and domains saved normalized;
+  - the "policy is stricter" warning appeared;
+  - the canvas node's drawer showed the same values;
+  - in chat, a GET to an allowed domain returned GitHub's `/zen` line;
+  - a GET to another domain was refused before sending;
+  - a POST raised an approval card showing the request, and denying it
+    sent nothing.
+
+### 10.5 Registering MCP servers (task 4.3)
+
+An MCP server gives the assistant tools it doesn't have built in: a ticket
+system, a code host, a company's internal API. This task is registration:
+storing how to reach a server, with its secrets sealed. Checking a server and
+listing its tools is 4.5. Running it (4.4, 4.6) and approving its calls (4.7)
+come after.
+
+**The row: `mcp_servers`** (model in `app/models/integration.py`, migration
+`ef91aed450f4`). One per server per assistant:
+
+- **name.** Lowercase letters, digits and hyphens, unique per assistant.
+  It becomes the prefix of every tool the server provides
+  (`mcp__<name>__<tool>`). Underscores are refused, so a name can never be
+  confused with the `__` separator. `caps` is reserved for the platform's
+  own tools.
+- **transport.** One of:
+  - `stdio`: a program the platform starts, with its `command` and `args`
+    (an argv list, never a shell line) and environment variables;
+  - `http` (streamable HTTP, the current standard) or `sse` (the older
+    transport): a `url` and headers.
+
+  The transport can't change after creation; you delete the server and add
+  it again.
+- **Secrets.** Header values (http/sse) and environment values (stdio) are
+  sealed in `secrets` as one JSON object each (kinds `mcp_headers` and
+  `mcp_env`). The row keeps only their names (`header_names`, `env_keys`),
+  so the UI can list them without opening them. `open_headers` and
+  `open_env` in `services/mcp_servers.py` are the only way to read them, for
+  the connection being opened at that moment.
+- **What it offers.** `tools` (the discovered catalog), `status`, `error`,
+  `last_checked_at`, plus `sandbox` for stdio limits. These are filled in
+  by later tasks.
+
+**What is *not* on the row.** The plan put `tool_allowlist` and
+`approval_policy` here. They will live in the assistant's versioned config
+instead, next to the rest of what a version does. This is the same split as
+Phase 3:
+
+- a database connection's *permissions* are on the connection (what it is
+  able to do);
+- a node's `expose_write` is in the config (what this version uses).
+
+Publishing freezes the config, not the row. Otherwise, changing a live row's
+allowlist would silently change every published version.
+
+**Plain-text fields refuse credentials.** The command, arguments and URL are
+stored and shown unencrypted, so a value that looks like a credential is
+refused, with a pointer to the encrypted place for it:
+
+- an argument shaped like a token (`--token ghp_…`) is refused, with "use an
+  environment variable instead";
+- a URL is refused if it carries a user and password, or a query parameter
+  named `api_key`, `token`, `key` and so on, or anything else shaped like a
+  secret; the error says "send it as a header instead";
+- a URL must be https. `MCP_ALLOW_INSECURE_URLS=1` allows plain http for a
+  local test server;
+- headers the connection owns (`Host`, `Content-Length`, …) are refused, and
+  so are values that span lines (header injection).
+
+**Updates.** Omit a field to leave it alone. Sending `headers` or `env`
+replaces the whole set, and `{}` clears it. The old sealed row is deleted in
+the same transaction, not left behind. Changing the command, arguments or URL
+also clears the discovered tools and resets the status: a different program
+may offer different tools, and a stale list would be trusted. A rename keeps
+them. The audit log records which fields changed, never a value.
+
+**References.** A canvas `mcp_server` node must name a server registered on
+*this* assistant. The reference check (`services/graph_refs.py`) reports
+`unknown_mcp_server` on the node, and publishing is refused, the same as
+for database nodes.
+
+**Found on the way:**
+
+- **A malformed server id crashed the draft save.** The graph validator
+  didn't check the id's shape, but the compiled config requires a UUID. So
+  a node with `"mcp_server_id": "not-a-uuid"` passed validation, failed
+  compilation, and the save returned a 500. Nothing could create such a node
+  before this phase, which is why it never showed. The validator now reports
+  it as a graph error, and the draft saves as every other broken draft does.
+- **Deleting an assistant would have orphaned its MCP secrets.** The
+  cascade takes `mcp_servers`, but the rows point at `secrets` with
+  `SET NULL`. `delete_assistant` now deletes them in the same commit, as it
+  already did for database credentials.
+- **Every form showed "Request validation failed".** A 422's reasons are in
+  `details.errors[].msg`, and no form read them. `ApiError` now uses them.
+  The URL refusal above reads "the URL appears to carry a credential
+  (api_key)…" instead of the generic line, and so does every other form in
+  the app.
+
+**The MCP tab.** In the builder, a new **MCP** tab lists servers, each with
+its transport, status, what it points at, the *names* of its headers or
+environment variables, and whether tools have been discovered. From there
+you can:
+
+- add a server: name, connection type, URL or command and arguments, and
+  headers or environment as `Name: value` / `KEY=value` lines;
+- switch a server off;
+- edit it; values can't be shown, so replacing them means entering the full
+  set;
+- remove it, after a confirmation.
+
+**Verified:**
+
+- **Tests:**
+  - `tests/test_mcp_servers.py` (25): values sealed and never returned, the
+    right secret kinds, fourteen refused registrations each with its reason,
+    unique names, header replacement dropping the old secret, pointing
+    elsewhere clearing tools, transports kept apart, secrets removed with
+    the server and with the assistant, graph references scoped to the
+    assistant, no values in the audit log;
+  - `tests/test_tenancy.py`: the role matrix (member 403, outsider 404) and
+    table coverage;
+  - web: form parsing and validation messages.
+- **Browser, live:**
+  - a URL carrying `api_key` was refused with the specific reason;
+  - an http server with an `Authorization` header and a stdio server with
+    two environment variables were added, and only their names appeared;
+  - replacing the headers and switching a server off persisted;
+  - no secret value appeared in any API response.
+
+### 10.6 The sandbox for local-command servers (task 4.4)
+
+**The threat.** A local-command (stdio) MCP server is a program a builder
+chose, often `npx some-package`: code nobody here has read, running on our
+hardware. The API process holds `APP_KEK` (which opens every stored
+credential), the database password and the model API key. So the question
+isn't how to limit the server inside the API, but how to keep it out of
+the API altogether.
+
+**The answer: a separate runner** (`app/mcp/runner.py`). The API never
+starts a stdio server. It asks the runner to start one and gets back a URL
+and a per-session token. From then on the server is reached over MCP's own
+streamable-HTTP transport, like any remote server:
+
+```
+API ──POST /sessions (runner token)──▶ runner ──spawn──▶ jail ──exec──▶ server
+API/agent ──MCP over HTTP (session token)──▶ runner ◀──stdin/stdout──▶ server
+```
+
+- **The bridge is transport-level.** The runner doesn't interpret MCP; it
+  moves messages between the HTTP transport and the child's stdin and
+  stdout (the MCP SDK's `StreamableHTTPServerTransport` on one side,
+  `stdio_client` on the other). Any protocol revision passes through, and
+  deciding which tools may be called stays with the API's PreToolUse gate,
+  which knows the assistant's configuration.
+- **Two tokens.**
+  - Starting, inspecting and stopping sessions needs the runner token
+    (`MCP_RUNNER_TOKEN`), shared only with the API.
+  - Each session gets its own random token, and its MCP endpoint accepts
+    nothing else, so one session can't reach another's server. "No such
+    session" and "wrong token" get the same 401, so guessing reveals
+    nothing.
+- **Configured from its own environment variables only.** The runner never
+  imports `app.config`, which would read the platform's `.env`. In
+  development, `scripts/dev-mcp-runner.ps1` asks the API's settings for the
+  token and passes the runner just that.
+
+**What each session runs under:**
+
+| Protection | Where | Windows (dev) | Linux (container) |
+|---|---|---|---|
+| Environment: platform basics + its own variables, nothing of the runner's | runner | ✓ | ✓ |
+| Private temp directory as working directory and `HOME`, deleted afterwards | runner | ✓ | ✓ |
+| Wall-clock limit per session; stopped when idle | runner | ✓ | ✓ |
+| Memory, CPU time, processes, open files, file size (`setrlimit`, soft = hard) | jail | – | ✓ |
+| No core dumps (they could write secrets to disk) | jail | – | ✓ |
+| New session (the whole process group can be killed), `umask 077` | jail | – | ✓ |
+| `no_new_privs`: no setuid binary can raise its rights; root dropped to `nobody` | jail | – | ✓ |
+| No route to the internet; read-only filesystem; no capabilities | container | – | ✓ |
+
+The runner reports which of these it actually applies (`/healthz`). The
+MCP tab shows it, so a partial sandbox on a Windows dev machine is labelled
+partial instead of passing for a full one.
+
+**The jail** (`app/mcp/jail.py`) runs *inside* the process that becomes the
+server. It sets what can only be set from inside, then `exec`s the real
+command, so the server is that same process and keeps every restriction.
+It is standalone on purpose: it runs by file path with `python -I`
+(isolated, no `PYTHONPATH`) from the server's private directory, where the
+platform's package isn't importable and shouldn't be. It reads its limits as
+plain JSON.
+
+**Limits per server** (`mcp_servers.sandbox`, `app/mcp/limits.py`). The
+defaults are 1 GB memory, 10 minutes of CPU, 128 processes, 256 open
+files, 64 MB files, an hour per session and 10 minutes idle. Each has a
+platform ceiling a builder can't exceed. An update changes only the limits
+sent, and a value stored before a rule changed falls back to the default
+rather than failing a turn. The **Limits** button on a local-command server
+in the MCP tab edits them.
+
+**Deployment** (`docker/mcp-runner.Dockerfile`, `docker-compose.yml`).
+The runner image has Python, Node.js and uv, and none of the platform
+beyond the runner, the jail and two pure helpers. The `mcp-runner`
+service:
+
+- runs as an unprivileged user with a read-only filesystem;
+- has a size-capped `/tmp` for the private directories;
+- drops every capability and sets `no-new-privileges`;
+- is capped on processes, memory and CPU as a whole;
+- sits only on the `mcp` network, which is `internal`: servers can answer
+  the API and reach nothing else.
+
+The API and worker join that network too.
+
+**Egress, and what isn't built yet.** No route out also means `npx` can't
+download a package at runtime. There are two ways forward:
+
+- Bake the servers you need into an image based on the runner's, and
+  register them by their installed command. The runner stays offline.
+- Or add `docker-compose.mcp-egress.yml`, which gives the runner an ordinary
+  network. That is all or nothing.
+
+The plan's *allowlisted* egress (each server may reach only the hosts it
+names) needs a filtering proxy in front of that network. It isn't built;
+it's recorded as an open item.
+
+**Found on the way:**
+
+- **The type checker never saw the Linux code.** `check.ps1` ran mypy on
+  Windows only. The jail's POSIX calls, and `asyncio.ProactorEventLoop` in
+  the readiness check (from the §9.9 work), type-checked on Windows and
+  failed on Linux, which is what CI runs. Both are now written with
+  `sys.platform` checks mypy understands, and `check.ps1` runs mypy for both
+  platforms.
+- **The first jail couldn't have started on Linux.** It ran as
+  `python -m app.mcp.jail` from the server's private directory, with a clean
+  environment, where `app` isn't importable. Windows doesn't use the jail,
+  so the Windows tests couldn't catch it. It now runs by path and imports
+  only the standard library, and Linux tests (in CI) and the Docker checks
+  below exercise it.
+
+**Verified:**
+
+- **Tests.** `tests/test_mcp_runner.py` starts a real runner, with a
+  canary `APP_KEK` in its own environment, and reaches a real stdio server
+  through it with the MCP SDK's own client. It checks:
+  - the echo round trip;
+  - nothing leaking into the server;
+  - the private directory, which is also `HOME` and is gone afterwards;
+  - each session answering only its own token, and the control endpoints
+    needing the runner's;
+  - idle and wall-clock stops, with the reason;
+  - a command that can't start being reported;
+  - the API's client opening and closing sessions, and an unreachable
+    runner explained;
+  - the MCP tab's status endpoint.
+
+  Two POSIX-only tests (the jail's limits) run in CI.
+- **In Docker, on Linux:**
+  - the jail set every limit (address space, CPU, processes, open files,
+    file size, no core), `umask 077`, a new session and `NoNewPrivs: 1`;
+  - a 400 MB allocation under a 256 MB limit was refused;
+  - starting as root ended as `nobody` with no groups.
+- **The hardened container**, run exactly as compose runs it: the full set
+  of protections was reported, the echo server answered from its private
+  `/tmp/mcp-…`, it saw none of the runner's environment, and the internet
+  was unreachable. `tests/fixtures/runner_probe.py` performs these checks,
+  and CI now builds the runner image and runs it on every push.
+- **Browser:**
+  - the MCP tab showed the runner's partial sandbox on Windows;
+  - limits edited in the tab saved, and only the ones changed were
+    changed.
+
+### 10.7 Checking servers and discovering their tools (task 4.5)
+
+**Two actions on every server** (`services/mcp_discovery.py`):
+
+- **Check** (`POST …/mcp-servers/{id}:health`) connects and completes the
+  MCP handshake.
+- **Discover tools** (`POST …:discover-tools`) also lists the tools (every
+  page) and stores them on the server.
+
+Both return `ok: false` with a reason rather than an HTTP error. A wrong
+header or a server that's down is a normal thing to find while setting one
+up, and a 500 would make the form look broken instead of the server. Both
+record `status`, `error` and `last_checked_at`, which the MCP tab shows.
+Only editors may run them, since they connect with the stored credentials
+(and a check starts a local command).
+
+**How the connection is made (`connect()`):**
+
+- **Local command (stdio):** never started in the API. The runner starts it
+  with its sealed environment, inside its sandbox; the API connects to the
+  runner's session URL and closes the session afterwards.
+- **Remote (http, sse):** with the sealed headers, through `pinned_client`
+  (`security/pinned_transport.py`).
+
+**The SSRF guard, for the MCP SDK's own client.** The SDK sends its
+requests itself, through one client held for the whole session, so the
+per-request guard from §10.1 can't wrap them. `PinnedTransport` plugs the
+same rules into that client, so every request it sends is checked:
+
+- https only (http only with `MCP_ALLOW_INSECURE_URLS`, for a test server
+  on this machine);
+- the host must resolve to public addresses only;
+- the connection goes to the checked address, with the original name in
+  the Host header and TLS SNI, so the certificate is still verified;
+- redirects are never followed, and environment proxies are ignored.
+
+**Found on the way:**
+
+- **The SDK's default client follows redirects.** Its client factory says
+  so: "Always enables follow_redirects". So a public MCP URL could send the
+  API to `http://localhost:8000` or a metadata address with the builder's
+  headers attached. SSE and streamable HTTP both use our client instead,
+  and a redirect is reported as "register the final URL instead".
+- **This shapes task 4.6.** If a remote server were handed to the Claude
+  CLI as a plain URL, the CLI would connect itself, from inside the API
+  container, with none of these checks. So in 4.6, MCP calls will go
+  through this code path rather than the CLI's own connections.
+
+**The catalog is untrusted input.** Tool names, descriptions and schemas
+come from someone else's code, and a description is text the model reads,
+so tool descriptions are an injection route. `normalize_tools`:
+
+- keeps names of letters, digits, `_` and `-` up to 64 characters, so the
+  qualified `mcp__<server>__<tool>` name stays valid;
+- drops duplicates;
+- caps descriptions at 2,000 characters, schemas at 32 KB, and the catalog
+  at 200 tools;
+- says which tools it left out, and why.
+
+The MCP tab shows every tool with its description, its inputs and whether
+it says it only reads, so the builder reads them before allowing any. A
+failed discovery keeps the previous list: a server that is down for a
+minute still offers what it offered.
+
+**Errors a builder can act on.** Transport failures arrive wrapped in
+exception groups. `describe()` unwraps them and names the cause:
+
+- "refused the credentials (HTTP 401). Check the headers.";
+- "did not answer in time";
+- "redirected … register the final URL";
+- "could not resolve …";
+- "The MCP runner is not reachable at …".
+
+The fallback message is passed through the secret stripper, because a
+server's error text can echo a token.
+
+**A scheduled health sweep.** The worker checks every *enabled remote*
+server every 15 minutes (`mcp_health_sweep`, four at a time), so a server
+that went down shows as down without anyone pressing Check. Local-command
+servers are left out: checking one means starting it, and doing that on a
+timer would be the runner's heaviest work for the least information.
+
+**Where the allowlist lives.** The MCP tab shows what a server offers.
+Choosing which of those tools an assistant uses belongs to the assistant
+*version*, so it goes on the canvas `mcp_server` node (task 4.10) and into
+the compiled config (4.6), where publishing freezes it.
+
+**Verified:**
+
+- **Tests** (`tests/test_mcp_discovery.py`, 12, all with real servers):
+  - the echo server discovered through a real runner (3 tools, schemas
+    stored, status ok) and over streamable HTTP;
+  - the same HTTP server refused once local testing is switched off;
+  - a broken command recorded as an error with the old tools kept;
+  - an unreachable runner explained;
+  - no runner session left behind;
+  - every request checked and pinned;
+  - no redirects and no proxies on the remote client;
+  - the catalog validated and capped;
+  - errors explained from inside exception groups, and secrets stripped;
+  - the sweep checking only enabled remote servers, and scheduled.
+
+  The tenancy matrix covers who may check.
+- **Mutation-tested:** 15 mutants across the transport, discovery, the
+  sweep and the route; 14 killed. The survivor removes the explicit
+  `close_session` after a discovery, and it is equivalent in every path I
+  could reproduce: the MCP client's own DELETE on close already ends the
+  runner session. It stays as a second layer, for a client that dies
+  before it can send that.
+- **Browser, live:**
+  - a local-command echo server registered in the MCP tab was discovered
+    through the dev runner (3 tools with descriptions and inputs, in
+    1.8 s);
+  - the runner had no sessions left afterwards;
+  - checking a server at an unresolvable host showed "could not resolve
+    mcp.example.com" on the row.
+
+### 10.8 MCP tools in a conversation (task 4.6)
+
+**The decision: the Claude CLI never connects to an MCP server.** The SDK
+would happily take a URL or a command and let the CLI connect by itself.
+The CLI runs inside the API's process, though, so that would:
+
+- start a stdio server right here, outside the runner and its sandbox;
+- reach a remote server with none of the SSRF checks or pinning;
+- hand results to the model without the post-tool step (size cap and
+  secret stripping).
+
+Instead, each allowed tool becomes a platform capability
+(`app/agent/caps_mcp.py`) in an in-process SDK server named after its MCP
+server, so the model sees `mcp__<server>__<tool>`. Calling it forwards the
+call over the protected connection from §10.7: the runner for a local
+command, the pinned client for a remote server.
+
+Everything the platform does to a tool call then applies unchanged:
+
+- the PreToolUse gate;
+- approvals;
+- the post-tool step;
+- the `tool_calls` audit row, which records the server's name.
+
+The note in `hooks.py` about needing a separate PostToolUse hook for user
+MCP servers is resolved: there's no separate path to hook.
+
+**Which tools a turn gets.** `mcp_servers` in the config is now a list of
+`{id, tools, approval}`:
+
+- `tools` is the version's allowlist, compiled from the canvas node's
+  `tool_allowlist`. Before, compile dropped it and the config carried only
+  server ids.
+- A tool is offered only if all of these hold:
+  - it's in the allowlist;
+  - it's in the server's discovered catalog, so a tool the server stopped
+    listing isn't offered whatever the allowlist says;
+  - its server is enabled;
+  - its server is registered on this assistant.
+- Nothing is allowed by default. Configs saved earlier with bare ids load
+  as servers with no tools, which is what they meant: nothing ran.
+- A malformed tool name on the canvas is a graph error (`invalid_mcp_tool`)
+  rather than a crash, for the same reason as the malformed id in §10.5.
+
+**Connections.** One per server per turn, opened on the first call, so a
+turn that uses no MCP tool starts nothing. Each is owned by a background
+task, because the MCP client's context must be entered and exited in one
+task, while the SDK runs tool calls wherever it likes. The server's secrets
+are read in a short database session of their own, so nothing holds a
+database connection for as long as the MCP connection lasts.
+
+When the turn ends, after the driver has stopped calling tools, the
+connections close and the runner stops any local command. The chat test
+checks the runner has no sessions left.
+
+A server that can't be reached is a failed tool call ("The MCP server 'x'
+is unavailable: …"), not a broken turn. A call has a time limit
+(`MCP_CALL_TIMEOUT_S`, 120 s).
+
+Results are converted for the model: text kept, images and other blobs
+described, structured content given as JSON when there is no text, and the
+server's error flag carried over.
+
+**Approvals, and a correction.** MCP tools follow the assistant's
+`mcp_default` policy, with one refinement from plan §7.2 ("auto for
+specific read-only tools"): a tool the server declares read-only is low
+risk, and anything else is medium.
+
+That matters because of a rule this task brought to light. The router
+lets `auto` skip the human for low-risk calls only (plan §4.4), so:
+
+- under `auto`, a read-only MCP tool runs straight away;
+- every other MCP tool still asks a person;
+- so does every write, whatever its policy says.
+
+The Panels editors had been offering "Run without asking" for writes, which
+the router never honours (the §10.2 correction), and now offer only what
+the server does.
+
+The approval card and the tool card name the server ("echo: environment"),
+so a reviewer can see whose tool is asking.
+
+**What the plan's `get_mcp_status` / reconnect / toggle became.** Those are
+controls for connections the CLI holds, and the CLI holds none here. The
+same needs are met by what exists:
+
+- **status:** the stored status, with Check and the scheduled sweep;
+- **reconnect:** every turn connects afresh;
+- **toggle:** the server's on/off switch, which takes effect on the next
+  turn.
+
+**Offline testing.** The fake driver learned
+`mcp: <server>.<tool> {json args}`. It runs the real proxy through the real
+permission callback. `mcp:`, `http:` and `sql:` now share one helper for
+choosing the call.
+
+**Verified:**
+
+- **Tests** (`tests/test_mcp_tools.py`, 10). Real turns against a real stdio
+  server behind a real runner:
+  - an allowed read-only tool runs under `auto` and returns its output;
+  - the audit row names the server, and the runner has no session left
+    afterwards;
+  - a tool outside the allowlist isn't offered at all;
+  - `mcp_default: deny` refuses;
+  - a tool not declared read-only waits for a person even under `auto`,
+    and nothing runs when they decline;
+  - an unreachable runner gives a tool error and the turn still ends
+    normally.
+
+  Also covered:
+  - the config's refs (bare ids, sorting, bad names);
+  - compile and project round-tripping the allowlist and approval;
+  - a bad tool name on the canvas being an error, not a 500;
+  - the toolset offering only allowed, discovered tools from enabled
+    servers on this assistant, served as their own SDK server with nothing
+    auto-approved;
+  - result rendering.
+- **Browser, live** (the dev runner and the local echo server; the
+  allowlist was set through the API, because the canvas editor for it is
+  task 4.10):
+  - `echo: echo` ran without asking and returned its text;
+  - `echo: environment` showed an approval card naming the server;
+  - once approved, it reported a private directory, its own sealed
+    variable and nothing leaked;
+  - the runner had no sessions left after the turn.
+
+### 10.9 Per-tool approval, and an audit of every call (task 4.7)
+
+**Rules at three levels.** An assistant version's entry for an MCP server
+now carries:
+
+- `approval`: the server's rule, or `null` for "not set here";
+- `tool_approvals`: `{tool: rule}`, per-tool rules.
+
+Both come from the canvas node (`approval`, `tool_approvals`) and
+round-trip through compile and project. `approvals.mcp_mode` picks the most
+specific rule set: the tool's, else the server's, else the assistant's
+`mcp_default`. One exception: `mcp_default: deny` switches every MCP tool
+off, whatever the finer rules say, so there is always one place to stop
+them all.
+
+The risk rule from §10.8 still sits under all of this. `auto` runs a tool
+unasked only if the server declares it read-only; anything else is medium
+risk, and medium risk always asks. So a builder can make a read-only
+search tool run freely, forbid one dangerous tool, and leave the rest
+asking a person, which is plan §7.2 exactly.
+
+**The audit: how each call came to run, or not.** Every row in `tool_calls`
+already recorded the tool, the server, the input, the output, the status
+and the latency. It now also records `permission`:
+
+| Value | Meaning |
+|---|---|
+| `auto` | nobody needed asking (a read, or `auto` on a read-only tool) |
+| `approved` | a person approved it (the `approvals` row says who and when) |
+| `declined` | a person declined it |
+| `expired` | nobody answered in time |
+| `interrupted` | the turn was stopped while it waited |
+| `refused` | a rule or the connection's credential forbade it |
+
+The permission callback records the label under the call's id (the SDK
+passes it; the fake driver now does too), and the turn stores it on the
+audit row (migration `f06d6e8244fd`) and in the message's blocks. The live
+`tool_result` event carries it too, and the tool card shows it in words
+("Ran without asking", "Approved by a person", "Not allowed by this
+assistant's rules"), during the turn and after a reload.
+
+**Found on the way:**
+
+- **Tokens in ordinary arguments reached the audit trail.** Inputs were
+  redacted by *key* only (`password`, `authorization`, …). A token passed
+  as, say, a search `query` was stored as-is in `tool_calls.input` and
+  shown on the approval card. `redact` now also strips values shaped like
+  credentials, wherever they appear. The model still had the original; this
+  is what people and the database see.
+- **Refusals didn't say which rule.** "mcp__echo__environment is not
+  permitted for this assistant" reads like a bug and gives the model
+  nothing to work with. It now names the tool and where its rule is set.
+
+**Verified:**
+
+- **Tests** (`tests/test_mcp_approvals.py`, 14):
+  - the precedence table, including the switch-off;
+  - `auto` only running read-only tools;
+  - per-tool rules round-tripping through the canvas;
+  - secret-shaped values stripped.
+  - Real turns against the echo server behind a real runner:
+    - a read-only tool under a tool rule of `auto` runs, recorded `auto`;
+    - a tool rule of `deny` refuses one tool while its server allows the
+      rest, recorded `refused`, and the refusal names the rule;
+    - `mcp_default: deny` beats a tool's `auto`;
+    - a person approving or declining is recorded as `approved` or
+      `declined`, both on the live event and on the audit row.
+- **Mutation-tested:** 11 mutants, all killed. They covered the switch-off,
+  the precedence order, the per-tool modes reaching the router, the
+  permission labels (recorded, stored, streamed), value stripping, compile
+  keeping the rules, and the refusal's wording.
+- **Browser, live** (rules set through the API; their canvas editor is
+  4.10):
+  - `echo` (tool rule `auto`) ran and its card said "Ran without asking";
+  - `environment` (tool rule `deny`) was refused, and its card said "Not
+    allowed by this assistant's rules";
+  - both lines were still there after a reload.
+
+### 10.10 The MCP server node on the canvas (task 4.10)
+
+Until now, choosing a server's tools meant `scripts/mcp-allow.ps1`. The
+canvas does it now, and the script stays as a shortcut for tests.
+
+**Adding one.** Canvas › **Add node** has an **MCP servers** section listing
+the servers registered in the MCP tab. Clicking one adds an `mcp_server`
+node wired to the agent. A server that already has a node is marked
+**added**, because two nodes for one server would each claim its tools. The
+node's subtitle shows how many tools are allowed.
+
+**The drawer** (`components/config/mcp-node.tsx`) edits the node's data,
+which compiles into the version's config (§10.8):
+
+- **Tools:** a checkbox per tool from the server's last discovery, with
+  **All** / **None**. Nothing is allowed until ticked. Un-ticking a tool
+  also drops its rule, so no rule sits there unseen. A tool that is allowed
+  but no longer offered by the server is listed with a warning; a turn
+  would skip it anyway.
+- **Server rule:** "Not set here" (use the assistant's MCP default), or one
+  of the three rules.
+- **Per-tool rule** beside each allowed tool, and a line saying what will
+  actually happen: *Runs without asking*, *Asks a person first* or *Never
+  runs*. "Run without asking" is offered only for tools the server declares
+  read-only. For any other tool it would promise something the server
+  won't do.
+
+That last line comes from `lib/mcp-rules.ts`, a copy of the server's logic:
+
+- `effectiveMode`: the tool's rule, else the server's, else the assistant
+  default; `deny` as the default beats everything.
+- `outcome`: `auto` skips the person only for a read-only tool.
+
+Having it in two places is a risk, so `lib/mcp-rules.test.ts` pins the same
+cases the server's tests do: precedence, the switch-off, and `auto` only
+for read-only tools. In the browser, each drawer line
+matched what the chat then did.
+
+If the server is deleted from the MCP tab, the drawer says so and suggests
+removing the node. The graph validator flags it too.
+
+**Found on the way:** a node with a malformed server id or tool name made
+saving the draft fail with a 500. The config schema rejected it after the
+graph had already been accepted. The validator now checks both first and
+reports `unknown_mcp_server` / `invalid_mcp_tool` on the node, like every
+other graph problem.
+
+**One limit, until Phase 5:** an MCP node wired through a subagent still
+gives its tools to the main agent. Compile collects every MCP node that
+*reaches* the agent. Tools scoped to one subagent are Phase 5 work.
+
+### 10.11 The end-to-end test (task 4.9)
+
+The other MCP tests call our proxy tools directly, as the fake driver does.
+`tests/test_mcp_e2e.py` runs the path a real turn takes, with only the model
+scripted:
+
+```text
+register (API) → discover (API, through the runner)
+  → allowlist + rules (config)
+  → ClaudeSDKDriver → the real claude_agent_sdk client
+  → in-process SDK server "echo" → our proxy → runner → stdio echo server
+```
+
+The CLI's side is `ScriptedCLI` (from `test_driver_transport.py`), which
+speaks the bundled CLI's control protocol: the MCP handshake and
+`tools/list` on the in-process server, the PreToolUse hook, `can_use_tool`,
+and `tools/call`. It checks:
+
+- the CLI gets an in-process (`sdk`) server, never a URL or a command, and
+  `allowed_tools` is empty, so nothing is pre-approved at the SDK level;
+- the model is offered exactly the allowed tools with the server's own
+  schemas (`spin` was never allowed, so it isn't there);
+- `echo` (read-only, rule `auto`) runs unasked and really reaches the
+  server;
+- `environment` reaches a person, who declines, and it never runs;
+- the audit labels are `auto` and `declined`, the events say `success` and
+  `denied`, and the runner has no session left afterwards.
+
+**Mutation-tested:** 2 mutants, both killed. One merged every MCP tool
+into the single `caps` server, so the tools lost their server's name. The
+other ignored the read-only declaration, so `echo` asked a person too.
+
+### 10.12 A catalog of well-known servers (task 4.8)
+
+`app/mcp/presets.py` lists six starting points:
+
+- Everything (the MCP test server);
+- Time;
+- Fetch;
+- Memory;
+- Sequential thinking (all five local commands via `npx` / `uvx`);
+- GitHub's hosted server (remote, needs a token).
+
+Each links to its maintainer's docs. `GET /api/v1/mcp-presets` serves them.
+
+**What a preset is, and isn't.** It only fills the **Add server** form. The
+builder still:
+
+- reviews the command or URL;
+- supplies any secret (the preset has only its *name* and a hint, like
+  `Authorization: Bearer <a GitHub personal access token>`);
+- adds the server, discovers its tools, and chooses them on the canvas.
+
+The same registration rules apply as for a hand-typed server, and
+`tests/test_mcp_presets.py` checks every preset against them. A preset
+can't drift into something the API would refuse, and the served catalog
+carries no values.
+
+**In the MCP tab:** under the Add form, **Or start from a well-known
+server**. Each card shows the title, `local` or `http`, and a description.
+Picking one opens the form filled in, with:
+
+- the docs link;
+- the secrets it needs, pre-listed as `NAME=` / `Name: ` lines;
+- for local commands, a note that they download their package on first use.
+
+Adding with a required secret left empty is refused in the form ("Fill in
+Authorization."; `missingSecrets` in `lib/mcp-forms.ts`). A preset whose
+name is already registered is shown **added** and can't be picked twice.
+
+**The network note matters.** `npx`/`uvx` fetch the package when the server
+first starts. On a developer machine that just works. In Docker the runner
+has no route out (§10.6), so bake the package into the runner image or use
+`docker-compose.mcp-egress.yml`. Fetch, in particular, reaches whatever the
+runner's network allows. The built-in HTTP tool (§10.1) is the SSRF-guarded
+way to fetch pages.
+
+**Verified:**
+
+- **Tests:** 8 API tests, and web tests for `missingSecrets`, which a
+  mutant (presence instead of non-blank) failed.
+- **Browser:**
+  - the catalog listed all six;
+  - GitHub filled name, transport, URL and an `Authorization: ` line, and
+    adding it blank was refused with no request sent;
+  - switching to Time re-filled the form (`uvx mcp-server-time`, with the
+    download note);
+  - a server registered as `time` turned the Time card into **added**. It
+    was pointed at the echo fixture rather than downloading anything, then
+    deleted.
+
+### 10.13 Offline mode switches web search off
+
+Cross-checking Phase 4 against the plan turned up one unmet line from the
+security checklist (plan §10, Privacy): "offline mode disables web search".
+`RAG_OFFLINE=1` already kept embeddings and reranking local, but an
+assistant with web search enabled would still have been offered it. A
+search sends the model's query to a third party, which is exactly what
+offline mode promises won't happen.
+
+**Now** `options.web_search_for(config)` is the one place that decides. It
+returns web search's settings only if the assistant enables it *and* the
+instance isn't offline. `build_runtime_spec` uses it for both the enabled
+tool list and the PreToolUse gate's limits. So offline:
+
+- `WebSearch` isn't among the SDK built-ins, so the model is never offered
+  it;
+- the gate refuses a `WebSearch` call if one arrives anyway;
+- the assistant's config is untouched. Web search comes back as soon as
+  offline mode is off, with its limits intact.
+
+**The builder sees it.** `/meta/config-schema` now carries `offline`. The
+web-search settings, in both Panels › Tools and the canvas drawer, show a
+note when it's on (`lib/instance.ts` fetches it once per page load).
+
+**Tests pin the mode.** Tests read the repo's `.env`, so locally they run
+offline while CI doesn't. The two tests that expect web search now set
+`rag_offline` to `False` themselves.
+
+**Verified:**
+
+- **New tests:** offline removes web search from the spec, the built-ins
+  and the gate, and leaves the config alone. `/meta/config-schema` reports
+  both modes.
+- **Mutation-tested:** 2 mutants, both killed. One ignored offline mode;
+  the other hard-coded `offline: false`.
+- **Browser:** the note appeared on a temporary assistant with web search
+  on (then deleted).
+- **The research subagent:** its plan (§4.6) uses `WebSearch`; it is
+  Phase 5 work and must take web search from `web_search_for` too.

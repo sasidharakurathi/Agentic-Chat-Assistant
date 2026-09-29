@@ -2,7 +2,9 @@
 
 import { useState } from "react";
 
-import type { ToolCallView } from "@/lib/tool-tree";
+import { Markdown } from "@/components/chat/Markdown";
+import { toolLabel, toolShortName } from "@/lib/tool-label";
+import { permissionText, type ToolCallView } from "@/lib/tool-tree";
 import { cn } from "@/lib/utils";
 
 export type { ToolCallView } from "@/lib/tool-tree";
@@ -20,7 +22,8 @@ export function ToolCallCard({
   // Defensive: `blocks` is a growing mixed list and this app has no error
   // boundary on the chat route, so one bad deref here blanks the whole
   // conversation rather than degrading a single card.
-  const short = (call.name ?? "tool").replace(/^mcp__caps__/, "");
+  const short = toolShortName(call.name ?? "tool");
+  const label = toolLabel(call.name ?? "tool");
   const sql = typeof call.input?.sql === "string" ? (call.input.sql as string) : null;
   const rows = parseRows(call.output);
   return (
@@ -30,7 +33,7 @@ export function ToolCallCard({
         className="flex w-full items-center justify-between px-3 py-1.5"
       >
         <span className="font-medium">
-          🔧 {short}
+          🔧 {label}
           {delegated && <span className="text-muted-foreground ml-2">subagent</span>}
           {call.status && (
             <span
@@ -47,6 +50,9 @@ export function ToolCallCard({
       </button>
       {open && (
         <div className="border-border space-y-2 border-t px-3 py-2">
+          {permissionText(call.permission) && (
+            <p className="text-muted-foreground">{permissionText(call.permission)}.</p>
+          )}
           {sql ? (
             // The run trace shows the SQL that ran (task 3.9), not a JSON blob
             // with the statement buried inside it.
@@ -82,6 +88,9 @@ export function ToolCallCard({
               <div className="text-muted-foreground">output</div>
               {rows ? (
                 <ResultTable rows={rows} />
+              ) : short === "kb_search" ? (
+                // Retrieved passages are documents, often Markdown: render them.
+                <Markdown text={call.output} className="max-h-96 overflow-auto" />
               ) : (
                 <pre className="overflow-auto whitespace-pre-wrap">{call.output}</pre>
               )}

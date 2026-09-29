@@ -45,9 +45,13 @@ export function StudioNode({ data, selected }: NodeProps) {
             ? (label ?? "unknown source")
             : t === "database"
               ? (label ?? "unknown connection")
-              : t === "knowledge_base"
-                ? `${(node.data.retrieval as { rerank_top_n?: number })?.rerank_top_n ?? "?"} results`
-                : "";
+              : t === "mcp_server"
+                ? `${label ?? "unknown server"} · ${
+                    ((node.data.tool_allowlist as string[] | undefined) ?? []).length
+                  } tools allowed`
+                : t === "knowledge_base"
+                  ? `${(node.data.retrieval as { rerank_top_n?: number })?.rerank_top_n ?? "?"} results`
+                  : "";
 
   return (
     <div
@@ -71,14 +75,10 @@ export function StudioNode({ data, selected }: NodeProps) {
           {errors.length || warnings.length}
         </span>
       )}
-      {showTarget && (
-        <Handle type="target" position={Position.Left} className="!bg-muted-foreground" />
-      )}
+      {showTarget && <Handle type="target" position={Position.Left} className="studio-handle" />}
       <div className="text-[13px] font-medium">{NODE_LABEL[t] ?? t}</div>
       {subtitle && <div className="text-muted-foreground text-[11px]">{subtitle}</div>}
-      {showSource && (
-        <Handle type="source" position={Position.Right} className="!bg-muted-foreground" />
-      )}
+      {showSource && <Handle type="source" position={Position.Right} className="studio-handle" />}
     </div>
   );
 }

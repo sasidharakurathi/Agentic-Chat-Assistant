@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 import warnings
 
+import pytest
 from app.agent.approvals import build_can_use_tool
 from app.agent.options import (
     DISALLOWED_TOOLS,
@@ -10,6 +11,7 @@ from app.agent.options import (
     build_runtime_spec,
     compose_system_prompt,
 )
+from app.config import settings
 from app.schemas.assistant_config import AssistantConfig, default_config
 from claude_agent_sdk import CanUseToolShadowedWarning
 from claude_agent_sdk.types import (
@@ -135,7 +137,8 @@ def test_no_built_in_tool_exists_unless_enabled() -> None:
     assert _options(_db_config()).tools == []
 
 
-def test_web_search_exists_only_when_enabled() -> None:
+def test_web_search_exists_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "rag_offline", False)  # offline switches it off
     assert _options(_db_config(tools={"web_search": {"enabled": True}})).tools == ["WebSearch"]
 
 

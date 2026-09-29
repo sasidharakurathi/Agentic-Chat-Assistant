@@ -51,6 +51,25 @@ export function indexIssues(validation: ValidationResult): GraphIssues {
   return { nodes, edges };
 }
 
+/** The graph's nodes, as React Flow should hold them after a graph update.
+ *
+ *  React Flow hides a node until it knows its size, and learns the size once,
+ *  when the node first renders. A graph update builds fresh node objects
+ *  without one, so each node keeps the size React Flow measured before (and
+ *  selection follows `selectedId`). Removed nodes drop out; new ones are
+ *  measured on first render as usual. */
+export function mergeFlowNodes<T extends Node>(
+  prev: Node[],
+  next: T[],
+  selectedId: string | null,
+): T[] {
+  const measured = new Map(prev.map((n) => [n.id, n.measured]));
+  return next.map((n) => {
+    const size = measured.get(n.id);
+    return { ...n, selected: n.id === selectedId, ...(size ? { measured: size } : {}) };
+  });
+}
+
 export function toFlow(
   graph: Graph,
   issues: GraphIssues = { nodes: new Map(), edges: new Map() },
@@ -74,7 +93,9 @@ export function toFlow(
             ? sourceLabels[String(n.data.data_source_id ?? "")]
             : n.type === "database"
               ? sourceLabels[String(n.data.connection_id ?? "")]
-              : undefined,
+              : n.type === "mcp_server"
+                ? sourceLabels[String(n.data.mcp_server_id ?? "")]
+                : undefined,
       },
     }));
   const edges: Edge[] = graph.edges.map((e, i) => {

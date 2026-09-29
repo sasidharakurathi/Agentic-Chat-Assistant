@@ -1,0 +1,25 @@
+# Give the MCP runner a route to the internet (task 4.4). Opt-in.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.mcp-egress.yml --profile apps up -d
+#
+# By default the runner sits only on the internal `mcp` network: servers it
+# starts can talk to the API's side of the bridge and nothing else. Many
+# published MCP servers need more: `npx`/`uvx` download the package on first
+# use, and a GitHub or Slack server calls that service's API.
+#
+# This adds a second, ordinary network, so every server in the runner can
+# reach the internet (never the platform's own containers: they are not on
+# it). It is all or nothing; a per-server allowlist of destinations is not
+# built yet. The alternative that keeps the runner offline is to bake the
+# servers you need into an image based on docker/mcp-runner.Dockerfile
+# (`RUN npm install -g <package>`) and register them by their installed
+# command instead of `npx`.
+
+services:
+  mcp-runner:
+    environment:
+      MCP_RUNNER_NETWORK: internet
+    networks: [mcp, mcp_egress]
+
+networks:
+  mcp_egress: {}

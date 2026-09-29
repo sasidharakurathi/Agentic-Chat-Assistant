@@ -15,6 +15,7 @@ from app.schemas.assistant_config import (
     DatabaseRef,
     Guardrails,
     HttpRequestTool,
+    McpServerRef,
     MemoryConfig,
     ModelRoles,
     RagConfig,
@@ -192,8 +193,20 @@ def compile_graph(graph: Graph) -> AssistantConfig:
             tools.datetime = ToggleTool(enabled=True)
 
     # ── mcp servers ──────────────────────────────────────────
+    # The node's allowlist and approval were dropped here before task 4.6:
+    # the config carried only which servers, never which of their tools.
     mcp_servers = sorted(
-        n.data.mcp_server_id for n in graph.nodes if n.type == "mcp_server" and wired_to_agent(n.id)
+        (
+            McpServerRef(
+                id=n.data.mcp_server_id,
+                tools=list(n.data.tool_allowlist),
+                approval=n.data.approval,
+                tool_approvals=dict(n.data.tool_approvals),
+            )
+            for n in graph.nodes
+            if n.type == "mcp_server" and wired_to_agent(n.id)
+        ),
+        key=lambda m: m.id,
     )
 
     # ── subagents ────────────────────────────────────────────

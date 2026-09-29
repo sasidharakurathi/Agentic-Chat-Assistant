@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from app.agent.approvals import CanUseTool
-from app.agent.caps import ALL_CAPS, CapabilityTool, build_caps_server
+from app.agent.caps import ALL_CAPS, CapabilityTool, build_sdk_servers
+from app.agent.caps_http import build_http_tool
 from app.agent.caps_mongo import build_mongo_tools
 from app.agent.caps_rag import build_kb_list_sources_tool, build_kb_search_tool
 from app.agent.caps_sql import build_sql_tools
@@ -22,7 +23,7 @@ from app.agent.hooks import build_hooks, build_tool_gate
 from app.agent.subagents import SubagentSpec, build_agent_definitions, build_subagent_specs
 from app.config import settings
 from app.logging import get_logger
-from app.schemas.assistant_config import AssistantConfig, EffortLevel
+from app.schemas.assistant_config import AssistantConfig, EffortLevel, WebSearchTool
 
 log = get_logger(__name__)
 
@@ -66,6 +67,9 @@ class RuntimeSpec:
     #: picks one from `sql_list_schemas` like any other argument.
     sql_connection_hint: str | None = None
     cwd: Path | None = None
+    #: Set when web search is enabled; its limits are enforced by the
+    #: PreToolUse gate because the SDK has no option for them.
+    web_search: WebSearchTool | None = None
 
 
 def _enabled_caps(
@@ -79,6 +83,9 @@ def _enabled_caps(
         out.append(ALL_CAPS["calculator"])
     if config.tools.datetime.enabled:
         out.append(ALL_CAPS["datetime"])
+    if config.tools.http_request.enabled:
+        # Built per turn: it closes over this assistant's domain allowlist.
+        out.append(build_http_tool(config.tools.http_request))
     # Unlike the two above, these are built per-turn (not looked up from a
     # static registry) — they close over which assistant's knowledge base
     # to search, so they need assistant_id. A draft assistant that hasn't
@@ -193,6 +200,20 @@ def turn_budget(cap: float | None, remaining: float | None) -> float | None:
     return min(bounds) if bounds else None
 
 
+def web_search_for(config: AssistantConfig) -> WebSearchTool | None:
+    """Web search's settings when this instance will actually offer it.
+
+    Offline mode (`RAG_OFFLINE=1`) promises nothing leaves for a third-party
+    service (plan §10, Privacy): it already keeps embeddings and reranking
+    local, and a search sends the model's query to one. So an assistant
+    configured with web search simply runs without it here; its config is
+    untouched and it comes back when offline mode is off.
+    """
+    if not config.tools.web_search.enabled or settings.rag_offline:
+        return None
+    return config.tools.web_search
+
+
 def build_runtime_spec(
     config: AssistantConfig,
     *,
@@ -201,10 +222,14 @@ def build_runtime_spec(
     citations: CitationRegistry | None = None,
     budget_remaining_usd: float | None = None,
     db_engines: dict[str, str] | None = None,
+    mcp_tools: list[CapabilityTool] | None = None,
 ) -> RuntimeSpec:
-    caps = _enabled_caps(config, assistant_id, citations, db_engines)
+    # MCP tools are built by the runtime (it can reach the database and
+    # holds the turn's connections); they join the platform's own here.
+    caps = _enabled_caps(config, assistant_id, citations, db_engines) + list(mcp_tools or [])
     enabled = [c.qualified_name for c in caps]
-    if config.tools.web_search.enabled:
+    web_search = web_search_for(config)
+    if web_search is not None:
         enabled.append(WEB_SEARCH_TOOL)
     main = config.models.main
     specs = build_subagent_specs(config)
@@ -220,6 +245,7 @@ def build_runtime_spec(
         subagents=specs,
         sql_connection_hint=(config.databases[0].connection_id if config.databases else None),
         cwd=scratch_dir,
+        web_search=web_search,
     )
 
 
@@ -263,9 +289,9 @@ def build_claude_options(spec: RuntimeSpec, can_use_tool: CanUseTool) -> Any:
     """
     from claude_agent_sdk import ClaudeAgentOptions
 
-    mcp_servers: dict[str, Any] = {}
-    if spec.caps_tools:
-        mcp_servers["caps"] = build_caps_server(spec.caps_tools)
+    # `caps`, plus one in-process server per registered MCP server in use
+    # (task 4.6): the CLI never connects to an MCP server itself.
+    mcp_servers: dict[str, Any] = dict(build_sdk_servers(spec.caps_tools))
 
     agents = build_agent_definitions(spec.subagents) if spec.subagents else None
 
@@ -278,6 +304,11 @@ def build_claude_options(spec: RuntimeSpec, can_use_tool: CanUseTool) -> Any:
             "API_TIMEOUT_MS": str(settings.agent_api_timeout_ms),
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             "DISABLE_TELEMETRY": "1",
+            # The CLI inherits the server's environment. Started from a
+            # terminal inside an editor with Claude Code, that includes the
+            # port of the editor's integration, which would connect a tenant's
+            # agent to the developer's IDE. Never wanted here.
+            "CLAUDE_CODE_SSE_PORT": "",
         },
         system_prompt=spec.system_prompt,
         model=spec.model,
@@ -286,7 +317,7 @@ def build_claude_options(spec: RuntimeSpec, can_use_tool: CanUseTool) -> Any:
         tools=builtin_tools(spec),
         allowed_tools=[],
         disallowed_tools=DISALLOWED_TOOLS,
-        hooks=build_hooks(permitted_tool_names(spec)),
+        hooks=build_hooks(permitted_tool_names(spec), spec.web_search),
         mcp_servers=mcp_servers,
         agents=agents,
         # Surface the subagent's own text into the trace/UI. Without it a
@@ -314,4 +345,5 @@ __all__ = [
     "compose_system_prompt",
     "permitted_tool_names",
     "turn_budget",
+    "web_search_for",
 ]

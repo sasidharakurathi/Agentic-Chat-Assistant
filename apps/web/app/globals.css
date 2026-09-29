@@ -140,3 +140,74 @@
     background-color: color-mix(in oklch, var(--primary) 30%, transparent);
   }
 }
+
+/* Canvas wiring handles (unlayered on purpose: React Flow's own stylesheet is
+   unlayered, and a rule inside @layer would lose to it). The default 6px dot
+   was hard to hit; this one is 12px with a 24px invisible hit area, grows on
+   hover, and turns green over a valid target while a connection is dragged. */
+.studio-canvas .react-flow__handle.studio-handle {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--background);
+  background: var(--muted-foreground);
+  transition:
+    transform 120ms ease,
+    background-color 120ms ease;
+}
+.studio-canvas .react-flow__handle.studio-handle::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 9999px;
+}
+.studio-canvas .react-flow__handle.studio-handle:hover,
+.studio-canvas .react-flow__handle.studio-handle.connectingfrom {
+  transform: translate(-50%, -50%) scale(1.35);
+  background: var(--primary);
+}
+.studio-canvas .react-flow__handle.studio-handle.connectingto.valid,
+.studio-canvas .react-flow__handle.studio-handle.valid {
+  transform: translate(-50%, -50%) scale(1.5);
+  background: oklch(0.7 0.17 150);
+}
+.studio-canvas .react-flow__handle.studio-handle.connectingto:not(.valid) {
+  background: var(--destructive);
+}
+
+/* Chat "working" indicators (TypingDots, RunningBadge). */
+@keyframes typing-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+@keyframes running-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.7);
+  }
+}
+.typing-dot {
+  animation: typing-dot 1.2s ease-in-out infinite;
+}
+.running-pulse {
+  animation: running-pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .typing-dot,
+  .running-pulse {
+    animation: none;
+    opacity: 0.7;
+  }
+}

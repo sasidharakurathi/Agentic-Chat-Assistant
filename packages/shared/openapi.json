@@ -391,8 +391,7 @@
           },
           "mcp_servers": {
             "items": {
-              "pattern": "^[0-9a-fA-F-]{8,64}$",
-              "type": "string"
+              "$ref": "#/components/schemas/McpServerRef-Input"
             },
             "title": "Mcp Servers",
             "type": "array"
@@ -446,8 +445,7 @@
           },
           "mcp_servers": {
             "items": {
-              "pattern": "^[0-9a-fA-F-]{8,64}$",
-              "type": "string"
+              "$ref": "#/components/schemas/McpServerRef-Output"
             },
             "title": "Mcp Servers",
             "type": "array"
@@ -3393,6 +3391,322 @@
         "title": "LoginRequest",
         "type": "object"
       },
+      "McpCheckResult": {
+        "description": "The outcome of a health check or a tool discovery (task 4.5).\n\n`ok: false` with a reason, not an HTTP error: a wrong header or a server\nthat is down is a normal thing to find while setting one up, and a 500\nwould make the form look broken instead of the server.",
+        "properties": {
+          "elapsed_ms": {
+            "default": 0,
+            "title": "Elapsed Ms",
+            "type": "integer"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "skipped": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Skipped",
+            "type": "array"
+          },
+          "tool_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Count"
+          }
+        },
+        "required": [
+          "ok",
+          "error",
+          "elapsed_ms",
+          "tool_count",
+          "skipped"
+        ],
+        "title": "McpCheckResult",
+        "type": "object"
+      },
+      "McpPresetField": {
+        "properties": {
+          "hint": {
+            "title": "Hint",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "hint"
+        ],
+        "title": "McpPresetField",
+        "type": "object"
+      },
+      "McpPresetOut": {
+        "description": "One entry of the catalog (task 4.8): what the Add form is filled with.",
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Args",
+            "type": "array"
+          },
+          "command": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "docs_url": {
+            "title": "Docs Url",
+            "type": "string"
+          },
+          "env": {
+            "items": {
+              "$ref": "#/components/schemas/McpPresetField"
+            },
+            "title": "Env",
+            "type": "array"
+          },
+          "headers": {
+            "items": {
+              "$ref": "#/components/schemas/McpPresetField"
+            },
+            "title": "Headers",
+            "type": "array"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "needs_network": {
+            "default": true,
+            "title": "Needs Network",
+            "type": "boolean"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "transport": {
+            "enum": [
+              "stdio",
+              "http",
+              "sse"
+            ],
+            "title": "Transport",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "key",
+          "name",
+          "title",
+          "description",
+          "transport",
+          "command",
+          "args",
+          "url",
+          "env",
+          "headers",
+          "docs_url",
+          "needs_network"
+        ],
+        "title": "McpPresetOut",
+        "type": "object"
+      },
+      "McpRunnerStatus": {
+        "description": "Where local-command servers run, and what protects them there.",
+        "properties": {
+          "applied": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Applied",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "full_sandbox": {
+            "default": false,
+            "title": "Full Sandbox",
+            "type": "boolean"
+          },
+          "network": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Network"
+          },
+          "platform": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform"
+          },
+          "reachable": {
+            "title": "Reachable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reachable",
+          "error",
+          "platform",
+          "network",
+          "applied",
+          "full_sandbox"
+        ],
+        "title": "McpRunnerStatus",
+        "type": "object"
+      },
+      "McpServerCreate": {
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Args",
+            "type": "array"
+          },
+          "command": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Env",
+            "type": "object"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "object"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sandbox": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SandboxLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transport": {
+            "enum": [
+              "stdio",
+              "http",
+              "sse"
+            ],
+            "title": "Transport",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "name",
+          "transport"
+        ],
+        "title": "McpServerCreate",
+        "type": "object"
+      },
       "McpServerNode-Input": {
         "additionalProperties": false,
         "properties": {
@@ -3457,14 +3771,20 @@
         "additionalProperties": false,
         "properties": {
           "approval": {
-            "default": "require",
-            "enum": [
-              "auto",
-              "require",
-              "deny"
+            "anyOf": [
+              {
+                "enum": [
+                  "auto",
+                  "require",
+                  "deny"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ],
-            "title": "Approval",
-            "type": "string"
+            "title": "Approval"
           },
           "mcp_server_id": {
             "title": "Mcp Server Id",
@@ -3476,6 +3796,18 @@
             },
             "title": "Tool Allowlist",
             "type": "array"
+          },
+          "tool_approvals": {
+            "additionalProperties": {
+              "enum": [
+                "auto",
+                "require",
+                "deny"
+              ],
+              "type": "string"
+            },
+            "title": "Tool Approvals",
+            "type": "object"
           }
         },
         "required": [
@@ -3488,14 +3820,20 @@
         "additionalProperties": false,
         "properties": {
           "approval": {
-            "default": "require",
-            "enum": [
-              "auto",
-              "require",
-              "deny"
+            "anyOf": [
+              {
+                "enum": [
+                  "auto",
+                  "require",
+                  "deny"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ],
-            "title": "Approval",
-            "type": "string"
+            "title": "Approval"
           },
           "mcp_server_id": {
             "title": "Mcp Server Id",
@@ -3507,15 +3845,443 @@
             },
             "title": "Tool Allowlist",
             "type": "array"
+          },
+          "tool_approvals": {
+            "additionalProperties": {
+              "enum": [
+                "auto",
+                "require",
+                "deny"
+              ],
+              "type": "string"
+            },
+            "title": "Tool Approvals",
+            "type": "object"
           }
         },
         "required": [
           "mcp_server_id",
           "tool_allowlist",
-          "approval"
+          "approval",
+          "tool_approvals"
         ],
         "title": "McpServerNodeData",
         "type": "object"
+      },
+      "McpServerRef-Input": {
+        "additionalProperties": false,
+        "description": "One registered MCP server, as this assistant version uses it (tasks 4.6 / 4.7).\n\n`tools` is the allowlist: only these, and only if the server still lists\nthem, are offered to the model. Empty means none; nothing from a server\nis usable until someone chooses it.\n\nApproval, most specific first: `tool_approvals[tool]`, then `approval`\nfor the server, then the assistant's `approval_policy.mcp_default`\n(see `approvals.mcp_mode`). `None` means \"not set here\".",
+        "properties": {
+          "approval": {
+            "anyOf": [
+              {
+                "enum": [
+                  "auto",
+                  "require",
+                  "deny"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval"
+          },
+          "id": {
+            "pattern": "^[0-9a-fA-F-]{8,64}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "tool_approvals": {
+            "patternProperties": {
+              "^[A-Za-z0-9_-]{1,64}$": {
+                "enum": [
+                  "auto",
+                  "require",
+                  "deny"
+                ],
+                "type": "string"
+              }
+            },
+            "title": "Tool Approvals",
+            "type": "object"
+          },
+          "tools": {
+            "items": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            },
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "McpServerRef",
+        "type": "object"
+      },
+      "McpServerRef-Output": {
+        "additionalProperties": false,
+        "description": "One registered MCP server, as this assistant version uses it (tasks 4.6 / 4.7).\n\n`tools` is the allowlist: only these, and only if the server still lists\nthem, are offered to the model. Empty means none; nothing from a server\nis usable until someone chooses it.\n\nApproval, most specific first: `tool_approvals[tool]`, then `approval`\nfor the server, then the assistant's `approval_policy.mcp_default`\n(see `approvals.mcp_mode`). `None` means \"not set here\".",
+        "properties": {
+          "approval": {
+            "anyOf": [
+              {
+                "enum": [
+                  "auto",
+                  "require",
+                  "deny"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval"
+          },
+          "id": {
+            "pattern": "^[0-9a-fA-F-]{8,64}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "tool_approvals": {
+            "patternProperties": {
+              "^[A-Za-z0-9_-]{1,64}$": {
+                "enum": [
+                  "auto",
+                  "require",
+                  "deny"
+                ],
+                "type": "string"
+              }
+            },
+            "title": "Tool Approvals",
+            "type": "object"
+          },
+          "tools": {
+            "items": {
+              "pattern": "^[A-Za-z0-9_-]{1,64}$",
+              "type": "string"
+            },
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "tools",
+          "approval",
+          "tool_approvals"
+        ],
+        "title": "McpServerRef",
+        "type": "object"
+      },
+      "McpServerStatus": {
+        "enum": [
+          "unknown",
+          "ok",
+          "error"
+        ],
+        "title": "McpServerStatus",
+        "type": "string"
+      },
+      "McpServerSummary": {
+        "description": "Everything safe to show. Header and environment values are absent by\nconstruction: there is no field that could carry them.",
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Args",
+            "type": "array"
+          },
+          "assistant_id": {
+            "format": "uuid",
+            "title": "Assistant Id",
+            "type": "string"
+          },
+          "command": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "env_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Env Keys",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "header_names": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Header Names",
+            "type": "array"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_checked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Checked At"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sandbox": {
+            "$ref": "#/components/schemas/SandboxLimits"
+          },
+          "status": {
+            "$ref": "#/components/schemas/McpServerStatus"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/McpToolOut"
+            },
+            "title": "Tools",
+            "type": "array"
+          },
+          "tools_discovered_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tools Discovered At"
+          },
+          "transport": {
+            "$ref": "#/components/schemas/McpTransport"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "id",
+          "assistant_id",
+          "name",
+          "transport",
+          "command",
+          "args",
+          "url",
+          "header_names",
+          "env_keys",
+          "enabled",
+          "sandbox",
+          "tools",
+          "tools_discovered_at",
+          "status",
+          "last_checked_at",
+          "error",
+          "created_at"
+        ],
+        "title": "McpServerSummary",
+        "type": "object"
+      },
+      "McpServerUpdate": {
+        "description": "Omit a field to leave it alone. `headers` / `env`: send an object to\nreplace them all, `{}` to clear them. The transport cannot change; delete\nand re-add the server instead.",
+        "properties": {
+          "args": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Args"
+          },
+          "command": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "env": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env"
+          },
+          "headers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headers"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "sandbox": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SandboxLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "title": "McpServerUpdate",
+        "type": "object"
+      },
+      "McpToolOut": {
+        "properties": {
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "input_schema": {
+            "additionalProperties": true,
+            "title": "Input Schema",
+            "type": "object"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "read_only": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Read Only"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "input_schema",
+          "read_only"
+        ],
+        "title": "McpToolOut",
+        "type": "object"
+      },
+      "McpTransport": {
+        "enum": [
+          "stdio",
+          "http",
+          "sse"
+        ],
+        "title": "McpTransport",
+        "type": "string"
       },
       "MeResponse": {
         "properties": {
@@ -4353,6 +5119,34 @@
         "title": "Page[DbConnectionSummary]",
         "type": "object"
       },
+      "Page_McpServerSummary_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/McpServerSummary"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "Page[McpServerSummary]",
+        "type": "object"
+      },
       "Page_MemberOut_": {
         "properties": {
           "items": {
@@ -5099,6 +5893,17 @@
               }
             ],
             "title": "Trace Id"
+          },
+          "version_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Number"
           }
         },
         "required": [
@@ -5106,6 +5911,7 @@
           "conversation_id",
           "message_id",
           "trace_id",
+          "version_number",
           "model",
           "effort",
           "driver",
@@ -5237,6 +6043,17 @@
               }
             ],
             "title": "Trace Id"
+          },
+          "version_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Number"
           }
         },
         "required": [
@@ -5244,6 +6061,7 @@
           "conversation_id",
           "message_id",
           "trace_id",
+          "version_number",
           "model",
           "effort",
           "driver",
@@ -5320,6 +6138,62 @@
           "output"
         ],
         "title": "RunStep",
+        "type": "object"
+      },
+      "SandboxLimits": {
+        "additionalProperties": false,
+        "properties": {
+          "cpu_seconds": {
+            "default": 600,
+            "maximum": 7200.0,
+            "minimum": 5.0,
+            "title": "Cpu Seconds",
+            "type": "integer"
+          },
+          "idle_timeout_s": {
+            "default": 600,
+            "maximum": 3600.0,
+            "minimum": 10.0,
+            "title": "Idle Timeout S",
+            "type": "integer"
+          },
+          "max_file_mb": {
+            "default": 64,
+            "maximum": 1024.0,
+            "minimum": 1.0,
+            "title": "Max File Mb",
+            "type": "integer"
+          },
+          "max_open_files": {
+            "default": 256,
+            "maximum": 4096.0,
+            "minimum": 16.0,
+            "title": "Max Open Files",
+            "type": "integer"
+          },
+          "max_processes": {
+            "default": 128,
+            "maximum": 1024.0,
+            "minimum": 4.0,
+            "title": "Max Processes",
+            "type": "integer"
+          },
+          "memory_mb": {
+            "default": 1024,
+            "maximum": 8192.0,
+            "minimum": 64.0,
+            "title": "Memory Mb",
+            "type": "integer"
+          },
+          "wall_clock_s": {
+            "default": 3600,
+            "maximum": 86400.0,
+            "minimum": 10.0,
+            "title": "Wall Clock S",
+            "type": "integer"
+          }
+        },
+        "title": "SandboxLimits",
         "type": "object"
       },
       "SubagentNode-Input": {
@@ -8184,6 +9058,517 @@
         ]
       }
     },
+    "/api/v1/assistants/{assistant_id}/mcp-servers": {
+      "get": {
+        "operationId": "list_servers_api_v1_assistants__assistant_id__mcp_servers_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Items per page.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Items per page.",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "`next_cursor` from the previous page.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`next_cursor` from the previous page.",
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_McpServerSummary_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Servers",
+        "tags": [
+          "mcp-servers"
+        ]
+      },
+      "post": {
+        "operationId": "create_server_api_v1_assistants__assistant_id__mcp_servers_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpServerCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpServerSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Server",
+        "tags": [
+          "mcp-servers"
+        ]
+      }
+    },
+    "/api/v1/assistants/{assistant_id}/mcp-servers/{server_id}": {
+      "delete": {
+        "operationId": "delete_server_api_v1_assistants__assistant_id__mcp_servers__server_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Server",
+        "tags": [
+          "mcp-servers"
+        ]
+      },
+      "get": {
+        "operationId": "get_server_api_v1_assistants__assistant_id__mcp_servers__server_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpServerSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Server",
+        "tags": [
+          "mcp-servers"
+        ]
+      },
+      "patch": {
+        "operationId": "update_server_api_v1_assistants__assistant_id__mcp_servers__server_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpServerUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpServerSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Server",
+        "tags": [
+          "mcp-servers"
+        ]
+      }
+    },
+    "/api/v1/assistants/{assistant_id}/mcp-servers/{server_id}:discover-tools": {
+      "post": {
+        "description": "Connect, list the server's tools, and store them on the server.",
+        "operationId": "discover_tools_api_v1_assistants__assistant_id__mcp_servers__server_id__discover_tools_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpCheckResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Discover Tools",
+        "tags": [
+          "mcp-servers"
+        ]
+      }
+    },
+    "/api/v1/assistants/{assistant_id}/mcp-servers/{server_id}:health": {
+      "post": {
+        "description": "Connect and complete the MCP handshake; record the outcome on the\nserver. For a local command, this starts it in the runner.",
+        "operationId": "check_server_api_v1_assistants__assistant_id__mcp_servers__server_id__health_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpCheckResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Check Server",
+        "tags": [
+          "mcp-servers"
+        ]
+      }
+    },
     "/api/v1/assistants/{assistant_id}/versions": {
       "get": {
         "operationId": "list_versions_api_v1_assistants__assistant_id__versions_get",
@@ -9472,6 +10857,110 @@
         "summary": "Accept Invite",
         "tags": [
           "orgs"
+        ]
+      }
+    },
+    "/api/v1/mcp-presets": {
+      "get": {
+        "description": "A short catalog of well-known MCP servers, to fill the Add form with\n(task 4.8). Secrets are named, never supplied.",
+        "operationId": "list_presets_api_v1_mcp_presets_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/McpPresetOut"
+                  },
+                  "title": "Response List Presets Api V1 Mcp Presets Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Presets",
+        "tags": [
+          "mcp-servers"
+        ]
+      }
+    },
+    "/api/v1/mcp-runner": {
+      "get": {
+        "description": "Whether local-command (stdio) servers can run, and how well they are\ncontained, so the MCP tab can say so instead of letting a partial\nsandbox pass as a full one.",
+        "operationId": "runner_status_api_v1_mcp_runner_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpRunnerStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Runner Status",
+        "tags": [
+          "mcp-servers"
         ]
       }
     },

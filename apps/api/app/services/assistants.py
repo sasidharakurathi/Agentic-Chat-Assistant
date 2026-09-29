@@ -19,7 +19,7 @@ from app.graph.validate import ValidationResult, validate_graph
 from app.logging import get_logger
 from app.models.assistant import Assistant, AssistantStatus, AssistantVersion
 from app.models.conversation import Conversation
-from app.models.integration import DbConnection
+from app.models.integration import DbConnection, McpServer
 from app.models.rag import DataSource
 from app.models.secret import Secret
 from app.schemas.assistant import (
@@ -327,9 +327,10 @@ async def delete(
     runs and approvals), data sources, documents, chunks and connections.
     Three things it cannot reach are handled here:
 
-    - **sealed credentials** — `db_connections -> secrets` is SET NULL the
-      other way round, so the cascade alone would orphan every ciphertext.
-      Deleted in the same commit.
+    - **sealed credentials** — `db_connections -> secrets` and
+      `mcp_servers -> secrets` are SET NULL the other way round, so the
+      cascade alone would orphan every ciphertext. Deleted in the same
+      commit.
     - **uploaded files, session cache, scratch dirs** — outside Postgres.
       Removed *after* the commit, best-effort: a storage outage then leaves
       an orphaned file (logged), never rows pointing at deleted files.
@@ -340,8 +341,13 @@ async def delete(
     connections = (
         await session.scalars(select(DbConnection).where(DbConnection.assistant_id == assistant_id))
     ).all()
+    servers = (
+        await session.scalars(select(McpServer).where(McpServer.assistant_id == assistant_id))
+    ).all()
     secret_ids = [
         ref for c in connections for ref in (c.secret_ref, c.uri_secret_ref) if ref is not None
+    ] + [
+        ref for m in servers for ref in (m.headers_secret_ref, m.env_secret_ref) if ref is not None
     ]
     object_keys = [
         key

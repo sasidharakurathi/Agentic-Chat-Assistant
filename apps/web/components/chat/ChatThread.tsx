@@ -1,13 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { ApprovalCard, type PendingApproval } from "@/components/chat/ApprovalCard";
 import { RunDetails } from "@/components/chat/RunDetails";
-import { CitedText, SourcesPanel } from "@/components/chat/SourcesPanel";
+import { Markdown } from "@/components/chat/Markdown";
+import { SourcesPanel } from "@/components/chat/SourcesPanel";
+import { RunningBadge, TypingDots } from "@/components/chat/TypingDots";
 import { ToolCallCard, type ToolCallView } from "@/components/chat/ToolCallCard";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/components/ui/toast";
 import {
   approvals as approvalsApi,
   conversations,
@@ -17,6 +20,14 @@ import {
   type MessageBlock,
 } from "@/lib/api";
 import { formatCount, formatUsd } from "@/lib/format";
+import {
+  SLASH_COMMANDS,
+  conversationMarkdown,
+  parseInput,
+  suggestCommands,
+  type SlashCommand,
+  type SlashCommandName,
+} from "@/lib/slash-commands";
 import { appendSubagentText, nestCalls } from "@/lib/tool-tree";
 import { cn } from "@/lib/utils";
 
@@ -27,9 +38,18 @@ type Spend = { cost: number; tokensIn: number; tokensOut: number };
 export function ChatThread({
   conversationId,
   assistantId,
+  title = "Conversation",
+  onNewChat,
+  onRename,
+  onArchive,
 }: {
   conversationId: string;
   assistantId: string;
+  title?: string;
+  /** For the slash commands that act on the conversation list. */
+  onNewChat?: () => void;
+  onRename?: (title: string) => void;
+  onArchive?: () => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [live, setLive] = useState<Live | null>(null);
@@ -41,6 +61,7 @@ export function ChatThread({
   // the stream ending (a turn can finish denied-by-timeout) and must also be
   // restorable after a reload, which `live` never is.
   const [pending, setPending] = useState<PendingApproval[]>([]);
+  const toast = useToast();
   const [stopping, setStopping] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   // The in-flight stream, so leaving the conversation mid-turn drops it
@@ -140,97 +161,195 @@ export function ChatThread({
     el.scrollTo({ top: el.scrollHeight });
   }, [messages, live, pending]);
 
-  const send = useCallback(async () => {
-    const text = input.trim();
-    if (!text || sending) return;
-    setInput("");
-    setError(null);
-    setPendingUser(text);
-    setLive({ text: "", tools: [], citations: [] });
-    setSending(true);
-    const controller = new AbortController();
-    abortRef.current = controller;
-    try {
-      await streamMessage(
-        conversationId,
-        text,
-        (e) => {
-          setLive((prev) => {
-            if (!prev) return prev;
-            switch (e.type) {
-              case "token":
-                // A subagent's notes go on its delegation card, not into the
-                // answer (task 2.10).
-                return e.parent_id
-                  ? { ...prev, tools: appendSubagentText(prev.tools, e.parent_id, e.text) }
-                  : { ...prev, text: prev.text + e.text };
-              case "tool_call":
-                return {
-                  ...prev,
-                  tools: [
-                    ...prev.tools,
-                    { id: e.id, name: e.name, input: e.input, parent_id: e.parent_id },
-                  ],
-                };
-              case "tool_result":
-                return {
-                  ...prev,
-                  tools: prev.tools.map((t) =>
-                    t.id === e.id ? { ...t, status: e.status, output: e.output } : t,
-                  ),
-                };
-              case "approval_required":
-                setPending((p) => [
-                  ...p.filter((x) => x.approval_id !== e.approval_id),
-                  {
-                    approval_id: e.approval_id,
-                    tool: e.tool,
-                    input: e.input,
-                    risk: e.risk,
-                    rationale: e.rationale,
-                    expires_at: e.expires_at,
-                  },
-                ]);
-                return prev;
-              case "citation":
-                // Arrives at finalize, after the full answer — a [n] marker only
-                // means something once every search in the turn has been seen.
-                return { ...prev, citations: [...prev.citations, e as Citation] };
-              default:
-                return prev;
+  const sendText = useCallback(
+    async (text: string) => {
+      if (!text || sending) return;
+      setError(null);
+      setPendingUser(text);
+      setLive({ text: "", tools: [], citations: [] });
+      setSending(true);
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        await streamMessage(
+          conversationId,
+          text,
+          (e) => {
+            setLive((prev) => {
+              if (!prev) return prev;
+              switch (e.type) {
+                case "token":
+                  // A subagent's notes go on its delegation card, not into the
+                  // answer (task 2.10).
+                  return e.parent_id
+                    ? { ...prev, tools: appendSubagentText(prev.tools, e.parent_id, e.text) }
+                    : { ...prev, text: prev.text + e.text };
+                case "tool_call":
+                  return {
+                    ...prev,
+                    tools: [
+                      ...prev.tools,
+                      { id: e.id, name: e.name, input: e.input, parent_id: e.parent_id },
+                    ],
+                  };
+                case "tool_result":
+                  return {
+                    ...prev,
+                    tools: prev.tools.map((t) =>
+                      t.id === e.id
+                        ? { ...t, status: e.status, output: e.output, permission: e.permission }
+                        : t,
+                    ),
+                  };
+                case "approval_required":
+                  setPending((p) => [
+                    ...p.filter((x) => x.approval_id !== e.approval_id),
+                    {
+                      approval_id: e.approval_id,
+                      tool: e.tool,
+                      input: e.input,
+                      risk: e.risk,
+                      rationale: e.rationale,
+                      expires_at: e.expires_at,
+                    },
+                  ]);
+                  return prev;
+                case "citation":
+                  // Arrives at finalize, after the full answer — a [n] marker only
+                  // means something once every search in the turn has been seen.
+                  return { ...prev, citations: [...prev.citations, e as Citation] };
+                default:
+                  return prev;
+              }
+            });
+            if (e.type === "error") setError(e.message);
+            // Spend as it is incurred, so a long turn is visibly costing money;
+            // replaced by the server's total once the turn is saved.
+            if (e.type === "usage") {
+              setSpend((s) =>
+                s
+                  ? {
+                      cost: s.cost + e.cost_usd,
+                      tokensIn: s.tokensIn + e.tokens_in,
+                      tokensOut: s.tokensOut + e.tokens_out,
+                    }
+                  : s,
+              );
             }
-          });
-          if (e.type === "error") setError(e.message);
-          // Spend as it is incurred, so a long turn is visibly costing money;
-          // replaced by the server's total once the turn is saved.
-          if (e.type === "usage") {
-            setSpend((s) =>
-              s
-                ? {
-                    cost: s.cost + e.cost_usd,
-                    tokensIn: s.tokensIn + e.tokens_in,
-                    tokensOut: s.tokensOut + e.tokens_out,
-                  }
-                : s,
-            );
-          }
-        },
-        controller.signal,
-      );
-      await loadMessages();
-    } catch (err) {
-      // Our own abort (leaving the conversation) is not an error to show.
-      if (!controller.signal.aborted) {
-        setError(err instanceof Error ? err.message : "stream failed");
+          },
+          controller.signal,
+        );
+        await loadMessages();
+      } catch (err) {
+        // Our own abort (leaving the conversation) is not an error to show.
+        if (!controller.signal.aborted) {
+          setError(err instanceof Error ? err.message : "stream failed");
+        }
+      } finally {
+        if (abortRef.current === controller) abortRef.current = null;
+        setLive(null);
+        setPendingUser(null);
+        setSending(false);
+        setStopping(false);
+        // A turn that ends (finished, stopped, failed) settles any approval it
+        // raised: stopped ones are expired by the server. Re-read what is really
+        // still pending, or a stale card sits there answering "already expired"
+        // next to the new turn's card.
+        if (!controller.signal.aborted) void loadPending();
       }
-    } finally {
-      if (abortRef.current === controller) abortRef.current = null;
-      setLive(null);
-      setPendingUser(null);
-      setSending(false);
-      setStopping(false);
+    },
+    [conversationId, sending, loadMessages, loadPending],
+  );
+
+  // ── slash commands ──────────────────────────────────────────
+  const [menuIndex, setMenuIndex] = useState(0);
+  const [menuDismissed, setMenuDismissed] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const suggestions = menuDismissed ? [] : suggestCommands(input);
+
+  const runCommand = useCallback(
+    (name: SlashCommandName, arg: string) => {
+      const busyOnly = new Set<SlashCommandName>(["help", "stop", "cost", "export"]);
+      if (sending && !busyOnly.has(name)) {
+        toast(`Wait for this turn to finish, or /stop it first.`);
+        return;
+      }
+      switch (name) {
+        case "help":
+          setShowHelp(true);
+          return;
+        case "new":
+        case "clear":
+          onNewChat?.();
+          return;
+        case "rename":
+          if (!arg) {
+            toast("Add a title: /rename <title>");
+            return;
+          }
+          onRename?.(arg);
+          return;
+        case "archive":
+          onArchive?.();
+          return;
+        case "retry": {
+          const last = [...messages].reverse().find((m) => m.role === "user");
+          if (!last) toast("Nothing to retry yet.");
+          else void sendText(last.content);
+          return;
+        }
+        case "stop":
+          if (sending) void stop();
+          else toast("Nothing is running.");
+          return;
+        case "cost":
+          toast(
+            spend
+              ? `This conversation has cost ${formatUsd(spend.cost)} · ${formatCount(spend.tokensIn + spend.tokensOut)} tokens`
+              : "No spend recorded yet.",
+          );
+          return;
+        case "export": {
+          const blob = new Blob([conversationMarkdown(title, messages)], {
+            type: "text/markdown",
+          });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `${title.replace(/[^\w.-]+/g, "-").slice(0, 60) || "conversation"}.md`;
+          a.click();
+          URL.revokeObjectURL(url);
+          return;
+        }
+      }
+    },
+    [sending, toast, onNewChat, onRename, onArchive, messages, sendText, stop, spend, title],
+  );
+
+  const submit = useCallback(() => {
+    const parsed = parseInput(input);
+    if (parsed.kind === "message") {
+      if (!parsed.text) return;
+      setInput("");
+      void sendText(parsed.text);
+      return;
     }
-  }, [conversationId, input, sending, loadMessages]);
+    if (parsed.kind === "unknown") {
+      toast(`Unknown command /${parsed.name}. Type /help to see them all.`);
+      return;
+    }
+    setInput("");
+    runCommand(parsed.name, parsed.arg);
+  }, [input, sendText, runCommand, toast]);
+
+  const pick = (cmd: SlashCommand) => {
+    if (cmd.needsArg) {
+      setInput(`/${cmd.name} `);
+      return;
+    }
+    setInput("");
+    runCommand(cmd.name, "");
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -245,7 +364,7 @@ export function ChatThread({
           <span className="tabular-nums">
             {formatCount(spend.tokensIn + spend.tokensOut)} tokens
           </span>
-          {sending && <span className="ml-1.5">(this turn is still running)</span>}
+          {sending && <RunningBadge />}
         </div>
       )}
       <div ref={scrollRef} className="flex-1 space-y-4 overflow-auto p-6">
@@ -276,7 +395,8 @@ export function ChatThread({
             <ToolCalls calls={live.tools} />
             <Bubble
               role="assistant"
-              text={live.text || "…"}
+              text={live.text}
+              working
               citations={live.citations}
               assistantId={assistantId}
             />
@@ -287,21 +407,110 @@ export function ChatThread({
             key={a.approval_id}
             approval={a}
             onDecided={() => setPending((p) => p.filter((x) => x.approval_id !== a.approval_id))}
+            onGone={(reason) => {
+              setPending((p) => p.filter((x) => x.approval_id !== a.approval_id));
+              toast(`That request is closed: ${reason}`);
+            }}
           />
         ))}
         {error && <p className="text-destructive text-sm">{error}</p>}
       </div>
-      <div className="border-border border-t p-4">
+      <div className="border-border relative border-t p-4">
+        {suggestions.length > 0 && (
+          <ul
+            role="listbox"
+            aria-label="Commands"
+            className="bg-background border-border absolute right-4 bottom-full left-4 mb-2 overflow-hidden rounded-md border shadow-lg"
+          >
+            {suggestions.map((c, i) => (
+              <li
+                key={c.name}
+                role="option"
+                aria-selected={i === Math.min(menuIndex, suggestions.length - 1)}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pick(c);
+                }}
+                className={cn(
+                  "flex cursor-pointer items-baseline gap-2 px-3 py-1.5 text-sm",
+                  i === Math.min(menuIndex, suggestions.length - 1) && "bg-muted",
+                )}
+              >
+                <span className="font-mono">/{c.name}</span>
+                {c.args && (
+                  <span className="text-muted-foreground font-mono text-xs">{c.args}</span>
+                )}
+                <span className="text-muted-foreground ml-auto text-xs">{c.description}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {showHelp && (
+          <div className="bg-background border-border absolute right-4 bottom-full left-4 mb-2 rounded-md border p-3 text-sm shadow-lg">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="font-medium">Commands</span>
+              <button
+                className="text-muted-foreground hover:text-foreground text-xs"
+                onClick={() => setShowHelp(false)}
+              >
+                Close
+              </button>
+            </div>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+              {SLASH_COMMANDS.map((c) => (
+                <Fragment key={c.name}>
+                  <dt className="font-mono">
+                    /{c.name}
+                    {c.args ? ` ${c.args}` : ""}
+                  </dt>
+                  <dd className="text-muted-foreground">{c.description}</dd>
+                </Fragment>
+              ))}
+            </dl>
+            <p className="text-muted-foreground mt-2 text-xs">
+              Start a message with // to send text that begins with a slash.
+            </p>
+          </div>
+        )}
         <div className="flex gap-2">
           <Textarea
             rows={2}
-            placeholder="Message the assistant…  (Enter to send)"
+            placeholder="Message the assistant…  (Enter to send, / for commands)"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              setMenuIndex(0);
+              setMenuDismissed(false);
+              setShowHelp(false);
+            }}
             onKeyDown={(e) => {
+              if (suggestions.length > 0) {
+                const current = suggestions[Math.min(menuIndex, suggestions.length - 1)];
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                  e.preventDefault();
+                  const step = e.key === "ArrowDown" ? 1 : -1;
+                  setMenuIndex((i) => (i + step + suggestions.length) % suggestions.length);
+                  return;
+                }
+                if (e.key === "Tab") {
+                  e.preventDefault();
+                  setInput(`/${current.name}${current.needsArg ? " " : ""}`);
+                  return;
+                }
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  pick(current);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  setMenuDismissed(true);
+                  return;
+                }
+              }
+              if (e.key === "Escape") setShowHelp(false);
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                void send();
+                submit();
               }
             }}
           />
@@ -312,7 +521,7 @@ export function ChatThread({
               {stopping ? "Stopping…" : "Stop"}
             </Button>
           ) : (
-            <Button onClick={() => void send()} disabled={!input.trim()}>
+            <Button onClick={() => submit()} disabled={!input.trim()}>
               Send
             </Button>
           )}
@@ -355,9 +564,12 @@ function Bubble({
   citations,
   assistantId,
   run,
+  working = false,
 }: {
   role: string;
   text: string;
+  /** A live turn that has not streamed any text yet. */
+  working?: boolean;
   blocks?: MessageBlock[];
   citations?: Citation[];
   assistantId: string;
@@ -379,8 +591,12 @@ function Bubble({
         )}
       >
         {isAssistant && <ToolCalls calls={split.tools} />}
-        {isAssistant && cites.length > 0 ? (
-          <CitedText text={text} citations={cites} activeMarker={active} onFocus={setActive} />
+        {isAssistant && working && !text ? (
+          <TypingDots />
+        ) : isAssistant ? (
+          // Answers are Markdown (headings, lists, tables, code); a user's own
+          // message is shown exactly as typed.
+          <Markdown text={text} citations={cites} activeMarker={active} onFocus={setActive} />
         ) : (
           <div className="whitespace-pre-wrap">{text}</div>
         )}

@@ -52,6 +52,9 @@ class ToolResultEvent(_Ev):
     #: Set when this came from inside a subagent: the id of the delegation
     #: tool call the subagent is running under (task 2.10).
     parent_id: str | None = None
+    #: How the call was permitted (task 4.7): "auto", "approved", "declined",
+    #: "expired", "interrupted" or "refused". None for calls that never ask.
+    permission: str | None = None
 
 
 class CitationEvent(_Ev):

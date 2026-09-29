@@ -28,6 +28,8 @@ class SecretKind(enum.StrEnum):
     #: usually *contains* one — in the userinfo, or in auth options.
     db_connection_uri = "db_connection_uri"
     mcp_headers = "mcp_headers"
+    #: Environment variables for a stdio MCP server, sealed as one JSON object.
+    mcp_env = "mcp_env"
     api_key = "api_key"
 
 

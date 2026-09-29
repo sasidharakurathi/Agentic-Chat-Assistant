@@ -11,8 +11,10 @@ import {
   KnowledgeBasePanel,
   MemoryPanel,
 } from "@/components/config/panels";
+import { McpServerNodePanel } from "@/components/config/mcp-node";
+import { TOOL_LABEL, ToolNodePanel, type ApprovalMode } from "@/components/config/tool-settings";
 import { Button } from "@/components/ui/button";
-import type { DataSource, DbConnection, GraphNode } from "@/lib/api";
+import type { DataSource, DbConnection, GraphNode, McpServer } from "@/lib/api";
 
 /** Structural nodes compile to the pipeline itself; removing one is a
  *  validation error, not an edit, so the drawer doesn't offer it. */
@@ -22,6 +24,9 @@ export function NodeDrawer({
   models,
   sources,
   databases,
+  httpPolicy = "require",
+  mcpServers = [],
+  mcpDefault = "require",
   onPatch,
   onDelete,
   onClose,
@@ -30,6 +35,12 @@ export function NodeDrawer({
   models: string[];
   sources: DataSource[];
   databases: DbConnection[];
+  /** The assistant-wide rule for HTTP writes, so the tool drawer can say
+   *  when it overrides the node's own setting. */
+  httpPolicy?: ApprovalMode;
+  mcpServers?: McpServer[];
+  /** The assistant's `mcp_default` rule. */
+  mcpDefault?: ApprovalMode;
   onPatch: (patch: Record<string, unknown>) => void;
   onDelete?: (id: string) => void;
   onClose: () => void;
@@ -41,7 +52,15 @@ export function NodeDrawer({
   return (
     <div className="border-border flex w-80 shrink-0 flex-col overflow-auto border-l p-4">
       <div className="mb-4 flex items-center justify-between">
-        <h3 className="text-sm font-semibold">{NODE_LABEL[t] ?? t}</h3>
+        <h3 className="text-sm font-semibold">
+          {NODE_LABEL[t] ?? t}
+          {t === "tool" && TOOL_LABEL[String(node.data.key)] && (
+            <span className="text-muted-foreground font-normal">
+              {" "}
+              · {TOOL_LABEL[String(node.data.key)]}
+            </span>
+          )}
+        </h3>
         <button
           onClick={onClose}
           className="text-muted-foreground hover:text-foreground text-lg leading-none"
@@ -70,11 +89,7 @@ export function NodeDrawer({
           <p className="text-muted-foreground text-sm">Nothing to configure on this node.</p>
         )}
         {t === "output" && <OutputPanel data={node.data} onChange={onPatch} />}
-        {t === "tool" && (
-          <p className="text-muted-foreground text-sm">
-            Turn tools on and off in the <strong>Panels</strong> tab.
-          </p>
-        )}
+        {t === "tool" && <ToolNodePanel data={node.data} policy={httpPolicy} onChange={onPatch} />}
         {t === "database" && (
           <DatabasePanel
             data={node.data}
@@ -88,7 +103,15 @@ export function NodeDrawer({
             onChange={onPatch}
           />
         )}
-        {["mcp_server", "subagent", "router"].includes(t) && (
+        {t === "mcp_server" && (
+          <McpServerNodePanel
+            data={node.data}
+            server={mcpServers.find((s) => s.id === String(node.data.mcp_server_id ?? ""))}
+            assistantDefault={mcpDefault}
+            onChange={onPatch}
+          />
+        )}
+        {["subagent", "router"].includes(t) && (
           <p className="text-muted-foreground text-sm">
             This node type gets an editor in a later phase.
           </p>

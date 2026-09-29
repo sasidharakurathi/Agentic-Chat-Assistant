@@ -32,7 +32,7 @@ export function Field({
   );
 }
 
-function Toggle({
+export function Toggle({
   label,
   checked,
   onChange,
@@ -264,40 +264,6 @@ export function MemoryPanel({ data, onChange }: { data: Data; onChange: (patch: 
         label="Enable the memory tool"
         checked={b(data.memory_tool)}
         onChange={(v) => onChange({ memory_tool: v })}
-      />
-    </div>
-  );
-}
-
-export function ToolsPanel({
-  config,
-  onChange,
-}: {
-  config: AssistantConfig;
-  onChange: (next: AssistantConfig) => void;
-}) {
-  const tools = config.tools;
-  const set = (key: string, enabled: boolean) =>
-    onChange({ ...config, tools: { ...tools, [key]: { ...tools[key], enabled } } });
-  return (
-    <div className="flex flex-col gap-2">
-      <p className="text-muted-foreground text-xs">
-        Enabling a tool adds a wired node to the canvas.
-      </p>
-      <Toggle
-        label="Calculator"
-        checked={b(tools.calculator?.enabled)}
-        onChange={(v) => set("calculator", v)}
-      />
-      <Toggle
-        label="Date / time"
-        checked={b(tools.datetime?.enabled)}
-        onChange={(v) => set("datetime", v)}
-      />
-      <Toggle
-        label="Web search"
-        checked={b(tools.web_search?.enabled)}
-        onChange={(v) => set("web_search", v)}
       />
     </div>
   );

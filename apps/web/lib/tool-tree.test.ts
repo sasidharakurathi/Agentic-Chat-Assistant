@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { appendSubagentText, nestCalls, type ToolCallView } from "./tool-tree";
+import { appendSubagentText, nestCalls, permissionText, type ToolCallView } from "./tool-tree";
 
 const call = (id: string, parent_id?: string): ToolCallView => ({
   id,
@@ -34,5 +34,13 @@ describe("appendSubagentText", () => {
     calls = appendSubagentText(calls, "task", "Done.");
     expect(calls[0].subagent_text).toBe("Searching. Done.");
     expect(calls[1].subagent_text).toBeUndefined();
+  });
+});
+
+describe("permissionText", () => {
+  it("says how a call was permitted, in words", () => {
+    expect(permissionText("auto")).toBe("Ran without asking");
+    expect(permissionText("refused")).toBe("Not allowed by this assistant's rules");
+    expect(permissionText(null)).toBeNull();
   });
 });

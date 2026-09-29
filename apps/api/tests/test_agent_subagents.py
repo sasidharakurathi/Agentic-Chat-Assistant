@@ -38,7 +38,8 @@ def test_enabled_with_a_knowledge_base_produces_the_retrieval_spec() -> None:
 
 def test_enabled_without_a_knowledge_base_produces_nothing() -> None:
     """Otherwise the subagent exists with kb tools that have nothing behind
-    them — the same shape the graph validator flags as `bare_subagent`."""
+    them — the same shape the graph validator flags as
+    `subagent_without_knowledge_base`."""
     assert build_subagent_specs(_config(retrieval=True, rag=False)) == []
 
 
