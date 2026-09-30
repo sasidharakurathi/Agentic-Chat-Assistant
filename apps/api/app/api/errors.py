@@ -7,6 +7,7 @@ All handled errors render as a small JSON envelope:
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from fastapi import FastAPI, Request, status
@@ -35,6 +36,8 @@ class AppError(Exception):
         super().__init__(message or self.code)
         self.message = message or self.__class__.__doc__ or self.code
         self.details = details or {}
+        #: Extra response headers (e.g. `Retry-After` on a 429).
+        self.headers: dict[str, str] = {}
         if code:
             self.code = code
         if status_code:
@@ -66,6 +69,22 @@ class Conflict(AppError):
     code = "conflict"
 
 
+class RateLimited(AppError):
+    """Too many requests (task 5.8): says when to try again, in words and
+    in `Retry-After`."""
+
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    code = "rate_limited"
+
+    def __init__(self, message: str, retry_after_s: float) -> None:
+        seconds = max(1, math.ceil(retry_after_s))
+        super().__init__(
+            f"{message} Try again in {seconds} second{'s' if seconds != 1 else ''}.",
+            details={"retry_after_s": seconds},
+        )
+        self.headers = {"Retry-After": str(seconds)}
+
+
 def _envelope(code: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     body: dict[str, Any] = {"error": {"code": code, "message": message}}
     if details:
@@ -82,6 +101,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=exc.status_code,
             content=_envelope(exc.code, exc.message, exc.details),
+            headers=exc.headers or None,
         )
 
     @app.exception_handler(RequestValidationError)
@@ -128,6 +148,7 @@ __all__ = [
     "Conflict",
     "Forbidden",
     "NotFound",
+    "RateLimited",
     "Unauthorized",
     "register_exception_handlers",
 ]

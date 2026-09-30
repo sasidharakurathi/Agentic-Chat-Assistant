@@ -69,6 +69,29 @@ class Guardrails(_Strict):
     untrusted_content_notice: bool = True
 
 
+# ── Who may use a capability (task 5.10) ─────────────────────
+
+
+class Scoped(_Strict):
+    """Who may use a capability, from how it is wired on the canvas: to
+    the main agent (`agent`), and/or to particular subagents (`subagents`).
+    A capability wired only to the sql subagent is that subagent's alone:
+    the main agent can't call it. A subagent can also use what is wired to
+    the main agent, as far as its role's own tools go."""
+
+    agent: bool = True
+    subagents: list[SubagentRole] = Field(default_factory=list)
+
+    @field_validator("subagents")
+    @classmethod
+    def _sorted_roles(cls, v: list[SubagentRole]) -> list[SubagentRole]:
+        return sorted(set(v))
+
+    def usable_by(self, caller: str | None) -> bool:
+        """`caller`: None for the main agent, else a subagent's role."""
+        return self.agent or (caller is not None and caller in self.subagents)
+
+
 # ── RAG ──────────────────────────────────────────────────────
 
 
@@ -97,7 +120,7 @@ class RagRetrieval(_Strict):
         return self
 
 
-class RagConfig(_Strict):
+class RagConfig(Scoped):
     enabled: bool = False
     embedder: str = "voyage-3-large"
     reranker: str = "voyage-rerank-2.5"
@@ -117,25 +140,25 @@ class RagConfig(_Strict):
 # ── Databases / tools / MCP ──────────────────────────────────
 
 
-class DatabaseRef(_Strict):
+class DatabaseRef(Scoped):
     connection_id: str
     nl2sql: bool = True
     expose_write: bool = False
 
 
-class WebSearchTool(_Strict):
+class WebSearchTool(Scoped):
     enabled: bool = False
     max_uses: int = Field(default=5, ge=1, le=50)
     allowed_domains: list[str] = Field(default_factory=list)
 
 
-class HttpRequestTool(_Strict):
+class HttpRequestTool(Scoped):
     enabled: bool = False
     allowed_domains: list[str] = Field(default_factory=list)
     approval: ApprovalMode = "require"
 
 
-class ToggleTool(_Strict):
+class ToggleTool(Scoped):
     # A tool is "on" iff enabled here — which the graph represents as node presence.
     enabled: bool = False
 
@@ -143,7 +166,7 @@ class ToggleTool(_Strict):
 _TOOL_NAME_RE = r"^[A-Za-z0-9_-]{1,64}$"
 
 
-class McpServerRef(_Strict):
+class McpServerRef(Scoped):
     """One registered MCP server, as this assistant version uses it (tasks 4.6 / 4.7).
 
     `tools` is the allowlist: only these, and only if the server still lists
@@ -189,6 +212,9 @@ class SubagentsConfig(_Strict):
     retrieval: bool = False
     sql: bool = False
     research: bool = False
+    #: Per-role model settings (task 5.1). A role without one uses
+    #: `models.subagent`, the shared subagent role.
+    models: dict[SubagentRole, ModelSpec] = Field(default_factory=dict)
 
 
 class MemoryConfig(_Strict):
@@ -196,6 +222,15 @@ class MemoryConfig(_Strict):
     summarize_after_tokens: int = Field(default=120_000, ge=8_000, le=900_000)
     memory_tool: bool = False
     auto_title: bool = True
+
+
+class RouterConfig(_Strict):
+    """Route each message's effort before its turn (task 5.10): the
+    router's model (`models.router`) sorts it as simple, normal or hard, and
+    the turn runs at low effort, the agent's own, or high. On when a router
+    node is wired in."""
+
+    enabled: bool = False
 
 
 class ApprovalPolicy(_Strict):
@@ -224,6 +259,7 @@ class AssistantConfig(_Strict):
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     approval_policy: ApprovalPolicy = Field(default_factory=ApprovalPolicy)
+    router: RouterConfig = Field(default_factory=RouterConfig)
 
     @model_validator(mode="after")
     def _normalize_refs(self) -> AssistantConfig:
@@ -237,7 +273,43 @@ class AssistantConfig(_Strict):
         # configs authored in different orders compare equal (and round-trip).
         self.databases.sort(key=lambda d: d.connection_id)
         self.mcp_servers.sort(key=lambda m: m.id)
+        self._canonical_scopes()
         return self
+
+    def scoped(self) -> list[Scoped]:
+        """Every capability that says who may use it."""
+        t = self.tools
+        return [
+            self.rag,
+            *self.databases,
+            t.web_search,
+            t.http_request,
+            t.calculator,
+            t.datetime,
+            *self.mcp_servers,
+        ]
+
+    def _canonical_scopes(self) -> None:
+        """One way to say each scope, so a config and its graph round-trip:
+        roles whose subagent is off are dropped, and a capability left with
+        nobody goes back to the main agent (turning a subagent off hands its
+        capabilities back, rather than making them vanish). A capability
+        that is off has no scope."""
+        on = {r for r in ("retrieval", "sql", "research") if getattr(self.subagents, r)}
+        switched = [
+            self.rag,
+            self.tools.web_search,
+            self.tools.http_request,
+            self.tools.calculator,
+            self.tools.datetime,
+        ]
+        for cap in self.scoped():
+            if any(cap is x for x in switched) and not getattr(cap, "enabled", True):
+                cap.agent, cap.subagents = True, []
+                continue
+            cap.subagents = [r for r in cap.subagents if r in on]
+            if not cap.subagents:
+                cap.agent = True
 
     @field_validator("mcp_servers", mode="before")
     @classmethod
@@ -273,6 +345,8 @@ __all__ = [
     "RagChunking",
     "RagConfig",
     "RagRetrieval",
+    "RouterConfig",
+    "Scoped",
     "SubagentRole",
     "SubagentsConfig",
     "ThinkingConfig",

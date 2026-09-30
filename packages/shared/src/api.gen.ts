@@ -62,6 +62,27 @@ export interface paths {
         patch: operations["update_assistant_api_v1_assistants__assistant_id__patch"];
         trace?: never;
     };
+    "/api/v1/assistants/{assistant_id}/budget": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Assistant Budget
+         * @description What applies to this assistant: the org's budgets and its own.
+         */
+        get: operations["get_assistant_budget_api_v1_assistants__assistant_id__budget_get"];
+        /** Put Assistant Budget */
+        put: operations["put_assistant_budget_api_v1_assistants__assistant_id__budget_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/assistants/{assistant_id}/conversations": {
         parameters: {
             query?: never;
@@ -411,6 +432,64 @@ export interface paths {
          *     server. For a local command, this starts it in the runner.
          */
         post: operations["check_server_api_v1_assistants__assistant_id__mcp_servers__server_id__health_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/assistants/{assistant_id}/memories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Memories */
+        get: operations["list_memories_api_v1_assistants__assistant_id__memories_get"];
+        put?: never;
+        post?: never;
+        /**
+         * Clear Memories
+         * @description Forget everything, or one file (`path`).
+         */
+        delete: operations["clear_memories_api_v1_assistants__assistant_id__memories_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/assistants/{assistant_id}/pipeline:recommend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Recommend Pipeline
+         * @description A starter pipeline for this assistant, from what it already has.
+         */
+        post: operations["recommend_pipeline_api_v1_assistants__assistant_id__pipeline_recommend_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/assistants/{assistant_id}/prompt:generate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Generate Prompt */
+        post: operations["generate_prompt_api_v1_assistants__assistant_id__prompt_generate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -846,6 +925,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org_id}/budgets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Org Budgets
+         * @description Every budget in the org (its own and each assistant's), with spend.
+         */
+        get: operations["get_org_budgets_api_v1_orgs__org_id__budgets_get"];
+        /** Put Org Budgets */
+        put: operations["put_org_budgets_api_v1_orgs__org_id__budgets_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org_id}/invites": {
         parameters: {
             query?: never;
@@ -908,6 +1008,28 @@ export interface paths {
         get: operations["get_usage_api_v1_orgs__org_id__usage_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/pipeline:recommend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Recommend Starter
+         * @description A starter pipeline before the assistant exists (the guided setup):
+         *     anyone who may create an assistant may ask. Nothing is registered yet,
+         *     so it can't wire in databases or MCP servers.
+         */
+        post: operations["recommend_starter_api_v1_pipeline_recommend_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1150,6 +1272,7 @@ export interface components {
             memory?: components["schemas"]["MemoryConfig-Input"];
             models?: components["schemas"]["ModelRoles-Input"];
             rag?: components["schemas"]["RagConfig-Input"];
+            router?: components["schemas"]["RouterConfig-Input"];
             /**
              * Schema Version
              * @default 1
@@ -1175,6 +1298,7 @@ export interface components {
             memory: components["schemas"]["MemoryConfig-Output"];
             models: components["schemas"]["ModelRoles-Output"];
             rag: components["schemas"]["RagConfig-Output"];
+            router: components["schemas"]["RouterConfig-Output"];
             /**
              * Schema Version
              * @default 1
@@ -1314,6 +1438,57 @@ export interface components {
             file: string;
             /** Name */
             name?: string | null;
+        };
+        /**
+         * BudgetLimits
+         * @description The day and month limits of one scope, in USD (task 5.7). `null`
+         *     removes that limit.
+         */
+        BudgetLimits: {
+            /** Daily Usd */
+            daily_usd?: number | null;
+            /** Monthly Usd */
+            monthly_usd?: number | null;
+        };
+        /** BudgetsOut */
+        BudgetsOut: {
+            /** Budgets */
+            budgets: components["schemas"]["BudgetStatusOut"][];
+            /** Can Edit */
+            can_edit: boolean;
+        };
+        /** BudgetStatusOut */
+        BudgetStatusOut: {
+            /** Assistant Id */
+            assistant_id: string | null;
+            /** Assistant Name */
+            assistant_name: string | null;
+            /** Limit Usd */
+            limit_usd: number;
+            /**
+             * Period
+             * @enum {string}
+             */
+            period: "day" | "month";
+            /** Ratio */
+            ratio: number;
+            /**
+             * Resets At
+             * Format: date-time
+             */
+            resets_at: string;
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "org" | "assistant";
+            /** Spent Usd */
+            spent_usd: number;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "ok" | "warning" | "exceeded";
         };
         /**
          * ContentUrl
@@ -1505,6 +1680,11 @@ export interface components {
         };
         /** DatabaseRef */
         "DatabaseRef-Input": {
+            /**
+             * Agent
+             * @default true
+             */
+            agent: boolean;
             /** Connection Id */
             connection_id: string;
             /**
@@ -1517,9 +1697,16 @@ export interface components {
              * @default true
              */
             nl2sql: boolean;
+            /** Subagents */
+            subagents?: ("retrieval" | "sql" | "research")[];
         };
         /** DatabaseRef */
         "DatabaseRef-Output": {
+            /**
+             * Agent
+             * @default true
+             */
+            agent: boolean;
             /** Connection Id */
             connection_id: string;
             /**
@@ -1532,6 +1719,8 @@ export interface components {
              * @default true
              */
             nl2sql: boolean;
+            /** Subagents */
+            subagents: ("retrieval" | "sql" | "research")[];
         };
         /** DataSourceNode */
         "DataSourceNode-Input": {
@@ -1916,6 +2105,30 @@ export interface components {
             /** Target */
             target: string;
         };
+        /** FixOp */
+        FixOp: {
+            /** Data */
+            data: {
+                [key: string]: unknown;
+            } | null;
+            /** Node Id */
+            node_id: string | null;
+            /** Node Type */
+            node_type: string | null;
+            /**
+             * Op
+             * @enum {string}
+             */
+            op: "add_edge" | "remove_edge" | "remove_node" | "patch_node" | "add_node";
+            /** Position */
+            position: {
+                [key: string]: number;
+            } | null;
+            /** Source */
+            source: string | null;
+            /** Target */
+            target: string | null;
+        };
         /** Graph */
         "Graph-Input": {
             /** Edges */
@@ -1969,6 +2182,16 @@ export interface components {
             /** Nodes Removed */
             nodes_removed: string[];
         };
+        /**
+         * GraphFix
+         * @description A suggested fix: what the button says, and what it does.
+         */
+        GraphFix: {
+            /** Label */
+            label: string;
+            /** Ops */
+            ops: components["schemas"]["FixOp"][];
+        };
         /** GraphIssue */
         GraphIssue: {
             /** Code */
@@ -1978,6 +2201,7 @@ export interface components {
                 string,
                 string
             ] | null;
+            fix: components["schemas"]["GraphFix"] | null;
             /** Message */
             message: string;
             /** Node Id */
@@ -2116,6 +2340,11 @@ export interface components {
         };
         /** HttpRequestTool */
         "HttpRequestTool-Input": {
+            /**
+             * Agent
+             * @default true
+             */
+            agent: boolean;
             /** Allowed Domains */
             allowed_domains?: string[];
             /**
@@ -2129,9 +2358,16 @@ export interface components {
              * @default false
              */
             enabled: boolean;
+            /** Subagents */
+            subagents?: ("retrieval" | "sql" | "research")[];
         };
         /** HttpRequestTool */
         "HttpRequestTool-Output": {
+            /**
+             * Agent
+             * @default true
+             */
+            agent: boolean;
             /** Allowed Domains */
             allowed_domains: string[];
             /**
@@ -2145,6 +2381,8 @@ export interface components {
              * @default false
              */
             enabled: boolean;
+            /** Subagents */
+            subagents: ("retrieval" | "sql" | "research")[];
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -2562,10 +2800,17 @@ export interface components {
          *     (see `approvals.mcp_mode`). `None` means "not set here".
          */
         "McpServerRef-Input": {
+            /**
+             * Agent
+             * @default true
+             */
+            agent: boolean;
             /** Approval */
             approval?: ("auto" | "require" | "deny") | null;
             /** Id */
             id: string;
+            /** Subagents */
+            subagents?: ("retrieval" | "sql" | "research")[];
             /** Tool Approvals */
             tool_approvals?: {
                 [key: string]: "auto" | "require" | "deny";
@@ -2586,10 +2831,17 @@ export interface components {
          *     (see `approvals.mcp_mode`). `None` means "not set here".
          */
         "McpServerRef-Output": {
+            /**
+             * Agent
+             * @default true
+             */
+            agent: boolean;
             /** Approval */
             approval: ("auto" | "require" | "deny") | null;
             /** Id */
             id: string;
+            /** Subagents */
+            subagents: ("retrieval" | "sql" | "research")[];
             /** Tool Approvals */
             tool_approvals: {
                 [key: string]: "auto" | "require" | "deny";
@@ -2730,6 +2982,11 @@ export interface components {
             /** Role */
             role: string;
         };
+        /** MemoryCleared */
+        MemoryCleared: {
+            /** Deleted */
+            deleted: number;
+        };
         /** MemoryConfig */
         "MemoryConfig-Input": {
             /**
@@ -2775,6 +3032,21 @@ export interface components {
              * @default 120000
              */
             summarize_after_tokens: number;
+        };
+        /**
+         * MemoryFileOut
+         * @description One of the memory tool's files (task 5.2).
+         */
+        MemoryFileOut: {
+            /** Content */
+            content: string;
+            /** Path */
+            path: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
         /** MemoryNode */
         "MemoryNode-Input": {
@@ -3087,6 +3359,57 @@ export interface components {
             /** Next Cursor */
             next_cursor: string | null;
         };
+        /**
+         * PipelineCapability
+         * @description One thing the recommended pipeline uses, and why.
+         */
+        PipelineCapability: {
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Why */
+            why: string | null;
+        };
+        /**
+         * PipelineRecommendIn
+         * @description What the assistant is for, in the builder's words (task 5.6).
+         */
+        PipelineRecommendIn: {
+            /** Description */
+            description: string;
+            /**
+             * Name
+             * @default the assistant
+             */
+            name: string;
+        };
+        /**
+         * PipelineSuggestion
+         * @description A whole starter pipeline to preview: nothing has been saved. Apply it
+         *     by saving `config` as the draft config, which lays out the graph.
+         */
+        PipelineSuggestion: {
+            /** Capabilities */
+            capabilities: components["schemas"]["PipelineCapability"][];
+            /** Changes */
+            changes: string[];
+            config: components["schemas"]["AssistantConfig-Output"];
+            /**
+             * Cost Usd
+             * @default 0
+             */
+            cost_usd: number;
+            graph: components["schemas"]["Graph-Output"];
+            /** Model */
+            model: string | null;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "model" | "template";
+            validation: components["schemas"]["ValidationResult"];
+        };
         /** Position */
         "Position-Input": {
             /**
@@ -3112,6 +3435,38 @@ export interface components {
              * @default 0
              */
             y: number;
+        };
+        /**
+         * PromptGenerateIn
+         * @description What the assistant is for, in the builder's words (task 5.5).
+         */
+        PromptGenerateIn: {
+            /** Current Prompt */
+            current_prompt?: string | null;
+            /** Description */
+            description: string;
+        };
+        /**
+         * PromptSuggestion
+         * @description A draft to review: nothing has been saved.
+         */
+        PromptSuggestion: {
+            /**
+             * Cost Usd
+             * @default 0
+             */
+            cost_usd: number;
+            /** Model */
+            model: string | null;
+            /** Rules */
+            rules: string[];
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "model" | "template";
+            /** System Prompt */
+            system_prompt: string;
         };
         /** PublishRequest */
         PublishRequest: {
@@ -3161,6 +3516,11 @@ export interface components {
         };
         /** RagConfig */
         "RagConfig-Input": {
+            /**
+             * Agent
+             * @default true
+             */
+            agent: boolean;
             chunking?: components["schemas"]["RagChunking-Input"];
             /**
              * Citations
@@ -3190,9 +3550,16 @@ export interface components {
             retrieval?: components["schemas"]["RagRetrieval-Input"];
             /** Source Ids */
             source_ids?: string[];
+            /** Subagents */
+            subagents?: ("retrieval" | "sql" | "research")[];
         };
         /** RagConfig */
         "RagConfig-Output": {
+            /**
+             * Agent
+             * @default true
+             */
+            agent: boolean;
             chunking: components["schemas"]["RagChunking-Output"];
             /**
              * Citations
@@ -3222,6 +3589,8 @@ export interface components {
             retrieval: components["schemas"]["RagRetrieval-Output"];
             /** Source Ids */
             source_ids: string[];
+            /** Subagents */
+            subagents: ("retrieval" | "sql" | "research")[];
         };
         /** RagRetrieval */
         "RagRetrieval-Input": {
@@ -3332,6 +3701,34 @@ export interface components {
         RoleUpdate: {
             role: components["schemas"]["MemberRole"];
         };
+        /**
+         * RouterConfig
+         * @description Route each message's effort before its turn (task 5.10): the
+         *     router's model (`models.router`) sorts it as simple, normal or hard, and
+         *     the turn runs at low effort, the agent's own, or high. On when a router
+         *     node is wired in.
+         */
+        "RouterConfig-Input": {
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+        };
+        /**
+         * RouterConfig
+         * @description Route each message's effort before its turn (task 5.10): the
+         *     router's model (`models.router`) sorts it as simple, normal or hard, and
+         *     the turn runs at low effort, the agent's own, or high. On when a router
+         *     node is wired in.
+         */
+        "RouterConfig-Output": {
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+        };
         /** RouterNode */
         "RouterNode-Input": {
             data: components["schemas"]["RouterNodeData-Input"];
@@ -3367,6 +3764,11 @@ export interface components {
         /** RunDetail */
         RunDetail: {
             /**
+             * Assistant Id
+             * Format: uuid
+             */
+            assistant_id: string;
+            /**
              * Conversation Id
              * Format: uuid
              */
@@ -3386,6 +3788,14 @@ export interface components {
             effort: string | null;
             /** Error */
             error: string | null;
+            /** Fallback Model */
+            fallback_model: string | null;
+            /**
+             * Graph
+             * @default draft
+             * @enum {string}
+             */
+            graph: "version" | "draft";
             /**
              * Id
              * Format: uuid
@@ -3395,11 +3805,19 @@ export interface components {
             message_id: string | null;
             /** Model */
             model: string | null;
+            /** Nodes */
+            nodes: string[];
             /** Num Turns */
             num_turns: number;
+            /** Route */
+            route: string | null;
             status: components["schemas"]["RunStatus"];
             /** Steps */
             steps: components["schemas"]["RunStep"][];
+            /** Stop Reason */
+            stop_reason: string | null;
+            /** Timeline */
+            timeline: components["schemas"]["TraceStep"][];
             /** Tokens In */
             tokens_in: number;
             /** Tokens Out */
@@ -3435,6 +3853,8 @@ export interface components {
             effort: string | null;
             /** Error */
             error: string | null;
+            /** Fallback Model */
+            fallback_model: string | null;
             /**
              * Id
              * Format: uuid
@@ -3446,7 +3866,11 @@ export interface components {
             model: string | null;
             /** Num Turns */
             num_turns: number;
+            /** Route */
+            route: string | null;
             status: components["schemas"]["RunStatus"];
+            /** Stop Reason */
+            stop_reason: string | null;
             /** Tokens In */
             tokens_in: number;
             /** Tokens Out */
@@ -3460,7 +3884,7 @@ export interface components {
          * RunStatus
          * @enum {string}
          */
-        RunStatus: "ok" | "error" | "aborted";
+        RunStatus: "ok" | "error" | "aborted" | "refused";
         /**
          * RunStep
          * @description A tool call the turn made, in order.
@@ -3541,9 +3965,10 @@ export interface components {
         };
         /**
          * SubagentNodeData
-         * @description `model` and `max_turns` override the assistant's subagent model role
-         *     (`models.subagent`); None keeps it. They used to be accepted and then
-         *     dropped by compile.
+         * @description `model` and `max_turns` are this role's own model settings
+         *     (`subagents.models[role]`, task 5.1); both None keeps the shared subagent
+         *     role (`models.subagent`). The limit matches `ModelSpec.max_turns`, so any
+         *     config projects onto a valid node.
          */
         "SubagentNodeData-Input": {
             /** Max Turns */
@@ -3557,9 +3982,10 @@ export interface components {
         };
         /**
          * SubagentNodeData
-         * @description `model` and `max_turns` override the assistant's subagent model role
-         *     (`models.subagent`); None keeps it. They used to be accepted and then
-         *     dropped by compile.
+         * @description `model` and `max_turns` are this role's own model settings
+         *     (`subagents.models[role]`, task 5.1); both None keeps the shared subagent
+         *     role (`models.subagent`). The limit matches `ModelSpec.max_turns`, so any
+         *     config projects onto a valid node.
          */
         "SubagentNodeData-Output": {
             /** Max Turns */
@@ -3573,6 +3999,10 @@ export interface components {
         };
         /** SubagentsConfig */
         "SubagentsConfig-Input": {
+            /** Models */
+            models?: {
+                [key: string]: components["schemas"]["ModelSpec-Input"];
+            };
             /**
              * Research
              * @default false
@@ -3591,6 +4021,10 @@ export interface components {
         };
         /** SubagentsConfig */
         "SubagentsConfig-Output": {
+            /** Models */
+            models: {
+                [key: string]: components["schemas"]["ModelSpec-Output"];
+            };
             /**
              * Research
              * @default false
@@ -3628,18 +4062,32 @@ export interface components {
         /** ToggleTool */
         "ToggleTool-Input": {
             /**
-             * Enabled
-             * @default false
+             * Agent
+             * @default true
              */
-            enabled: boolean;
-        };
-        /** ToggleTool */
-        "ToggleTool-Output": {
+            agent: boolean;
             /**
              * Enabled
              * @default false
              */
             enabled: boolean;
+            /** Subagents */
+            subagents?: ("retrieval" | "sql" | "research")[];
+        };
+        /** ToggleTool */
+        "ToggleTool-Output": {
+            /**
+             * Agent
+             * @default true
+             */
+            agent: boolean;
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /** Subagents */
+            subagents: ("retrieval" | "sql" | "research")[];
         };
         /** TokenPair */
         TokenPair: {
@@ -3729,13 +4177,79 @@ export interface components {
             http_request: components["schemas"]["HttpRequestTool-Output"];
             web_search: components["schemas"]["WebSearchTool-Output"];
         };
+        /**
+         * TraceApproval
+         * @description The approval a step waited on, and who answered.
+         */
+        TraceApproval: {
+            /** Decided At */
+            decided_at: string | null;
+            /** Decided By */
+            decided_by: string | null;
+            /**
+             * Requested At
+             * Format: date-time
+             */
+            requested_at: string;
+            /** Risk */
+            risk: string;
+            /** Status */
+            status: string;
+            /** Wait Ms */
+            wait_ms: number | null;
+        };
+        /** TraceGuardrail */
+        TraceGuardrail: {
+            /** Check */
+            check: string;
+            /** Detail */
+            detail: string;
+            /** Where */
+            where: string;
+        };
+        /**
+         * TraceStep
+         * @description One thing the run did, in order (task 5.9): a tool call, or a
+         *     guardrail acting.
+         */
+        TraceStep: {
+            approval: components["schemas"]["TraceApproval"] | null;
+            /** Duration Ms */
+            duration_ms: number | null;
+            guardrail: components["schemas"]["TraceGuardrail"] | null;
+            /** Id */
+            id: string | null;
+            /** Input */
+            input: unknown;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "tool" | "guardrail";
+            /** Name */
+            name: string;
+            /** Nodes */
+            nodes: string[];
+            /** Output */
+            output: string | null;
+            /** Parent Id */
+            parent_id: string | null;
+            /** Permission */
+            permission: string | null;
+            /** Started Ms */
+            started_ms: number | null;
+            /** Status */
+            status: string | null;
+            /** Subagent Text */
+            subagent_text: string | null;
+        };
         /** UsageRollupResponse */
         UsageRollupResponse: {
             /**
              * Group By
              * @enum {string}
              */
-            group_by: "assistant" | "model";
+            group_by: "assistant" | "model" | "conversation";
             /** Rows */
             rows: components["schemas"]["UsageRollupRow"][];
         };
@@ -3743,10 +4257,14 @@ export interface components {
         UsageRollupRow: {
             /** Cost Usd */
             cost_usd: string;
+            /** Detail */
+            detail: string | null;
             /** Event Count */
             event_count: number;
             /** Group Key */
             group_key: string | null;
+            /** Label */
+            label: string | null;
             /** Tokens In */
             tokens_in: number;
             /** Tokens Out */
@@ -3845,6 +4363,11 @@ export interface components {
         };
         /** WebSearchTool */
         "WebSearchTool-Input": {
+            /**
+             * Agent
+             * @default true
+             */
+            agent: boolean;
             /** Allowed Domains */
             allowed_domains?: string[];
             /**
@@ -3857,9 +4380,16 @@ export interface components {
              * @default 5
              */
             max_uses: number;
+            /** Subagents */
+            subagents?: ("retrieval" | "sql" | "research")[];
         };
         /** WebSearchTool */
         "WebSearchTool-Output": {
+            /**
+             * Agent
+             * @default true
+             */
+            agent: boolean;
             /** Allowed Domains */
             allowed_domains: string[];
             /**
@@ -3872,6 +4402,8 @@ export interface components {
              * @default 5
              */
             max_uses: number;
+            /** Subagents */
+            subagents: ("retrieval" | "sql" | "research")[];
         };
     };
     responses: never;
@@ -4082,6 +4614,76 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AssistantDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_assistant_budget_api_v1_assistants__assistant_id__budget_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                assistant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BudgetsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_assistant_budget_api_v1_assistants__assistant_id__budget_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                assistant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BudgetLimits"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BudgetsOut"];
                 };
             };
             /** @description Validation Error */
@@ -5133,6 +5735,153 @@ export interface operations {
             };
         };
     };
+    list_memories_api_v1_assistants__assistant_id__memories_get: {
+        parameters: {
+            query?: {
+                /** @description An embedding app's end user; assistant editors only. */
+                external_user_ref?: string | null;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                assistant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryFileOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clear_memories_api_v1_assistants__assistant_id__memories_delete: {
+        parameters: {
+            query?: {
+                /** @description An embedding app's end user; assistant editors only. */
+                external_user_ref?: string | null;
+                path?: string | null;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                assistant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryCleared"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recommend_pipeline_api_v1_assistants__assistant_id__pipeline_recommend_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                assistant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PipelineRecommendIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PipelineSuggestion"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    generate_prompt_api_v1_assistants__assistant_id__prompt_generate_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                assistant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PromptGenerateIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromptSuggestion"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_versions_api_v1_assistants__assistant_id__versions_get: {
         parameters: {
             query?: {
@@ -6043,6 +6792,76 @@ export interface operations {
             };
         };
     };
+    get_org_budgets_api_v1_orgs__org_id__budgets_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BudgetsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_org_budgets_api_v1_orgs__org_id__budgets_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BudgetLimits"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BudgetsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     create_invite_api_v1_orgs__org_id__invites_post: {
         parameters: {
             query?: never;
@@ -6160,7 +6979,8 @@ export interface operations {
         parameters: {
             query?: {
                 from?: string | null;
-                group_by?: "assistant" | "model";
+                group_by?: "assistant" | "model" | "conversation";
+                limit?: number | null;
                 to?: string | null;
             };
             header?: {
@@ -6180,6 +7000,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UsageRollupResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recommend_starter_api_v1_pipeline_recommend_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+                "x-org-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PipelineRecommendIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PipelineSuggestion"];
                 };
             };
             /** @description Validation Error */

@@ -19,6 +19,7 @@ from app.schemas.assistant_config import (
     MemoryConfig,
     ModelRoles,
     RagConfig,
+    RouterConfig,
     SubagentsConfig,
     ToggleTool,
     ToolsConfig,
@@ -70,24 +71,24 @@ def _reaches(start: str, target: str, adj: dict[str, list[str]]) -> bool:
     return False
 
 
-def _subagents(
-    graph: Graph, agent_id: str, models: ModelRoles
-) -> tuple[SubagentsConfig, ModelRoles]:
-    """Which subagent roles are on, and the subagent model role with a node's
-    `model` / `max_turns` overrides applied (they used to be dropped)."""
+def _subagents(graph: Graph, agent_id: str, models: ModelRoles) -> SubagentsConfig:
+    """Which subagent roles are on, each with its node's `model` / `max_turns`
+    as that role's own model settings (task 5.1).
+
+    Before 5.1 one shared subagent model role served every subagent, so one
+    node's overrides won (the retrieval node's) and the others' were silently
+    ignored. A node without overrides leaves its role on the shared one."""
     sub = SubagentsConfig(retrieval=False, sql=False, research=False)
     nodes = [n for n in graph.nodes if n.type == "subagent" and agent_id in graph.outgoers(n.id)]
     for n in nodes:
         setattr(sub, n.data.role, True)
-    # One subagent model role serves every subagent, so one node's overrides
-    # apply: the retrieval node's (the one the runtime builds), else the first.
-    lead = next((n for n in nodes if n.data.role == "retrieval"), None) or next(iter(nodes), None)
-    if lead is None or (lead.data.model is None and lead.data.max_turns is None):
-        return sub, models
-    spec = (lead.data.model or models.subagent).model_copy(deep=True)
-    if lead.data.max_turns is not None:
-        spec = spec.model_copy(update={"max_turns": lead.data.max_turns})
-    return sub, models.model_copy(update={"subagent": spec})
+        if n.data.model is None and n.data.max_turns is None:
+            continue
+        spec = (n.data.model or models.subagent).model_copy(deep=True)
+        if n.data.max_turns is not None:
+            spec = spec.model_copy(update={"max_turns": n.data.max_turns})
+        sub.models[n.data.role] = spec
+    return sub
 
 
 def compile_graph(graph: Graph) -> AssistantConfig:
@@ -102,6 +103,24 @@ def compile_graph(graph: Graph) -> AssistantConfig:
 
     def wired_to_agent(node_id: str) -> bool:
         return _reaches(node_id, agent_id, adj)
+
+    # Who may use each capability (task 5.10): an edge to the agent gives it
+    # to the main agent; an edge to a subagent (itself wired to the agent)
+    # gives it to that subagent. Before, anything that reached the agent at
+    # all went to the main agent, so wiring a database to the sql subagent
+    # alone changed nothing.
+    sub_roles = {
+        n.id: n.data.role
+        for n in graph.nodes
+        if n.type == "subagent" and agent_id in graph.outgoers(n.id)
+    }
+
+    def scope(node_id: str) -> dict[str, object] | None:
+        outs = graph.outgoers(node_id)
+        roles = sorted({sub_roles[o] for o in outs if o in sub_roles})
+        if agent_id not in outs and not roles:
+            return None
+        return {"agent": agent_id in outs, "subagents": roles}
 
     # ── models (agent node, router node overrides) ───────────
     models = agent_node.data.models.model_copy(deep=True)
@@ -133,7 +152,7 @@ def compile_graph(graph: Graph) -> AssistantConfig:
     output_citations = next(
         (n.data.citations for n in graph.nodes if isinstance(n, OutputNode)), True
     )
-    kb_nodes = [n for n in graph.nodes if n.type == "knowledge_base" and wired_to_agent(n.id)]
+    kb_nodes = [n for n in graph.nodes if n.type == "knowledge_base" and scope(n.id)]
     if kb_nodes:
         kb = kb_nodes[0]
         source_ids = sorted(
@@ -150,6 +169,7 @@ def compile_graph(graph: Graph) -> AssistantConfig:
             retrieval=kb.data.retrieval.model_copy(deep=True),
             citations=kb.data.citations and output_citations,
             source_ids=source_ids,
+            **scope(kb.id) or {},
         )
     else:
         rag = RagConfig(citations=output_citations)
@@ -161,9 +181,10 @@ def compile_graph(graph: Graph) -> AssistantConfig:
                 connection_id=n.data.connection_id,
                 nl2sql=n.data.nl2sql,
                 expose_write=n.data.expose_write,
+                **scope(n.id) or {},
             )
             for n in graph.nodes
-            if n.type == "database" and wired_to_agent(n.id)
+            if n.type == "database" and scope(n.id)
         ),
         key=lambda d: d.connection_id,
     )
@@ -171,7 +192,7 @@ def compile_graph(graph: Graph) -> AssistantConfig:
     # ── tools ────────────────────────────────────────────────
     tools = ToolsConfig()
     for n in graph.nodes:
-        if n.type != "tool" or not wired_to_agent(n.id):
+        if n.type != "tool" or not (who := scope(n.id)):
             continue
         key = n.data.key
         cfg = n.data.config
@@ -180,17 +201,19 @@ def compile_graph(graph: Graph) -> AssistantConfig:
                 enabled=True,
                 max_uses=_as_int(cfg.get("max_uses"), 5),
                 allowed_domains=_as_str_list(cfg.get("allowed_domains")),
+                **who,
             )
         elif key == "http_request":
             tools.http_request = HttpRequestTool(
                 enabled=True,
                 allowed_domains=_as_str_list(cfg.get("allowed_domains")),
                 approval=n.data.approval,
+                **who,
             )
         elif key == "calculator":
-            tools.calculator = ToggleTool(enabled=True)
+            tools.calculator = ToggleTool(enabled=True, **who)
         elif key == "datetime":
-            tools.datetime = ToggleTool(enabled=True)
+            tools.datetime = ToggleTool(enabled=True, **who)
 
     # ── mcp servers ──────────────────────────────────────────
     # The node's allowlist and approval were dropped here before task 4.6:
@@ -202,15 +225,16 @@ def compile_graph(graph: Graph) -> AssistantConfig:
                 tools=list(n.data.tool_allowlist),
                 approval=n.data.approval,
                 tool_approvals=dict(n.data.tool_approvals),
+                **scope(n.id) or {},
             )
             for n in graph.nodes
-            if n.type == "mcp_server" and wired_to_agent(n.id)
+            if n.type == "mcp_server" and scope(n.id)
         ),
         key=lambda m: m.id,
     )
 
     # ── subagents ────────────────────────────────────────────
-    sub, models = _subagents(graph, agent_id, models)
+    sub = _subagents(graph, agent_id, models)
 
     return AssistantConfig(
         models=models,
@@ -223,6 +247,7 @@ def compile_graph(graph: Graph) -> AssistantConfig:
         subagents=sub,
         memory=memory,
         approval_policy=agent_node.data.approval_policy.model_copy(deep=True),
+        router=RouterConfig(enabled=bool(router_nodes)),
     )
 
 

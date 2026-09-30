@@ -24,6 +24,13 @@ Invoke-Native $py "-m" "pytest" "apps/api" "-q" "-m" "not integration"
 Write-Host "==> pytest (integration: needs Docker Postgres up)" -ForegroundColor Cyan
 Invoke-Native $py "-m" "pytest" "apps/api" "-q" "-m" "integration"
 
+# Both test processes have exited, so nothing holds their files open any
+# more: remove their folders under %TEMP%\assistant-studio-tests (on Windows
+# a run can't delete its own SQLite file at exit; see tests/temp_dirs.py).
+Push-Location (Join-Path $root "apps\api")
+try { Invoke-Native $py "-m" "tests.temp_dirs" }
+finally { Pop-Location }
+
 Write-Host "==> alembic check (models vs. migrated Postgres schema)" -ForegroundColor Cyan
 # The unit tier runs the same check on SQLite; this is the Postgres side, the
 # only place the pgvector HNSW / GIN indexes exist. Assumes the dev database

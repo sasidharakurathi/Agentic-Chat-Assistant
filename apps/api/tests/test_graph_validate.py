@@ -21,9 +21,9 @@ def test_minimal_and_rich_graphs_validate() -> None:
     assert validate_graph(minimal_graph()).ok
     r = validate_graph(rich_graph())
     assert r.ok, r.errors
-    # Its database works (it reaches the agent through the subagent); the
-    # `sql` subagent role itself does nothing until Phase 5, and says so.
-    assert [w.code for w in r.warnings] == ["subagent_not_available"]
+    # Its database reaches the agent through the sql subagent, which is all
+    # that subagent needs (task 5.1): no warnings.
+    assert [w.code for w in r.warnings] == []
 
 
 def test_missing_agent_is_an_error() -> None:
@@ -60,13 +60,27 @@ def test_cycle_detected() -> None:
     assert any(e.code in {"cycle", "illegal_edge"} for e in validate_graph(g).errors)
 
 
-def test_a_subagent_role_that_does_nothing_yet_is_a_warning() -> None:
+def test_an_sql_subagent_without_a_database_is_flagged() -> None:
     g = minimal_graph()
     g.nodes.append(SubagentNode(id="s", data=SubagentNodeData(role="sql")))
     g.edges.append(Edge(source="s", target="a"))
     res = validate_graph(g)
     assert res.ok
-    assert _subagent_warnings(res) == ["subagent_not_available"]
+    assert _subagent_warnings(res) == ["subagent_without_database"]
+
+
+def test_a_research_subagent_needs_web_search() -> None:
+    g = minimal_graph()
+    g.nodes.append(SubagentNode(id="s", data=SubagentNodeData(role="research")))
+    g.edges.append(Edge(source="s", target="a"))
+    assert _subagent_warnings(validate_graph(g)) == ["subagent_without_web_search"]
+    # Another tool doesn't count; web search does, wired either way.
+    g.nodes.append(ToolNode(id="calc", data=ToolNodeData(key="calculator")))
+    g.edges.append(Edge(source="calc", target="a"))
+    assert _subagent_warnings(validate_graph(g)) == ["subagent_without_web_search"]
+    g.nodes.append(ToolNode(id="web", data=ToolNodeData(key="web_search")))
+    g.edges.append(Edge(source="web", target="s"))
+    assert _subagent_warnings(validate_graph(g)) == []
 
 
 def test_a_retrieval_subagent_without_a_knowledge_base_is_flagged() -> None:

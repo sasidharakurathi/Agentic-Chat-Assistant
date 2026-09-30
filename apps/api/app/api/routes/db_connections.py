@@ -4,7 +4,14 @@ import uuid
 
 from fastapi import APIRouter, status
 
-from app.api.deps import AssistantCtx, ClientIP, EditableAssistantCtx, PageQuery, SessionDep
+from app.api.deps import (
+    AssistantCtx,
+    ClientIP,
+    EditableAssistantCtx,
+    PageQuery,
+    SessionDep,
+    per_user_limit,
+)
 from app.schemas.common import Message, Page
 from app.schemas.db_connection import (
     DbConnectionCreate,
@@ -16,6 +23,9 @@ from app.schemas.db_connection import (
 from app.services import db_connections as svc
 
 router = APIRouter(tags=["db-connections"])
+
+#: Reaches other systems or starts a job: limited per caller (task 5.8).
+HEAVY = per_user_limit("heavy", "rate_limit_heavy")
 
 
 @router.get("/assistants/{assistant_id}/db-connections", response_model=Page[DbConnectionSummary])
@@ -80,6 +90,7 @@ async def delete_connection(
 
 @router.post(
     "/assistants/{assistant_id}/db-connections/{connection_id}:test",
+    dependencies=[HEAVY],
     response_model=DbTestResult,
 )
 async def test_connection(
@@ -97,6 +108,7 @@ async def test_connection(
 
 @router.post(
     "/assistants/{assistant_id}/db-connections/{connection_id}:refresh-schema",
+    dependencies=[HEAVY],
     response_model=DbSchemaOut,
 )
 async def refresh_schema(

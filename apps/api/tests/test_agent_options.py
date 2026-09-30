@@ -171,5 +171,10 @@ async def test_the_gate_stays_silent_for_enabled_tools() -> None:
     """No decision at all, so `can_use_tool` still classifies and can wait for
     a human. Returning "allow" here would skip it — the same bug again."""
     gate = _gate(_options(_db_config()))
-    call = {"tool_name": "mcp__caps__sql_query", "tool_input": {}}
+    # A valid input: since task 5.3 the gate also checks inputs against the
+    # tool's schema, and an empty one is (rightly) refused.
+    call = {
+        "tool_name": "mcp__caps__sql_query",
+        "tool_input": {"connection_id": "c", "sql": "DELETE FROM t"},
+    }
     assert await gate(call, "t1", {"signal": None}) == {}

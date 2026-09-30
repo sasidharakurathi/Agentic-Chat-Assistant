@@ -62,6 +62,12 @@ _READ_ONLY_CAPS = {
     _qual("mongo_aggregate"),
 }
 
+#: Tools that write, but only to the conversation owner's own notes for this
+#: assistant (the memory tool, task 5.2): nobody else's data and nothing
+#: outside the platform. Asking a person before every note would make the
+#: tool unusable.
+_OWN_NOTES = {_qual("memory")}
+
 #: SDK built-ins that take no action of their own.
 _NO_ACTION_BUILTINS = {
     "WebSearch",
@@ -200,7 +206,7 @@ def classify(
     read_only_mcp: frozenset[str] = frozenset(),
     mcp_modes: dict[str, ApprovalMode] | None = None,
 ) -> tuple[ApprovalMode, Risk]:
-    if tool_name in _READ_ONLY_CAPS or tool_name in _NO_ACTION_BUILTINS:
+    if tool_name in _READ_ONLY_CAPS | _NO_ACTION_BUILTINS | _OWN_NOTES:
         return "auto", "low"
 
     if tool_name == _qual("http_request"):

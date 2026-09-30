@@ -237,6 +237,7 @@ async def build_mcp_toolset(config: AssistantConfig, assistant_id: uuid.UUID | N
                     read_only=spec.get("read_only") is True,
                     open_world=True,
                     server=row.name,
+                    source_id=str(row.id),
                 )
             )
             toolset.modes[toolset.tools[-1].qualified_name] = mcp_mode(

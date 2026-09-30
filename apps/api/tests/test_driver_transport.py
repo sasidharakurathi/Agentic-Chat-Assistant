@@ -36,7 +36,7 @@ from app.agent.events import (
 )
 from app.agent.options import build_runtime_spec
 from app.schemas.assistant_config import AssistantConfig
-from claude_agent_sdk import ClaudeAgentOptions
+from claude_agent_sdk import ClaudeAgentOptions, ProcessError
 from claude_agent_sdk._internal.transport import Transport
 
 pytestmark = pytest.mark.anyio
@@ -475,19 +475,30 @@ async def test_a_stop_is_sent_to_the_cli_as_an_interrupt(
     assert usage and usage[-1].terminal_reason == "interrupted", "the real usage still arrives"
 
 
-async def test_a_cli_that_dies_mid_turn_is_an_agent_error(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("death", "code"),
+    [
+        # What the real transport raises when the CLI process dies.
+        (ProcessError("Command failed", exit_code=1, stderr="at /srv/app: boom"), "agent_crashed"),
+        (RuntimeError("CLI process exited with code 1"), "agent_error"),
+    ],
+)
+async def test_a_cli_that_dies_mid_turn_is_a_typed_error(
+    monkeypatch: pytest.MonkeyPatch, death: Exception, code: str
 ) -> None:
+    """Typed since task 5.4, and the message is safe: it used to be
+    `str(exc)`, stderr and all."""
+
     async def script(cli: ScriptedCLI) -> None:
         for m in _delta("msg_1", "Half an ans"):
             cli.send(m)
-        cli.fail(RuntimeError("CLI process exited with code 1"))
+        cli.fail(death)
 
     events, _ = await _drive(monkeypatch, script, _config())
     assert isinstance(events[0], TokenEvent)
     error = events[-1]
-    assert isinstance(error, ErrorEvent) and error.code == "agent_error"
-    assert "exited with code 1" in error.message
+    assert isinstance(error, ErrorEvent) and (error.code, error.retryable) == (code, True)
+    assert "exited" not in error.message and "/srv/app" not in error.message
 
 
 @pytest.mark.parametrize(

@@ -7,12 +7,17 @@ import { Button } from "@/components/ui/button";
 import type { DataSource, DbConnection, McpServer } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+const SUBAGENT_ROLES = [
+  { key: "retrieval", label: "Retrieval subagent" },
+  { key: "sql", label: "SQL subagent" },
+  { key: "research", label: "Research subagent" },
+] as const;
+
 /** What the canvas can add today.
  *
- *  The RAG node types (Phase 2), `database` (Phase 3) and the built-in
- *  `tool`s (Phase 4). `mcp_server` arrives once servers can be registered,
- *  and `subagent` with Phase 5: offering them before then would let someone
- *  build a graph that can never validate.
+ *  The RAG node types (Phase 2), `database` (Phase 3), the built-in
+ *  `tool`s and `mcp_server`s (Phase 4), and `subagent`s and the `router`
+ *  (task 5.10).
  */
 export function NodePalette({
   sources,
@@ -25,6 +30,10 @@ export function NodePalette({
   onAddDatabase,
   onAddTool,
   onAddMcpServer,
+  subagentsOnCanvas = [],
+  hasRouter = false,
+  onAddSubagent,
+  onAddRouter,
 }: {
   sources: DataSource[];
   databases: DbConnection[];
@@ -39,6 +48,11 @@ export function NodePalette({
   /** Registered MCP servers (the MCP tab); one node each. */
   mcpServers?: McpServer[];
   onAddMcpServer?: (serverId: string) => void;
+  /** Subagent roles already on the canvas: one node each. */
+  subagentsOnCanvas?: string[];
+  hasRouter?: boolean;
+  onAddSubagent?: (role: string) => void;
+  onAddRouter?: () => void;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -159,6 +173,43 @@ export function NodePalette({
                 </button>
               ))}
             </div>
+          )}
+
+          {onAddSubagent && (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-muted-foreground text-xs font-medium">Subagents</p>
+              {SUBAGENT_ROLES.map(({ key, label }) => {
+                const added = subagentsOnCanvas.includes(key);
+                return (
+                  <button
+                    key={key}
+                    onClick={() => onAddSubagent(key)}
+                    className="border-border hover:bg-muted flex items-center gap-2 rounded-md border px-2 py-1.5 text-left text-xs"
+                  >
+                    <span className="bg-node-subagent inline-block h-2 w-2 shrink-0 rounded-full" />
+                    <span className="truncate">{label}</span>
+                    {added && <span className="text-muted-foreground ml-auto shrink-0">added</span>}
+                  </button>
+                );
+              })}
+              <p className="text-muted-foreground text-xs">
+                Wire a database, knowledge base or tool into a subagent to make it that
+                subagent&apos;s alone.
+              </p>
+            </div>
+          )}
+
+          {onAddRouter && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="justify-start"
+              disabled={hasRouter}
+              onClick={onAddRouter}
+            >
+              <span className="bg-node-router mr-2 inline-block h-2 w-2 rounded-full" />
+              Router{hasRouter ? " (added)" : ""}
+            </Button>
           )}
 
           <p className="text-muted-foreground text-xs">

@@ -22,6 +22,7 @@ from typing import Any
 
 from app.agent.approvals import CanUseTool, build_can_use_tool
 from app.agent.caps import ALL_CAPS, CapabilityTool
+from app.agent.errors import Failure, classify, from_message_error
 from app.agent.events import (
     AgentEvent,
     ErrorEvent,
@@ -31,8 +32,15 @@ from app.agent.events import (
     ToolResultEvent,
     UsageEvent,
 )
+from app.agent.hooks import build_tool_gate
 from app.agent.models import PRICE_PER_MTOK
-from app.agent.options import SUBAGENT_TOOL, RuntimeSpec, build_claude_options
+from app.agent.options import (
+    SUBAGENT_TOOL,
+    RuntimeSpec,
+    build_claude_options,
+    permitted_tool_names,
+    tool_schemas,
+)
 from app.agent.post_tool import run_capability
 from app.config import settings
 from app.logging import get_logger
@@ -165,25 +173,290 @@ async def _fake_permitted_call(
     cap: CapabilityTool,
     can_use_tool: CanUseTool | None,
     reply: list[str],
+    *,
+    call_id: str = "fake-1",
+    parent_id: str | None = None,
+    agent_type: str | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """One tool call that goes through `can_use_tool` first, as the SDK does:
-    a denial becomes a `denied` result, and `updated_input` is what runs."""
-    yield ToolCallEvent(id="fake-1", name=name, input=args)
+    a denial becomes a `denied` result, and `updated_input` is what runs. A
+    subagent's calls go through the same callback, so `parent_id` nests one
+    under its delegation."""
+    yield ToolCallEvent(id=call_id, name=name, input=args, parent_id=parent_id)
     if can_use_tool is not None:
         # The SDK passes the call's id in the context; so does this, so the
         # permission lands on the right audit row.
-        ctx = SimpleNamespace(tool_use_id="fake-1")
+        ctx = SimpleNamespace(tool_use_id=call_id, agent_type=agent_type)
         decision = await can_use_tool(name, args, ctx)  # type: ignore[arg-type]
         if type(decision).__name__ != "PermissionResultAllow":
             message = getattr(decision, "message", "") or "not permitted"
-            yield ToolResultEvent(id="fake-1", status="denied", output=message)
+            yield ToolResultEvent(id=call_id, status="denied", output=message, parent_id=parent_id)
             reply.append(f"I couldn't run that: {message}")
             return
         args = getattr(decision, "updated_input", None) or args
-    result = await run_capability(cap.handler, args)
+    result = await run_capability(cap.handler, args, name)
     text, status = _cap_result(result)
-    yield ToolResultEvent(id="fake-1", status=status, output=text)
+    yield ToolResultEvent(id=call_id, status=status, output=text, parent_id=parent_id)
     reply.append(text)
+
+
+async def _fake_subagent(
+    role: str,
+    prompt: str,
+    spec: RuntimeSpec,
+    can_use_tool: CanUseTool | None,
+    reply: list[str],
+) -> AsyncIterator[AgentEvent]:
+    """Delegate to the sql or research subagent (task 5.1), shaped like the
+    SDK's: one `Agent` call, the subagent's notes and tool calls nested under
+    it, its findings as that call's result.
+
+    sql runs `sql:`'s statement through the real permission callback, so a
+    write asks a person even from inside a subagent. research can't search
+    the web without a real model; it says so, and searches the knowledge
+    base when it has one."""
+    task = f"fake-task-{role}"
+    sub = next(s for s in spec.subagents if s.name == role)
+    yield ToolCallEvent(
+        id=task, name=SUBAGENT_TOOL, input={"subagent_type": role, "prompt": prompt}
+    )
+    found: list[str] = []
+    status = "success"
+    if role == "sql":
+        yield TokenEvent(text="Checking the schema, then running one query. ", parent_id=task)
+        call = _permitted_call(prompt, spec)
+        if call is not None and call[0].qualified_name in sub.tools:
+            cap, args = call
+            async for ev in _fake_permitted_call(
+                cap.qualified_name,
+                args,
+                cap,
+                can_use_tool,
+                found,
+                call_id="fake-sub-1",
+                parent_id=task,
+                agent_type=role,
+            ):
+                if isinstance(ev, ToolResultEvent):
+                    status = ev.status
+                yield ev
+    else:
+        yield TokenEvent(
+            text="(fake driver: searching the web needs a real model.) ", parent_id=task
+        )
+        kb = next((t for t in spec.caps_tools if t.name == "kb_search"), None)
+        if kb is not None and kb.qualified_name in sub.tools:
+            query = prompt[prompt.lower().index("research:") + 9 :].strip() or prompt
+            yield ToolCallEvent(
+                id="fake-sub-1", name=kb.qualified_name, input={"query": query}, parent_id=task
+            )
+            text, status = _cap_result(await run_capability(kb.handler, {"query": query}))
+            yield ToolResultEvent(id="fake-sub-1", status=status, output=text, parent_id=task)
+            found.append(text)
+    findings = "\n".join(found) or "Nothing found."
+    yield TokenEvent(text="Done.", parent_id=task)
+    yield ToolResultEvent(id=task, status=status, output=findings)
+    reply.append(findings)
+
+
+def _fake_recall(spec: RuntimeSpec, session_id: str | None) -> str:
+    """`history: …`: what this turn knows of the earlier conversation (task
+    5.2), so resume, replay and "history off" can be told apart without a
+    model: the replayed summary and messages, the session it resumed, or
+    nothing."""
+    if spec.history:
+        return "(fake driver) This turn started fresh, from:\n\n" + spec.history
+    if session_id:
+        return f"(fake driver) Resuming session {session_id}: the earlier turns are in it."
+    return "(fake driver) Nothing earlier: this message is answered on its own."
+
+
+def _fake_delegate_to(prompt: str, spec: RuntimeSpec) -> str | None:
+    """`sql: …` with an sql subagent, or `research: …` with a research one."""
+    lowered = prompt.lower()
+    roles = {s.name for s in spec.subagents}
+    if "sql:" in lowered and "sql" in roles:
+        return "sql"
+    if "research:" in lowered and "research" in roles:
+        return "research"
+    return None
+
+
+_NOTES = "/memories/notes.md"
+
+
+async def _fake_memory(
+    prompt: str, cap: CapabilityTool, can_use_tool: CanUseTool | None, reply: list[str]
+) -> AsyncIterator[AgentEvent]:
+    """The memory tool (task 5.2), used the way its prompt asks: list
+    /memories first. `memories:` then shows the notes; `remember: <fact>`
+    adds a line to them (creating the file the first time). Every call goes
+    through the real permission callback."""
+    name = cap.qualified_name
+    lowered = prompt.lower()
+    seen: list[str] = []
+    calls = iter(f"fake-mem-{n}" for n in range(1, 4))
+
+    async def call(args: dict[str, Any], into: list[str]) -> AsyncIterator[AgentEvent]:
+        async for ev in _fake_permitted_call(
+            name, args, cap, can_use_tool, into, call_id=next(calls)
+        ):
+            yield ev
+
+    async for ev in call({"command": "view", "path": "/memories"}, seen):
+        yield ev
+    notes: list[str] = []
+    if seen and f"{_NOTES} (" in seen[0]:
+        async for ev in call({"command": "view", "path": _NOTES}, notes):
+            yield ev
+    if "remember:" not in lowered:
+        reply.append(notes[0] if notes else "(fake driver) I have no notes yet.")
+        return
+    fact = prompt[lowered.index("remember:") + 9 :].strip() or "(nothing)"
+    if notes:
+        lines = len(notes[0].split("\n")) - 1  # minus the header line
+        args: dict[str, Any] = {
+            "command": "insert",
+            "path": _NOTES,
+            "insert_line": lines,
+            "insert_text": f"- {fact}",
+        }
+    else:
+        args = {"command": "create", "path": _NOTES, "file_text": f"- {fact}"}
+    async for ev in call(args, reply):
+        yield ev
+
+
+async def _fake_tool_turn(
+    prompt: str, spec: RuntimeSpec, can_use_tool: CanUseTool | None, reply: list[str]
+) -> AsyncIterator[AgentEvent]:
+    """The fake driver's tool-using answers, chosen by phrase. Leaves `reply`
+    empty when the prompt asks for none of them."""
+    # What the main agent itself may use (task 5.10): a real model is only
+    # told about those.
+    mine = spec.main_tools if spec.main_tools is not None else spec.enabled_tools
+    calc_allowed = "mcp__caps__calculator" in mine
+    expr_match = re.search(r"(-?\d[\d\s.+\-*/%()]*\d|\d)", prompt)
+    kb_search_tool = next(
+        (t for t in spec.caps_tools if t.name == "kb_search" and t.qualified_name in mine), None
+    )
+    permitted = _permitted_call(prompt, spec)
+    delegate = _fake_delegate_to(prompt, spec)
+    searching = kb_search_tool is not None and "search" in prompt.lower()
+    memory = next((t for t in spec.caps_tools if t.name == "memory" and t.server == "caps"), None)
+    remembering = memory is not None and any(
+        w in prompt.lower() for w in ("remember:", "memories:")
+    )
+
+    if (
+        calc_allowed
+        and ("calcul" in prompt.lower() or "+" in prompt or "*" in prompt)
+        and expr_match
+    ):
+        expr = expr_match.group(0).strip()
+        yield ToolCallEvent(id="fake-1", name="mcp__caps__calculator", input={"expression": expr})
+        result = await run_capability(ALL_CAPS["calculator"].handler, {"expression": expr})
+        text, status = _cap_result(result)
+        yield ToolResultEvent(id="fake-1", status=status, output=text)
+        reply.append(text)
+    elif remembering and memory is not None:
+        async for ev in _fake_memory(prompt, memory, can_use_tool, reply):
+            yield ev
+    elif delegate is not None:
+        async for ev in _fake_subagent(delegate, prompt, spec, can_use_tool, reply):
+            yield ev
+    elif searching and any(s.name == "retrieval" for s in spec.subagents):
+        async for ev in _fake_delegation(prompt, kb_search_tool, reply):
+            yield ev
+    elif searching:
+        async for ev in _fake_search(prompt, kb_search_tool, reply):
+            yield ev
+    elif permitted is not None:
+        # A tool that goes through the real permission callback, as the
+        # SDK's calls do: "mcp: <server>.<tool> {json}", "http: [METHOD]
+        # <url> [body]" or "sql: <statement>". This is what makes the
+        # approval flow exercisable without spending credits.
+        cap, args = permitted
+        async for ev in _fake_permitted_call(cap.qualified_name, args, cap, can_use_tool, reply):
+            yield ev
+
+
+def _gated(spec: RuntimeSpec, can_use_tool: CanUseTool | None) -> CanUseTool:
+    """The fake driver's calls, checked the way the SDK checks them: the
+    PreToolUse gate first (task 5.3's guardrails live there), then the
+    permission callback with whatever input the gate left."""
+    gate = build_tool_gate(
+        permitted_tool_names(spec),
+        spec.web_search,
+        guard=spec.guard,
+        schemas=tool_schemas(spec),
+        over_budget=spec.over_budget,
+    )
+
+    async def check(name: str, args: dict[str, Any], ctx: Any) -> Any:
+        from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+        # A subagent's call names it, as the SDK's hook input does (task 5.10).
+        who = getattr(ctx, "agent_type", None)
+        caller = {"agent_id": f"fake-{who}", "agent_type": who} if who else {}
+        verdict = await gate({"tool_name": name, "tool_input": args, **caller}, None, None)
+        out = verdict.get("hookSpecificOutput") or {}
+        if out.get("permissionDecision") == "deny":
+            return PermissionResultDeny(message=str(out.get("permissionDecisionReason", "")))
+        args = out.get("updatedInput") or args
+        if can_use_tool is None:
+            return PermissionResultAllow(updated_input=args)
+        return await can_use_tool(name, args, ctx)
+
+    return check
+
+
+def _fake_refusal(spec: RuntimeSpec) -> tuple[list[str], str, list[str]]:
+    """`refuse: …`: the main model declines. With a fallback model configured
+    (`guardrails.refusal_fallback`), the CLI would ask that one instead; the
+    report then names both models, as the real one does."""
+    if spec.fallback_model:
+        return (
+            [
+                f"(fake driver, answering as {spec.fallback_model})",
+                "The main model declined;",
+                "the fallback model answered.",
+            ],
+            "end_turn",
+            [spec.model, spec.fallback_model],
+        )
+    return (["(fake driver)", "I can't help with that."], "refusal", [spec.model])
+
+
+def _result_error(status: int, text: str = "") -> Exception:
+    from claude_agent_sdk import ResultError
+
+    return ResultError(
+        "run failed", data={"subtype": "success", "api_error_status": status, "result": text}
+    )
+
+
+def _process_error() -> Exception:
+    from claude_agent_sdk import ProcessError
+
+    return ProcessError("fake crash", exit_code=1)
+
+
+def _connection_error() -> Exception:
+    from claude_agent_sdk import CLIConnectionError
+
+    return CLIConnectionError("fake: could not start")
+
+
+#: `fail: <kind>` for the fake driver.
+_FAKE_FAILURES: dict[str, Callable[[], Exception]] = {
+    "crash": _process_error,
+    "unavailable": _connection_error,
+    "overloaded": lambda: _result_error(529, "Overloaded"),
+    "rate-limit": lambda: _result_error(429),
+    "auth": lambda: _result_error(401),
+    "too-long": lambda: _result_error(400, "prompt is too long"),
+}
 
 
 class FakeDriver:
@@ -202,55 +475,22 @@ class FakeDriver:
         can_use_tool: CanUseTool | None = None,
         interrupt: asyncio.Event | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        calc_allowed = "mcp__caps__calculator" in spec.enabled_tools
-        expr_match = re.search(r"(-?\d[\d\s.+\-*/%()]*\d|\d)", prompt)
-        kb_search_tool = next((t for t in spec.caps_tools if t.name == "kb_search"), None)
-        permitted = _permitted_call(prompt, spec)
-
-        reply_parts: list[str]
-        if (
-            calc_allowed
-            and ("calcul" in prompt.lower() or "+" in prompt or "*" in prompt)
-            and expr_match
-        ):
-            expr = expr_match.group(0).strip()
-            yield ToolCallEvent(
-                id="fake-1", name="mcp__caps__calculator", input={"expression": expr}
-            )
-            result = await run_capability(ALL_CAPS["calculator"].handler, {"expression": expr})
-            text, status = _cap_result(result)
-            yield ToolResultEvent(id="fake-1", status=status, output=text)
-            reply_parts = [text]
-        elif (
-            kb_search_tool is not None
-            and "search" in prompt.lower()
-            and any(s.name == "retrieval" for s in spec.subagents)
-        ):
-            reply_parts = []
-            async for ev in _fake_delegation(prompt, kb_search_tool, reply_parts):
-                yield ev
-        elif kb_search_tool is not None and "search" in prompt.lower():
-            reply_parts = []
-            async for ev in _fake_search(prompt, kb_search_tool, reply_parts):
-                yield ev
-        elif permitted is not None:
-            # A tool that goes through the real permission callback, as the
-            # SDK's calls do: "mcp: <server>.<tool> {json}", "http: [METHOD]
-            # <url> [body]" or "sql: <statement>". This is what makes the
-            # approval flow exercisable without spending credits.
-            cap, args = permitted
-            reply_parts = []
-            async for ev in _fake_permitted_call(
-                cap.qualified_name, args, cap, can_use_tool, reply_parts
-            ):
-                yield ev
+        failed = self._failure(prompt)
+        if failed is not None:
+            yield ErrorEvent(code=failed.code, message=failed.message, retryable=failed.retryable)
+            return
+        reply_parts: list[str] = []
+        stop_reason, models = "end_turn", [spec.model]
+        if "refuse:" in prompt.lower():
+            reply_parts, stop_reason, models = _fake_refusal(spec)
+        elif "history:" in prompt.lower():
+            reply_parts = [_fake_recall(spec, session_id)]
         else:
-            reply_parts = [
-                "(fake driver)",
-                "you",
-                "said:",
-                prompt.strip() or "(nothing)",
-            ]
+            checked = _gated(spec, can_use_tool)
+            async for ev in _fake_tool_turn(prompt, spec, checked, reply_parts):
+                yield ev
+        if not reply_parts:
+            reply_parts = ["(fake driver)", "you", "said:", prompt.strip() or "(nothing)"]
 
         for part in reply_parts:
             await asyncio.sleep(0)  # let the event loop breathe / interleave
@@ -269,7 +509,31 @@ class FakeDriver:
             tokens_out=tokens_out,
             cost_usd=_estimate_cost(spec.model, tokens_in, tokens_out),
             sdk_session_id=session_id or f"fake-{uuid.uuid4().hex[:12]}",
+            stop_reason=stop_reason,
+            models=models,
         )
+
+    def __init__(self) -> None:
+        #: Prompts that have already "crashed once" (`fail: crash-once`).
+        self._crashed: set[str] = set()
+
+    def _failure(self, prompt: str) -> Failure | None:
+        """`fail: <kind>`: the typed failure the real driver would report,
+        so the error chain and the platform's retry can be tried offline.
+        `crash-once` crashes the first attempt only, like a CLI that died on
+        start and came up again."""
+        lowered = prompt.lower()
+        if "fail:" not in lowered:
+            return None
+        found = re.match(r"\s*([a-z-]+)", lowered[lowered.index("fail:") + 5 :])
+        kind = found.group(1) if found else ""
+        if kind == "crash-once":
+            if prompt in self._crashed:
+                return None
+            self._crashed.add(prompt)
+            kind = "crash"
+        exc = _FAKE_FAILURES.get(kind)
+        return classify(exc()) if exc is not None else None
 
 
 #: Builds the SDK's transport from the finished options. None (production)
@@ -333,8 +597,12 @@ class ClaudeSDKDriver:
                     if relay is not None:
                         relay.cancel()
         except Exception as exc:
-            log.exception("claude_driver_failed")
-            yield ErrorEvent(code="agent_error", message=str(exc))
+            # Typed (task 5.4). The exception, stderr included, goes to the
+            # log with the turn's trace id; the client gets a code and a
+            # message that is safe to show.
+            failed = classify(exc)
+            log.exception("claude_driver_failed", code=failed.code)
+            yield ErrorEvent(code=failed.code, message=failed.message, retryable=failed.retryable)
 
 
 @dataclass
@@ -421,6 +689,9 @@ class _UsageLedger:
             num_turns=message.num_turns,
             terminal_reason=message.terminal_reason,
             web_searches=int((usage.get("server_tool_use") or {}).get("web_search_requests") or 0),
+            # Read defensively: an older CLI doesn't report these.
+            stop_reason=getattr(message, "stop_reason", None),
+            models=sorted(getattr(message, "model_usage", None) or {}),
         )
 
 
@@ -539,6 +810,11 @@ def _events_for(
         )
         if spend is not None:
             events.append(spend)
+        if message.error and parent is None:
+            failed = from_message_error(message.error)
+            events.append(
+                ErrorEvent(code=failed.code, message=failed.message, retryable=failed.retryable)
+            )
     elif isinstance(message, UserMessage) and isinstance(message.content, list):
         events.extend(
             _tool_result(block, denied, message.parent_tool_use_id)

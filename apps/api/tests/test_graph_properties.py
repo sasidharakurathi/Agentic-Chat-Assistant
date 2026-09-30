@@ -77,8 +77,26 @@ def configs(draw: st.DrawFn) -> AssistantConfig:
             for cid in draw(st.lists(_uuids, max_size=3, unique=True))
         ],
         "mcp_servers": draw(st.lists(_uuids, max_size=2, unique=True)),
-        "subagents": {"retrieval": rag_on and draw(st.booleans())},
+        "subagents": {
+            "retrieval": rag_on and draw(st.booleans()),
+            "sql": draw(st.booleans()),
+            "research": draw(st.booleans()),
+        },
+        # The router (task 5.10): on or off, with its own model.
+        "router": {"enabled": draw(st.booleans())},
     }
+    raw["models"]["router"] = {"model": draw(_models), "effort": draw(_efforts)}
+    # Who may use each capability (task 5.10): the agent, some subagents, or
+    # both. Roles whose subagent is off are canonicalised away.
+    roles = st.lists(st.sampled_from(["retrieval", "sql", "research"]), unique=True)
+
+    def scoped(entry: dict[str, Any]) -> dict[str, Any]:
+        return {**entry, "agent": draw(st.booleans()), "subagents": draw(roles)}
+
+    raw["rag"] = scoped(raw["rag"])
+    raw["databases"] = [scoped(d) for d in raw["databases"]]
+    raw["mcp_servers"] = [scoped({"id": i}) for i in raw["mcp_servers"]]
+    raw["tools"] = {k: scoped(v) for k, v in raw["tools"].items()}
     return AssistantConfig.model_validate(raw)
 
 

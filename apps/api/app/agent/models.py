@@ -28,11 +28,30 @@ DEFAULT_MODEL_BY_ROLE: dict[str, str] = {
     "judge": "claude-opus-5",
 }
 
+# The model the CLI switches to when the main one refuses a request or is
+# unavailable (`guardrails.refusal_fallback`, task 5.4). Always a different
+# model: the CLI refuses a fallback equal to the main model, and a refusal is
+# a property of the model, so asking the same one again rarely helps.
+FALLBACK_MODEL: dict[str, str] = {
+    "claude-opus-5": "claude-sonnet-5",
+    "claude-sonnet-5": "claude-opus-5",
+    "claude-haiku-4-5": "claude-sonnet-5",
+}
+
+
+def fallback_for(model: str) -> str | None:
+    return FALLBACK_MODEL.get(model)
+
+
 # The cheap model used by non-chat internals (contextual-retrieval prefixes,
 # task 2.6). Named here rather than inline so this module stays the only
 # place a model-id string lives — and so its cost lands in PRICE_PER_MTOK
 # instead of silently pricing at zero.
 CONTEXTUALIZE_MODEL = "claude-haiku-4-5"
+# Conversation summaries and titles (task 5.2): small one-shot jobs outside
+# the agent turn, so the cheap model, like contextual retrieval.
+SUMMARY_MODEL = "claude-haiku-4-5"
+TITLE_MODEL = "claude-haiku-4-5"
 
 # Rough USD-per-1M-token rates, for pre-flight budget estimates only (not billing).
 # Kept here so there is one place to update when prices change.
@@ -62,8 +81,12 @@ __all__ = [
     "ALLOWED_MODELS",
     "CONTEXTUALIZE_MODEL",
     "DEFAULT_MODEL_BY_ROLE",
+    "FALLBACK_MODEL",
     "PRICE_PER_MTOK",
     "RAG_PRICE_PER_MTOK",
+    "SUMMARY_MODEL",
+    "TITLE_MODEL",
     "ModelRole",
+    "fallback_for",
     "is_allowed",
 ]

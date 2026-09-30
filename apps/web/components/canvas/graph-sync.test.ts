@@ -12,6 +12,7 @@ import {
   STRUCTURAL_NODE_TYPES,
   tidyLayout,
   toFlow,
+  wiredInto,
 } from "./graph-sync";
 
 const node = (id: string, type: string, x = 0, y = 0): GraphNode => ({
@@ -90,7 +91,9 @@ describe("toFlow", () => {
 
   it("paints an edge that has an error", () => {
     const validation: ValidationResult = {
-      errors: [{ code: "illegal_edge", message: "no", node_id: null, edge: ["kb", "ag"] }],
+      errors: [
+        { code: "illegal_edge", message: "no", node_id: null, edge: ["kb", "ag"], fix: null },
+      ],
       warnings: [],
     };
     const { edges } = toFlow(pipeline(), indexIssues(validation));
@@ -104,13 +107,13 @@ describe("indexIssues", () => {
   it("files errors and warnings under their node, and edge errors under the edge", () => {
     const issues = indexIssues({
       errors: [
-        { code: "a", message: "kb broken", node_id: "kb", edge: null },
-        { code: "b", message: "kb twice", node_id: "kb", edge: null },
-        { code: "c", message: "bad wire", node_id: null, edge: ["calc", "ag"] },
+        { code: "a", message: "kb broken", node_id: "kb", edge: null, fix: null },
+        { code: "b", message: "kb twice", node_id: "kb", edge: null, fix: null },
+        { code: "c", message: "bad wire", node_id: null, edge: ["calc", "ag"], fix: null },
       ],
       warnings: [
-        { code: "d", message: "defaults in use", node_id: "guard", edge: null },
-        { code: "e", message: "graph-wide", node_id: null, edge: null },
+        { code: "d", message: "defaults in use", node_id: "guard", edge: null, fix: null },
+        { code: "e", message: "graph-wide", node_id: null, edge: null, fix: null },
       ],
     });
     expect(issues.nodes.get("kb")).toEqual({ errors: ["kb broken", "kb twice"], warnings: [] });
@@ -191,5 +194,35 @@ describe("mergeFlowNodes", () => {
   it("leaves a new node unmeasured, for React Flow to measure", () => {
     const merged = mergeFlowNodes([], toFlow(pipeline()).nodes, null);
     expect(merged.every((n) => n.measured === undefined && !n.selected)).toBe(true);
+  });
+});
+
+describe("wiredInto", () => {
+  it("names the capabilities wired into a node (a subagent's own)", () => {
+    const graph: Graph = {
+      schema_version: 1,
+      nodes: [
+        { id: "sub:sql", type: "subagent", position: { x: 0, y: 0 }, data: { role: "sql" } },
+        { id: "db:1", type: "database", position: { x: 0, y: 0 }, data: { connection_id: "c1" } },
+        {
+          id: "tool:calculator",
+          type: "tool",
+          position: { x: 0, y: 0 },
+          data: { key: "calculator" },
+        },
+        { id: "agent", type: "agent", position: { x: 0, y: 0 }, data: {} },
+      ],
+      edges: [
+        { source: "db:1", target: "sub:sql" },
+        { source: "tool:calculator", target: "sub:sql" },
+        { source: "sub:sql", target: "agent" },
+      ],
+    };
+    expect(wiredInto(graph, "sub:sql", { c1: "Shop PG" })).toEqual([
+      "Database: Shop PG",
+      "Tool: calculator",
+    ]);
+    expect(wiredInto(graph, "agent")).toEqual([]);
+    expect(wiredInto(graph, null)).toEqual([]);
   });
 });

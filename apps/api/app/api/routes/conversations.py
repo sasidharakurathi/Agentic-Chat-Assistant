@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from app.agent import interrupts
 from app.agent.events import ErrorEvent, sse_frame
+from app.api import ratelimit
 from app.api.deps import (
     AssistantCtx,
     ClientIP,
@@ -20,6 +21,7 @@ from app.api.deps import (
     SessionDep,
 )
 from app.api.errors import Conflict
+from app.config import settings
 from app.db.session import get_sessionmaker
 from app.logging import get_logger
 from app.models.conversation import ConversationStatus
@@ -35,7 +37,7 @@ from app.schemas.conversation import (
     RunOut,
     RunStep,
 )
-from app.services import chat
+from app.services import chat, trace
 
 router = APIRouter(tags=["conversations"])
 log = get_logger(__name__)
@@ -129,9 +131,14 @@ async def list_runs(
 async def get_run(run_id: uuid.UUID, ctx: ConversationCtx, session: SessionDep) -> RunDetail:
     """The trace detail (plan §8): the run row plus the tool calls it made."""
     run, message = await chat.get_run(session, ctx.conversation.id, run_id)
+    timeline, nodes, graph = await trace.build(session, run, message, ctx.conversation)
     return RunDetail(
         **RunOut.model_validate(run).model_dump(),
         steps=[RunStep.model_validate(s) for s in chat.run_steps(message)],
+        assistant_id=ctx.conversation.assistant_id,
+        timeline=timeline,
+        nodes=nodes,
+        graph=graph,
     )
 
 
@@ -182,6 +189,10 @@ async def post_message(
         # Refused before the stream opens, so it is a real 409 rather than an
         # error event inside a 200. An archived thread must not run the agent.
         raise Conflict("This conversation is archived", code="conversation_archived")
+    # Before the stream opens too, so a caller that is going too fast gets a
+    # real 429 (task 5.8): per person, and per org across its members.
+    await ratelimit.enforce("chat_user", str(ctx.membership.user_id), settings.rate_limit_chat_user)
+    await ratelimit.enforce("chat_org", str(ctx.conversation.org_id), settings.rate_limit_chat_org)
     conversation_id = ctx.conversation.id
     text = body.text
 

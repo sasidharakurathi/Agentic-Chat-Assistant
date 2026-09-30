@@ -23,17 +23,14 @@ import asyncio
 import re
 from dataclasses import dataclass
 
-import httpx
+from anthropic import AsyncAnthropic
 
+from app.agent import claude_api
 from app.agent.models import CONTEXTUALIZE_MODEL, PRICE_PER_MTOK
 from app.config import settings
 from app.logging import get_logger
-from app.rag.http_retry import post_with_retry
 
 log = get_logger(__name__)
-
-_API_URL = "https://api.anthropic.com/v1/messages"
-_API_VERSION = "2023-06-01"
 
 # Haiku, per the plan: this runs once per chunk, so a big model would make
 # ingestion cost more than everything else in the pipeline combined.
@@ -116,12 +113,12 @@ def _parse(text: str, n: int) -> list[str | None]:
 
 class HaikuContextualizer:
     """Haiku calls of up to `BATCH_SIZE` chunks each, bounded concurrency,
-    retried on rate limits, failures isolated to their batch.
+    failures isolated to their batch.
 
-    Plain ``httpx`` against the Messages API rather than the Agent SDK: this
-    is a one-shot completion with no tools, no session and no streaming, so
-    the SDK's machinery would be pure overhead. Same reasoning (and the same
-    shape) as ``rag/embedders/voyage.py``.
+    The Messages API through the official SDK (`agent/claude_api.py`), not
+    the Agent SDK: this is a one-shot completion with no tools, no session
+    and no streaming. The SDK retries rate limits and overloads itself,
+    waiting as long as the API asks.
     """
 
     name = _MODEL
@@ -148,59 +145,46 @@ class HaikuContextualizer:
         return round(rate_in * tokens_in / 1e6 + rate_out * tokens_out / 1e6, 6)
 
     async def _batch(
-        self, client: httpx.AsyncClient, doc: str, group: list[str]
+        self, api: AsyncAnthropic, doc: str, group: list[str]
     ) -> tuple[list[str | None], int, int, bool]:
         chunks = "\n".join(
             f'<chunk index="{i}">\n{chunk}\n</chunk>' for i, chunk in enumerate(group, 1)
         )
         async with self._sem:
             try:
-                resp = await post_with_retry(
-                    client,
-                    _API_URL,
-                    headers={
-                        "x-api-key": settings.anthropic_api_key,
-                        "anthropic-version": _API_VERSION,
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": self.model,
-                        "max_tokens": 150 * len(group),
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": _PROMPT.format(doc=doc, n=len(group), chunks=chunks),
-                            }
-                        ],
-                    },
+                response = await api.messages.create(
+                    model=self.model,
+                    max_tokens=150 * len(group),
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": _PROMPT.format(doc=doc, n=len(group), chunks=chunks),
+                        }
+                    ],
                 )
-                resp.raise_for_status()
-                body = resp.json()
             except Exception as exc:
-                # One batch failing must not cost the document its ingestion:
-                # missing prefixes degrade retrieval slightly, a raised
-                # exception loses the whole source.
-                log.warning("contextualize_batch_failed", error=str(exc)[:200])
+                # One batch failing (after the SDK's retries) must not cost the
+                # document its ingestion: missing prefixes degrade retrieval
+                # slightly, a raised exception loses the whole source.
+                log.warning("contextualize_batch_failed", error=type(exc).__name__)
                 return [None] * len(group), 0, 0, True
 
-        text = "".join(
-            part.get("text", "") for part in body.get("content", []) if isinstance(part, dict)
-        )
-        usage = body.get("usage") or {}
-        return (
-            _parse(text, len(group)),
-            int(usage.get("input_tokens", 0)),
-            int(usage.get("output_tokens", 0)),
-            False,
-        )
+        tokens_in, tokens_out = response.usage.input_tokens, response.usage.output_tokens
+        if response.stop_reason == "refusal":
+            # Whatever it wrote is no context line (and a one-chunk refusal
+            # would otherwise pass for one); the tokens were still billed.
+            log.warning("contextualize_batch_refused")
+            return [None] * len(group), tokens_in, tokens_out, True
+        text = "".join(b.text for b in response.content if b.type == "text")
+        return _parse(text, len(group)), tokens_in, tokens_out, False
 
     async def contextualize(self, document_text: str, chunks: list[str]) -> ContextResult:
         if not chunks:
             return ContextResult(prefixes=[])
         doc = document_text[:DOC_CONTEXT_CHARS]
         groups = self._groups(chunks)
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            results = await asyncio.gather(*(self._batch(client, doc, g) for g in groups))
+        async with claude_api.client(60.0) as api:
+            results = await asyncio.gather(*(self._batch(api, doc, g) for g in groups))
 
         prefixes = [p for r in results for p in r[0]]
         tokens_in = sum(r[1] for r in results)

@@ -188,6 +188,8 @@ export type AssistantConfig = Record<string, unknown> & {
 };
 
 export type ValidationIssue = S["GraphIssue"];
+/** A suggested one-click fix for a graph issue (task 5.11). */
+export type GraphFix = S["GraphFix"];
 export type ValidationResult = S["ValidationResult"];
 
 export type Assistant = S["AssistantSummary"];
@@ -231,6 +233,15 @@ export type Citation = {
   spans: [number, number][];
 };
 
+/** What a guardrail did during a turn (task 5.3): live as an event, and
+ *  saved with the answer as a block. */
+export type GuardrailFinding = {
+  check: "injection" | "exfiltration" | "pii" | "schema" | "budget";
+  where: "user_message" | "tool_input" | "tool_result";
+  detail: string;
+  tool?: string | null;
+};
+
 /** One entry of `Message.blocks`.
  *
  *  `type` is only present on messages written from task 2.9 onward — rows
@@ -246,7 +257,8 @@ export type MessageBlock =
       status?: string;
       output?: string;
     })
-  | ({ type: "citation" } & Citation);
+  | ({ type: "citation" } & Citation)
+  | ({ type: "guardrail" } & GuardrailFinding);
 
 /** `blocks` is untyped in the schema (a JSON list); the UI knows its shape. */
 export type ChatMessage = Omit<S["MessageOut"], "blocks"> & { blocks: MessageBlock[] };
@@ -330,6 +342,8 @@ export const meta = {
       allowed_models: string[];
       /** RAG_OFFLINE=1: web search is off on this instance. */
       offline?: boolean;
+      /** AI helpers call the real model and bill for it (else a free stand-in). */
+      real_model?: boolean;
     }>("/api/v1/meta/config-schema", { org: false }),
   graphSchema: () => request<GraphSchema>("/api/v1/meta/graph-schema", { org: false }),
 };
@@ -400,6 +414,14 @@ export const conversations = {
 };
 
 export type Run = S["RunOut"];
+/** A run step by step, with the canvas nodes it touched (task 5.9). */
+export type RunTrace = S["RunDetail"];
+export type TraceStep = S["TraceStep"];
+
+export const runs = {
+  trace: (conversationId: string, runId: string) =>
+    request<RunTrace>(`/api/v1/conversations/${conversationId}/runs/${runId}`),
+};
 
 export type DataSourceStatus = S["DataSourceStatus"];
 
@@ -457,7 +479,72 @@ export type McpTool = McpServer["tools"][number];
 export type McpRunnerStatus = S["McpRunnerStatus"];
 export type McpCheckResult = S["McpCheckResult"];
 export type McpPreset = S["McpPresetOut"];
+export type MemoryFile = S["MemoryFileOut"];
 export type SandboxLimits = S["SandboxLimits"];
+
+/** What the memory tool keeps about the signed-in user (task 5.2). */
+export const memories = {
+  list: (assistantId: string) =>
+    request<MemoryFile[]>(`/api/v1/assistants/${assistantId}/memories`),
+  clear: (assistantId: string) =>
+    request<{ deleted: number }>(`/api/v1/assistants/${assistantId}/memories`, {
+      method: "DELETE",
+    }),
+};
+
+export type PromptSuggestion = S["PromptSuggestion"];
+
+/** AI help for builders (Phase 5): suggestions only, nothing is saved. */
+export const assist = {
+  /** Draft a system prompt and rules from what the assistant is for (5.5). */
+  generatePrompt: (
+    assistantId: string,
+    body: { description: string; current_prompt?: string | null },
+  ) => request<PromptSuggestion>(`/api/v1/assistants/${assistantId}/prompt:generate`, { body }),
+  /** A whole starter pipeline for this assistant, from what it has (5.6). */
+  recommendPipeline: (assistantId: string, body: { description: string }) =>
+    request<PipelineSuggestion>(`/api/v1/assistants/${assistantId}/pipeline:recommend`, { body }),
+  /** The same before the assistant exists (the guided setup). */
+  recommendStarter: (body: { description: string; name?: string }) =>
+    request<PipelineSuggestion>("/api/v1/pipeline:recommend", { body }),
+};
+
+export type BudgetStatus = S["BudgetStatusOut"];
+export type Budgets = S["BudgetsOut"];
+export type BudgetLimits = { daily_usd: number | null; monthly_usd: number | null };
+export type UsageGroupBy = "assistant" | "model" | "conversation";
+export type UsageRow = S["UsageRollupRow"];
+
+/** Spend caps (task 5.7): anyone in the org reads them, admins set them. */
+export const budgets = {
+  org: (orgId: string) => request<Budgets>(`/api/v1/orgs/${orgId}/budgets`),
+  setOrg: (orgId: string, limits: BudgetLimits) =>
+    request<Budgets>(`/api/v1/orgs/${orgId}/budgets`, { method: "PUT", body: limits }),
+  /** The org's budgets and this assistant's own. */
+  assistant: (assistantId: string) => request<Budgets>(`/api/v1/assistants/${assistantId}/budget`),
+  setAssistant: (assistantId: string, limits: BudgetLimits) =>
+    request<Budgets>(`/api/v1/assistants/${assistantId}/budget`, { method: "PUT", body: limits }),
+};
+
+export const usage = {
+  rollup: (
+    orgId: string,
+    q: { group_by: UsageGroupBy; from?: string; to?: string; limit?: number },
+  ) => {
+    const params = new URLSearchParams({ group_by: q.group_by });
+    if (q.from) params.set("from", q.from);
+    if (q.to) params.set("to", q.to);
+    if (q.limit) params.set("limit", String(q.limit));
+    return request<{ group_by: UsageGroupBy; rows: UsageRow[] }>(
+      `/api/v1/orgs/${orgId}/usage?${params}`,
+    );
+  },
+};
+
+export type PipelineSuggestion = Omit<S["PipelineSuggestion"], "config" | "graph"> & {
+  config: AssistantConfig;
+  graph: Graph;
+};
 
 export const mcpServers = {
   list: (assistantId: string) =>
@@ -591,7 +678,20 @@ export type ChatEvent =
       expires_at: string | null;
     }
   | { type: "usage"; tokens_in: number; tokens_out: number; cost_usd: number }
-  | { type: "error"; code: string; message: string }
+  /** `retryable`: sending the message again may work (task 5.4). A
+   *  `refused` error is the model declining, not a failure. */
+  | { type: "error"; code: string; message: string; retryable?: boolean }
+  | ({ type: "guardrail" } & GuardrailFinding)
+  /** The conversation's new title, on its first turn (task 5.2). */
+  | { type: "title"; title: string }
+  /** A budget is 80% or more used (task 5.7); sent before the turn. */
+  | {
+      type: "budget";
+      scope: "org" | "assistant";
+      period: "day" | "month";
+      ratio: number;
+      message: string;
+    }
   | { type: "done"; message_id: string; run_id: string };
 
 export async function streamMessage(

@@ -74,30 +74,36 @@ export function toFlow(
   graph: Graph,
   issues: GraphIssues = { nodes: new Map(), edges: new Map() },
   sourceLabels: Record<string, string> = {},
+  /** The nodes a run touched (task 5.9): lit, and everything else dimmed.
+   *  Null when no run is being shown. */
+  highlight: Set<string> | null = null,
 ) {
-  const nodes: Node<StudioNodeData & { issues?: NodeIssues; sourceLabel?: string }>[] =
-    graph.nodes.map((n) => ({
-      id: n.id,
-      type: "studio",
-      position: n.position,
-      deletable: !STRUCTURAL_NODE_TYPES.has(n.type),
-      data: {
-        node: n,
-        issues: issues.nodes.get(n.id),
-        // Both kinds carry only an id in the graph; the label comes from the
-        // assistant's live sources/connections. Resolving `data_source` but
-        // not `database` is how a correctly configured database node ends up
-        // reading "unknown connection" on the canvas.
-        sourceLabel:
-          n.type === "data_source"
-            ? sourceLabels[String(n.data.data_source_id ?? "")]
-            : n.type === "database"
-              ? sourceLabels[String(n.data.connection_id ?? "")]
-              : n.type === "mcp_server"
-                ? sourceLabels[String(n.data.mcp_server_id ?? "")]
-                : undefined,
-      },
-    }));
+  const trace = (id: string) => (highlight ? (highlight.has(id) ? "lit" : "dim") : undefined);
+  const nodes: Node<
+    StudioNodeData & { issues?: NodeIssues; sourceLabel?: string; trace?: "lit" | "dim" }
+  >[] = graph.nodes.map((n) => ({
+    id: n.id,
+    type: "studio",
+    position: n.position,
+    deletable: !STRUCTURAL_NODE_TYPES.has(n.type),
+    data: {
+      node: n,
+      issues: issues.nodes.get(n.id),
+      trace: trace(n.id),
+      // Both kinds carry only an id in the graph; the label comes from the
+      // assistant's live sources/connections. Resolving `data_source` but
+      // not `database` is how a correctly configured database node ends up
+      // reading "unknown connection" on the canvas.
+      sourceLabel:
+        n.type === "data_source"
+          ? sourceLabels[String(n.data.data_source_id ?? "")]
+          : n.type === "database"
+            ? sourceLabels[String(n.data.connection_id ?? "")]
+            : n.type === "mcp_server"
+              ? sourceLabels[String(n.data.mcp_server_id ?? "")]
+              : undefined,
+    },
+  }));
   const edges: Edge[] = graph.edges.map((e, i) => {
     // Edge-scoped errors (an illegal connection) used to be dropped on the
     // floor: the web type did not even have the field.
@@ -106,7 +112,10 @@ export function toFlow(
       id: e.id ?? `e-${e.source}-${e.target}-${i}`,
       source: e.source,
       target: e.target,
-      animated: false,
+      // The run's path: both ends touched.
+      animated: Boolean(highlight?.has(e.source) && highlight?.has(e.target)),
+      ...(highlight &&
+        !(highlight.has(e.source) && highlight.has(e.target)) && { style: { opacity: 0.25 } }),
       ...(problems && {
         style: { stroke: "var(--destructive)", strokeWidth: 2 },
         label: problems[0],
@@ -124,6 +133,28 @@ export function patchNodeData(graph: Graph, nodeId: string, data: Record<string,
     nodes: graph.nodes.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, ...data } } : n)),
   };
 }
+
+/** What is wired into a node, by label: for a subagent, the capabilities
+ *  that are its own (task 5.10). */
+export function wiredInto(
+  graph: Graph,
+  nodeId: string | null,
+  sourceLabels: Record<string, string> = {},
+): string[] {
+  if (!nodeId) return [];
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  return graph.edges
+    .filter((e) => e.target === nodeId)
+    .map((e) => byId.get(e.source))
+    .filter((n): n is GraphNode => Boolean(n) && CAPABILITY_TYPES.has(n!.type))
+    .map((n) => {
+      const ref = String(n.data.connection_id ?? n.data.mcp_server_id ?? "");
+      const detail = n.type === "tool" ? String(n.data.key ?? "") : sourceLabels[ref];
+      return detail ? `${NODE_LABEL[n.type] ?? n.type}: ${detail}` : (NODE_LABEL[n.type] ?? n.type);
+    });
+}
+
+const CAPABILITY_TYPES = new Set(["knowledge_base", "database", "tool", "mcp_server"]);
 
 export const NODE_LABEL: Record<string, string> = {
   input: "Input",

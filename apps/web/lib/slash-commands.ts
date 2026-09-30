@@ -2,7 +2,7 @@
  *  sent to the model. */
 
 export type SlashCommandName =
-  "help" | "new" | "clear" | "rename" | "archive" | "retry" | "stop" | "cost" | "export";
+  "help" | "new" | "clear" | "rename" | "archive" | "retry" | "stop" | "cost" | "export" | "memory";
 
 export type SlashCommand = {
   name: SlashCommandName;
@@ -28,6 +28,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "stop", description: "Stop the turn that is running" },
   { name: "cost", description: "Show what this conversation has cost" },
   { name: "export", description: "Download this conversation as Markdown" },
+  { name: "memory", description: "See what this assistant remembers about you, or forget it" },
 ];
 
 export type ParsedInput =

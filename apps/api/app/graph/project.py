@@ -30,12 +30,14 @@ from app.graph.nodes import (
     OutputNode,
     OutputNodeData,
     Position,
+    RouterNode,
+    RouterNodeData,
     SubagentNode,
     SubagentNodeData,
     ToolNode,
     ToolNodeData,
 )
-from app.schemas.assistant_config import AssistantConfig, SubagentRole
+from app.schemas.assistant_config import AssistantConfig, Scoped, SubagentRole
 
 _COL_INPUT = 0.0
 _COL_PRE = 260.0
@@ -69,160 +71,204 @@ def _identity(node: AnyNode) -> tuple[str, ...]:
     return (node.type,) if ref is None else (node.type, ref)
 
 
-def _project(config: AssistantConfig, existing_graph: Graph | None) -> Graph:
-    existing: dict[tuple[str, ...], AnyNode] = {}
-    for n in existing_graph.nodes if existing_graph else []:
-        existing.setdefault(_identity(n), n)
+class _Projection:
+    """Builds the canonical graph for one config. Node ids and positions are
+    the user's where the same node is already on their canvas."""
 
-    def ident(identity: tuple[str, ...], default: str) -> str:
+    def __init__(self, config: AssistantConfig, existing_graph: Graph | None) -> None:
+        self.config = config
+        self.existing: dict[tuple[str, ...], AnyNode] = {}
+        for n in existing_graph.nodes if existing_graph else []:
+            self.existing.setdefault(_identity(n), n)
+        self.pos = {n.id: n.position for n in existing_graph.nodes} if existing_graph else {}
+        self.nodes: list[AnyNode] = []
+        self.edges: list[Edge] = []
+        self.agent = self.ident(("agent",), "agent")
+        # Subagent nodes' ids first: capabilities scoped to a subagent (task
+        # 5.10) are wired to its node.
+        roles: tuple[SubagentRole, ...] = ("retrieval", "sql", "research")
+        self.sub_ids: dict[SubagentRole, str] = {
+            role: self.ident(("subagent", role), f"sub:{role}")
+            for role in roles
+            if getattr(config.subagents, role)
+        }
+
+    def ident(self, identity: tuple[str, ...], default: str) -> str:
         """The node's id on the user's canvas if it is already there."""
-        found = existing.get(identity)
+        found = self.existing.get(identity)
         return found.id if found is not None else default
 
-    pos = {n.id: n.position for n in existing_graph.nodes} if existing_graph else {}
+    def at(self, node_id: str, x: float, y: float) -> Position:
+        return self.pos.get(node_id, Position(x=x, y=y))
 
-    def at(node_id: str, x: float, y: float) -> Position:
-        return pos.get(node_id, Position(x=x, y=y))
-
-    i_in = ident(("input",), "input")
-    i_guard = ident(("guardrail",), "guardrail")
-    i_mem = ident(("memory",), "memory")
-    i_agent = ident(("agent",), "agent")
-    i_out = ident(("output",), "output")
-
-    nodes: list = []
-    edges: list[Edge] = []
-
-    nodes.append(InputNode(id=i_in, position=at(i_in, _COL_INPUT, 0)))
-    nodes.append(
-        GuardrailNode(
-            id=i_guard,
-            position=at(i_guard, _COL_PRE, -120),
-            data=GuardrailNodeData(**config.guardrails.model_dump()),
+    def wire(self, node_id: str, cap: Scoped) -> None:
+        """A capability's edges: to the agent, and/or to its subagents."""
+        if cap.agent:
+            self.edges.append(Edge(source=node_id, target=self.agent))
+        self.edges.extend(
+            Edge(source=node_id, target=self.sub_ids[r]) for r in cap.subagents if r in self.sub_ids
         )
-    )
-    nodes.append(
-        MemoryNode(
-            id=i_mem,
-            position=at(i_mem, _COL_CAP, 420),
-            data=MemoryNodeData(**config.memory.model_dump()),
-        )
-    )
-    nodes.append(
-        AgentNode(
-            id=i_agent,
-            position=at(i_agent, _COL_AGENT, 0),
-            data=AgentNodeData(
-                system_prompt=config.system_prompt,
-                models=config.models.model_copy(deep=True),
-                approval_policy=config.approval_policy.model_copy(deep=True),
+
+    def pipeline(self) -> None:
+        """Input, guardrails, [router,] agent, output, and memory."""
+        config, at = self.config, self.at
+        i_in = self.ident(("input",), "input")
+        i_guard = self.ident(("guardrail",), "guardrail")
+        i_mem = self.ident(("memory",), "memory")
+        i_out = self.ident(("output",), "output")
+        self.nodes += [
+            InputNode(id=i_in, position=at(i_in, _COL_INPUT, 0)),
+            GuardrailNode(
+                id=i_guard,
+                position=at(i_guard, _COL_PRE, -120),
+                data=GuardrailNodeData(**config.guardrails.model_dump()),
             ),
-        )
-    )
-    nodes.append(
-        OutputNode(
-            id=i_out,
-            position=at(i_out, _COL_OUTPUT, 0),
-            data=OutputNodeData(citations=config.rag.citations),
-        )
-    )
-    edges += [
-        Edge(source=i_in, target=i_guard),
-        Edge(source=i_guard, target=i_agent),
-        Edge(source=i_mem, target=i_agent),
-        Edge(source=i_agent, target=i_out),
-    ]
-
-    y = 0.0
-    if config.rag.enabled:
-        i_kb = ident(("knowledge_base",), "kb")
-        nodes.append(
-            KnowledgeBaseNode(
-                id=i_kb,
-                position=at(i_kb, _COL_CAP, y),
-                data=KnowledgeBaseNodeData(
-                    embedder=config.rag.embedder,
-                    reranker=config.rag.reranker,
-                    chunking=config.rag.chunking.model_copy(deep=True),
-                    contextual_retrieval=config.rag.contextual_retrieval,
-                    retrieval=config.rag.retrieval.model_copy(deep=True),
-                    citations=config.rag.citations,
+            MemoryNode(
+                id=i_mem,
+                position=at(i_mem, _COL_CAP, 420),
+                data=MemoryNodeData(**config.memory.model_dump()),
+            ),
+            AgentNode(
+                id=self.agent,
+                position=at(self.agent, _COL_AGENT, 0),
+                data=AgentNodeData(
+                    system_prompt=config.system_prompt,
+                    models=config.models.model_copy(deep=True),
+                    approval_policy=config.approval_policy.model_copy(deep=True),
                 ),
+            ),
+            OutputNode(
+                id=i_out,
+                position=at(i_out, _COL_OUTPUT, 0),
+                data=OutputNodeData(citations=config.rag.citations),
+            ),
+        ]
+        self.edges += [
+            Edge(source=i_in, target=i_guard),
+            Edge(source=i_mem, target=self.agent),
+            Edge(source=self.agent, target=i_out),
+        ]
+        if not config.router.enabled:
+            self.edges.append(Edge(source=i_guard, target=self.agent))
+            return
+        # Between the guardrails and the agent: every message passes it.
+        i_router = self.ident(("router",), "router")
+        self.nodes.append(
+            RouterNode(
+                id=i_router,
+                position=at(i_router, _COL_SRC, -120),
+                data=RouterNodeData(model=config.models.router.model_copy(deep=True)),
             )
         )
-        edges.append(Edge(source=i_kb, target=i_agent))
-        y += 140
-        for i, sid in enumerate(config.rag.source_ids):
-            nid = ident(("data_source", sid), f"src:{sid}")
-            nodes.append(
-                DataSourceNode(
-                    id=nid,
-                    position=at(nid, _COL_SRC, i * 90),
-                    data=DataSourceNodeData(data_source_id=sid),
+        self.edges += [
+            Edge(source=i_guard, target=i_router),
+            Edge(source=i_router, target=self.agent),
+        ]
+
+    def capabilities(self) -> None:
+        config, at, ident = self.config, self.at, self.ident
+        y = 0.0
+        if config.rag.enabled:
+            i_kb = ident(("knowledge_base",), "kb")
+            self.nodes.append(
+                KnowledgeBaseNode(
+                    id=i_kb,
+                    position=at(i_kb, _COL_CAP, y),
+                    data=KnowledgeBaseNodeData(
+                        embedder=config.rag.embedder,
+                        reranker=config.rag.reranker,
+                        chunking=config.rag.chunking.model_copy(deep=True),
+                        contextual_retrieval=config.rag.contextual_retrieval,
+                        retrieval=config.rag.retrieval.model_copy(deep=True),
+                        citations=config.rag.citations,
+                    ),
                 )
             )
-            edges.append(Edge(source=nid, target=i_kb))
+            self.wire(i_kb, config.rag)
+            y += 140
+            for i, sid in enumerate(config.rag.source_ids):
+                nid = ident(("data_source", sid), f"src:{sid}")
+                self.nodes.append(
+                    DataSourceNode(
+                        id=nid,
+                        position=at(nid, _COL_SRC, i * 90),
+                        data=DataSourceNodeData(data_source_id=sid),
+                    )
+                )
+                self.edges.append(Edge(source=nid, target=i_kb))
 
-    for db in config.databases:
-        nid = ident(("database", db.connection_id), f"db:{db.connection_id}")
-        nodes.append(
-            DatabaseNode(
-                id=nid,
-                position=at(nid, _COL_CAP, y),
-                data=DatabaseNodeData(
-                    connection_id=db.connection_id,
-                    nl2sql=db.nl2sql,
-                    expose_write=db.expose_write,
-                ),
+        for db in config.databases:
+            nid = ident(("database", db.connection_id), f"db:{db.connection_id}")
+            self.nodes.append(
+                DatabaseNode(
+                    id=nid,
+                    position=at(nid, _COL_CAP, y),
+                    data=DatabaseNodeData(
+                        connection_id=db.connection_id,
+                        nl2sql=db.nl2sql,
+                        expose_write=db.expose_write,
+                    ),
+                )
             )
-        )
-        edges.append(Edge(source=nid, target=i_agent))
-        y += 120
+            self.wire(nid, db)
+            y += 120
 
-    for key, cfg, approval in _enabled_tools(config):
-        nid = ident(("tool", key), f"tool:{key}")
-        nodes.append(
-            ToolNode(
-                id=nid,
-                position=at(nid, _COL_CAP, y),
-                data=ToolNodeData(key=key, config=cfg, approval=approval),
+        for key, cfg, approval in _enabled_tools(config):
+            nid = ident(("tool", key), f"tool:{key}")
+            self.nodes.append(
+                ToolNode(
+                    id=nid,
+                    position=at(nid, _COL_CAP, y),
+                    data=ToolNodeData(key=key, config=cfg, approval=approval),
+                )
             )
-        )
-        edges.append(Edge(source=nid, target=i_agent))
-        y += 110
+            self.wire(nid, getattr(config.tools, key))
+            y += 110
 
-    for ref in config.mcp_servers:
-        nid = ident(("mcp_server", ref.id), f"mcp:{ref.id}")
-        nodes.append(
-            McpServerNode(
-                id=nid,
-                position=at(nid, _COL_CAP, y),
-                data=McpServerNodeData(
-                    mcp_server_id=ref.id,
-                    tool_allowlist=list(ref.tools),
-                    approval=ref.approval,
-                    tool_approvals=dict(ref.tool_approvals),
-                ),
+        for ref in config.mcp_servers:
+            nid = ident(("mcp_server", ref.id), f"mcp:{ref.id}")
+            self.nodes.append(
+                McpServerNode(
+                    id=nid,
+                    position=at(nid, _COL_CAP, y),
+                    data=McpServerNodeData(
+                        mcp_server_id=ref.id,
+                        tool_allowlist=list(ref.tools),
+                        approval=ref.approval,
+                        tool_approvals=dict(ref.tool_approvals),
+                    ),
+                )
             )
-        )
-        edges.append(Edge(source=nid, target=i_agent))
-        y += 110
+            self.wire(nid, ref)
+            y += 110
 
-    sy = 0.0
-    for role in ("retrieval", "sql", "research"):
-        if getattr(config.subagents, role):
-            nid = ident(("subagent", role), f"sub:{role}")
-            nodes.append(
+    def subagents(self) -> None:
+        sy = 0.0
+        for role, nid in self.sub_ids.items():
+            # The role's own model settings live on its node (task 5.1): the
+            # model without its turn limit, and the limit as the node's own.
+            own = self.config.subagents.models.get(role)
+            self.nodes.append(
                 SubagentNode(
                     id=nid,
-                    position=at(nid, _COL_SUB, sy),
-                    data=SubagentNodeData(role=role),
+                    position=self.at(nid, _COL_SUB, sy),
+                    data=SubagentNodeData(
+                        role=role,
+                        model=own.model_copy(update={"max_turns": None}) if own else None,
+                        max_turns=own.max_turns if own else None,
+                    ),
                 )
             )
-            edges.append(Edge(source=nid, target=i_agent))
+            self.edges.append(Edge(source=nid, target=self.agent))
             sy += 120
 
-    return Graph(nodes=nodes, edges=edges)
+
+def _project(config: AssistantConfig, existing_graph: Graph | None) -> Graph:
+    p = _Projection(config, existing_graph)
+    p.pipeline()
+    p.capabilities()
+    p.subagents()
+    return Graph(nodes=p.nodes, edges=p.edges)
 
 
 def _keep_user_wiring(config: AssistantConfig, canonical: Graph, existing: Graph) -> Graph:
@@ -288,7 +334,5 @@ def _enabled_tools(config: AssistantConfig) -> list[tuple[str, dict[str, object]
         out.append(("datetime", {}, "auto"))
     return out
 
-
-_ = SubagentRole  # keep the import meaningful for type readers
 
 __all__ = ["project_config"]

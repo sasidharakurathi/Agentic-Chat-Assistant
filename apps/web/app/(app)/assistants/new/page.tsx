@@ -5,14 +5,15 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
 import { AgentPanel, Field, GuardrailsPanel, MemoryPanel } from "@/components/config/panels";
+import { PipelineRecommend } from "@/components/config/PipelineRecommend";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { assistants, meta, type AssistantConfig } from "@/lib/api";
+import { assist, assistants, meta, type AssistantConfig, type PipelineSuggestion } from "@/lib/api";
 
 type Data = Record<string, unknown>;
 
-const STEPS = ["Basics", "Agent", "Guardrails", "Memory", "Review"] as const;
+const STEPS = ["Basics", "Pipeline", "Agent", "Guardrails", "Memory", "Review"] as const;
 type Step = (typeof STEPS)[number];
 
 export default function NewAssistantWizard() {
@@ -26,6 +27,8 @@ export default function NewAssistantWizard() {
   const [agentData, setAgentData] = useState<Data>({});
   const [guardrailsData, setGuardrailsData] = useState<Data>({});
   const [memoryData, setMemoryData] = useState<Data>({});
+  // The recommended starter pipeline (task 5.6), if the builder took one.
+  const [starter, setStarter] = useState<PipelineSuggestion | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -52,12 +55,15 @@ export default function NewAssistantWizard() {
     setError(null);
     try {
       const created = await assistants.create(name.trim(), description.trim());
+      // The starter pipeline, if one was taken, with the later steps' edits
+      // on top. Saving the config lays out the canvas.
+      const base = starter?.config ?? created.draft_config;
       const merged: AssistantConfig = {
-        ...created.draft_config,
-        system_prompt: (agentData.system_prompt as string) ?? created.draft_config.system_prompt,
-        models: (agentData.models as AssistantConfig["models"]) ?? created.draft_config.models,
-        guardrails: { ...created.draft_config.guardrails, ...guardrailsData },
-        memory: { ...(created.draft_config.memory as Data), ...memoryData },
+        ...base,
+        system_prompt: (agentData.system_prompt as string) ?? base.system_prompt,
+        models: (agentData.models as AssistantConfig["models"]) ?? base.models,
+        guardrails: { ...base.guardrails, ...guardrailsData },
+        memory: { ...(base.memory as Data), ...memoryData },
       };
       await assistants.putDraftConfig(created.id, merged);
       router.push(`/assistants/${created.id}/build`);
@@ -110,6 +116,12 @@ export default function NewAssistantWizard() {
           {current === "Basics" && (
             <CardDescription>What is this assistant called?</CardDescription>
           )}
+          {current === "Pipeline" && (
+            <CardDescription>
+              Optional: describe it and get a starter pipeline (knowledge base, tools, a system
+              prompt and rules) to look over. Or press Next for the basic one.
+            </CardDescription>
+          )}
           {current === "Agent" && (
             <CardDescription>
               Describe what it should do — this becomes its system prompt — and pick a model.
@@ -146,6 +158,35 @@ export default function NewAssistantWizard() {
             </div>
           )}
 
+          {current === "Pipeline" &&
+            (starter ? (
+              <div className="flex flex-col gap-3 text-sm">
+                <p>
+                  Using the recommended pipeline:{" "}
+                  {starter.capabilities.map((c) => c.label).join(", ") || "conversation only"}. The
+                  next steps show its prompt, rules and memory settings to adjust.
+                </p>
+                <div>
+                  <Button size="sm" variant="outline" onClick={() => setStarter(null)}>
+                    Choose again
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <PipelineRecommend
+                initialDescription={description}
+                request={(d) => assist.recommendStarter({ description: d, name: name.trim() })}
+                applyLabel="Use this pipeline"
+                onApply={(s) => {
+                  setStarter(s);
+                  setAgentData({ system_prompt: s.config.system_prompt, models: s.config.models });
+                  setGuardrailsData(s.config.guardrails as Data);
+                  setMemoryData(s.config.memory as Data);
+                  setStep((i) => i + 1);
+                }}
+              />
+            ))}
+
           {current === "Agent" && (
             <AgentPanel data={agentData} models={models} onChange={patch(setAgentData)} />
           )}
@@ -170,6 +211,14 @@ export default function NewAssistantWizard() {
                   <div>{description}</div>
                 </div>
               )}
+              <div>
+                <div className="text-muted-foreground text-xs">Pipeline</div>
+                <div>
+                  {starter
+                    ? starter.capabilities.map((c) => c.label).join(", ") || "Conversation only"
+                    : "Basic: no knowledge base or tools yet"}
+                </div>
+              </div>
               <div>
                 <div className="text-muted-foreground text-xs">Model</div>
                 <div>

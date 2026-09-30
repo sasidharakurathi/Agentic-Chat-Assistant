@@ -13,6 +13,7 @@ from app.api.deps import (
     EditableAssistantCtx,
     PageQuery,
     SessionDep,
+    per_user_limit,
 )
 from app.mcp.presets import PRESETS
 from app.schemas.common import Message, Page
@@ -29,6 +30,9 @@ from app.services import mcp_discovery, mcp_runner
 from app.services import mcp_servers as svc
 
 router = APIRouter(tags=["mcp-servers"])
+
+#: Reaches other systems or starts a job: limited per caller (task 5.8).
+HEAVY = per_user_limit("heavy", "rate_limit_heavy")
 
 
 @router.get("/assistants/{assistant_id}/mcp-servers", response_model=Page[McpServerSummary])
@@ -87,6 +91,7 @@ async def delete_server(
 
 @router.post(
     "/assistants/{assistant_id}/mcp-servers/{server_id}:health",
+    dependencies=[HEAVY],
     response_model=McpCheckResult,
 )
 async def check_server(
@@ -100,6 +105,7 @@ async def check_server(
 
 @router.post(
     "/assistants/{assistant_id}/mcp-servers/{server_id}:discover-tools",
+    dependencies=[HEAVY],
     response_model=McpCheckResult,
 )
 async def discover_tools(

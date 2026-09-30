@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -52,8 +51,10 @@ def _alembic(db_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _migrated_sqlite() -> Path:
-    db_path = Path(tempfile.mkdtemp(prefix="assistant-studio-mig-")) / "mig.db"
+def _migrated_sqlite(tmp_path: Path) -> Path:
+    # pytest's own temp directory: it keeps only the last few runs. A
+    # hand-made mkdtemp here left two folders behind on every run.
+    db_path = tmp_path / "mig.db"
     result = _alembic(db_path, "upgrade", "head")
     assert result.returncode == 0, result.stderr
     return db_path
@@ -63,8 +64,8 @@ def _migrated_sqlite() -> Path:
     not list(_VERSIONS_DIR.glob("[0-9]*.py")),
     reason="no migration revisions yet",
 )
-def test_alembic_upgrade_head_builds_schema() -> None:
-    db_path = _migrated_sqlite()
+def test_alembic_upgrade_head_builds_schema(tmp_path: Path) -> None:
+    db_path = _migrated_sqlite(tmp_path)
 
     engine = create_engine(f"sqlite:///{db_path}")
     tables = set(inspect(engine).get_table_names())
@@ -76,7 +77,7 @@ def test_alembic_upgrade_head_builds_schema() -> None:
     not list(_VERSIONS_DIR.glob("[0-9]*.py")),
     reason="no migration revisions yet",
 )
-def test_models_and_migrations_agree() -> None:
+def test_models_and_migrations_agree(tmp_path: Path) -> None:
     """`alembic check`: the migrated schema matches the models exactly (F-7).
 
     This is what catches a model change shipped without its migration, and
@@ -84,5 +85,5 @@ def test_models_and_migrations_agree() -> None:
     which the next autogenerate would silently drop. The Postgres side of the
     same check runs in `scripts/check.ps1` against the dev database, since
     the pgvector/GIN indexes only exist there."""
-    result = _alembic(_migrated_sqlite(), "check")
+    result = _alembic(_migrated_sqlite(tmp_path), "check")
     assert result.returncode == 0, result.stdout + result.stderr

@@ -10,6 +10,7 @@ from app import __version__
 from app.agent import approval_registry, interrupts
 from app.api.errors import register_exception_handlers
 from app.api.middleware import RequestContextMiddleware
+from app.api.ratelimit import RateLimitMiddleware
 from app.api.router import api_v1, root_router
 from app.config import settings
 from app.datasources import pool as datasource_pool
@@ -53,6 +54,9 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Innermost of the three: a 429 still gets a request id and CORS
+    # headers (a browser can't read a response without them).
+    app.add_middleware(RateLimitMiddleware)
     app.add_middleware(RequestContextMiddleware)
     app.add_middleware(
         CORSMiddleware,
@@ -60,7 +64,8 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["x-request-id"],
+        # Retry-After: so the web app can read how long a 429 asks it to wait.
+        expose_headers=["x-request-id", "retry-after"],
     )
 
     register_exception_handlers(app)

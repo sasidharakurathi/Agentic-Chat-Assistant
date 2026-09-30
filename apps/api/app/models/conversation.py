@@ -29,6 +29,8 @@ class RunStatus(enum.StrEnum):
     ok = "ok"
     error = "error"
     aborted = "aborted"
+    #: The model declined to answer (task 5.4), even after any fallback.
+    refused = "refused"
 
 
 class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -65,6 +67,20 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, default=0)
     token_usage: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     last_message_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    # ── long conversations (task 5.2, `agent/history.py`) ──
+    #: A rolling summary of every message up to `summary_through_at`.
+    summary: Mapped[str | None] = mapped_column(Text)
+    summary_through_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    #: Bumped each time the summary is rewritten.
+    summary_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    #: The summary version the current SDK session was started from. When it
+    #: is behind `summary_version`, the next turn starts a fresh session from
+    #: the summary instead of resuming the long one.
+    session_summary_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
 
 class Message(UUIDPrimaryKeyMixin, Base):
@@ -117,6 +133,13 @@ class Run(UUIDPrimaryKeyMixin, Base):
     tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, default=0)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
+    #: Why the main loop stopped ("end_turn", "refusal", ...; task 5.4).
+    stop_reason: Mapped[str | None] = mapped_column(String(40))
+    #: Set when the fallback model answered instead of the main one.
+    fallback_model: Mapped[str | None] = mapped_column(String(80))
+    #: How the router sorted the message, when one is wired in (task 5.10):
+    #: "simple", "normal" or "hard"; `effort` is what the turn ran at.
+    route: Mapped[str | None] = mapped_column(String(20))
     status: Mapped[RunStatus] = mapped_column(
         SAEnum(RunStatus, name="run_status", native_enum=False, length=20),
         nullable=False,

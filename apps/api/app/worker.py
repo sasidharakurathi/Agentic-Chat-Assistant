@@ -23,6 +23,7 @@ from app.db.session import get_sessionmaker
 from app.logging import configure_logging, get_logger
 from app.observability.otel import setup_tracing, shutdown_tracing
 from app.rag.ingest import ingest_data_source
+from app.services import conversation_memory
 
 log = get_logger(__name__)
 
@@ -72,6 +73,13 @@ async def refresh_schema_job(ctx: dict[str, Any], connection_id: str) -> None:
 MCP_SWEEP_CONCURRENCY = 4
 
 
+async def summarize_conversation_job(
+    ctx: dict[str, Any], conversation_id: str, version: int
+) -> None:
+    """Fold a long conversation's older messages into its summary (task 5.2)."""
+    await conversation_memory.summarize(uuid.UUID(conversation_id), version)
+
+
 async def mcp_health_sweep(ctx: dict[Any, Any], *_args: Any, **_kwargs: Any) -> None:
     """Check every enabled remote (http/sse) MCP server, so the MCP tab shows
     a server that went down without anyone pressing Check (plan §7.2).
@@ -116,6 +124,7 @@ class WorkerSettings:
         # simply cancelled mid-way.
         func(ingest_data_source_job, timeout=settings.ingest_job_timeout_s),
         refresh_schema_job,
+        summarize_conversation_job,
     ]
     cron_jobs: ClassVar = [
         cron(mcp_health_sweep, minute={0, 15, 30, 45}, run_at_startup=False, timeout=600),
@@ -125,4 +134,10 @@ class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
 
 
-__all__ = ["WorkerSettings", "ingest_data_source_job", "mcp_health_sweep", "refresh_schema_job"]
+__all__ = [
+    "WorkerSettings",
+    "ingest_data_source_job",
+    "mcp_health_sweep",
+    "refresh_schema_job",
+    "summarize_conversation_job",
+]

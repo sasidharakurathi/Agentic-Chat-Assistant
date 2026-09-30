@@ -5,11 +5,16 @@ from typing import Literal
 
 from app.schemas.common import ApiModel
 
-GroupBy = Literal["assistant", "model"]
+GroupBy = Literal["assistant", "model", "conversation"]
 
 
 class UsageRollupRow(ApiModel):
     group_key: str | None
+    #: The assistant's name, the conversation's title, or the model id; None
+    #: when the assistant or conversation has been deleted.
+    label: str | None = None
+    #: For a conversation, its assistant's name.
+    detail: str | None = None
     event_count: int
     tokens_in: int
     tokens_out: int

@@ -103,13 +103,14 @@ class McpServerNodeData(_Strict):
 
 
 class SubagentNodeData(_Strict):
-    """`model` and `max_turns` override the assistant's subagent model role
-    (`models.subagent`); None keeps it. They used to be accepted and then
-    dropped by compile."""
+    """`model` and `max_turns` are this role's own model settings
+    (`subagents.models[role]`, task 5.1); both None keeps the shared subagent
+    role (`models.subagent`). The limit matches `ModelSpec.max_turns`, so any
+    config projects onto a valid node."""
 
     role: SubagentRole
     model: ModelSpec | None = None
-    max_turns: int | None = Field(default=None, ge=1, le=100)
+    max_turns: int | None = Field(default=None, ge=1, le=200)
 
 
 class AgentNodeData(_Strict):

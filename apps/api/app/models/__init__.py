@@ -8,6 +8,7 @@ from app.models.api_token import ApiToken
 from app.models.approval import Approval, ApprovalRisk, ApprovalStatus
 from app.models.assistant import Assistant, AssistantStatus, AssistantVersion
 from app.models.audit_log import AuditLog
+from app.models.budget import Budget, BudgetPeriod
 from app.models.conversation import (
     Conversation,
     ConversationStatus,
@@ -29,6 +30,7 @@ from app.models.integration import (
 )
 from app.models.invite import Invite
 from app.models.membership import Membership
+from app.models.memory import MemoryFile
 from app.models.organization import Organization
 from app.models.rag import Chunk, DataSource, DataSourceStatus, DataSourceType, Document
 from app.models.refresh_token import RefreshToken
@@ -45,6 +47,8 @@ __all__ = [
     "AssistantStatus",
     "AssistantVersion",
     "AuditLog",
+    "Budget",
+    "BudgetPeriod",
     "Chunk",
     "Conversation",
     "ConversationStatus",
@@ -62,6 +66,7 @@ __all__ = [
     "McpTransport",
     "MemberRole",
     "Membership",
+    "MemoryFile",
     "Message",
     "MessageRole",
     "Organization",

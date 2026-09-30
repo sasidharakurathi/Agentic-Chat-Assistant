@@ -3,23 +3,35 @@
 import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
-import type { Graph, ValidationResult } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import type { Graph, GraphFix, ValidationResult } from "@/lib/api";
 import { NODE_LABEL } from "@/components/canvas/graph-sync";
+import { cn } from "@/lib/utils";
 
-/** Every validation message, readable and clickable (tasks 1.3 / 1.14).
+/** Every validation message, readable and clickable (tasks 1.3 / 1.14), with
+ *  a one-click fix where there is a safe one (task 5.11).
  *
  *  The API always returned messages; the UI only ever showed counts, plus a
  *  red border on some nodes. A graph-level error (a duplicate node, a cycle,
  *  a missing agent) had no node to border, so it was invisible apart from
- *  "1 error(s)". Clicking an item with a node selects it on the canvas. */
+ *  "1 error(s)". Clicking an item with a node selects it on the canvas.
+ *
+ *  `floating` is the canvas overlay; otherwise it sits in a page (Panels). */
 export function ValidationList({
   graph,
   validation,
   onSelectNode,
+  onFix,
+  floating = true,
+  busy = false,
 }: {
   graph: Graph;
   validation: ValidationResult;
-  onSelectNode: (id: string) => void;
+  onSelectNode?: (id: string) => void;
+  /** Apply a suggested fix; the page saves the graph. */
+  onFix?: (fix: GraphFix) => void;
+  floating?: boolean;
+  busy?: boolean;
 }) {
   const [open, setOpen] = useState(true);
   const items = [
@@ -36,9 +48,17 @@ export function ValidationList({
     }
     return "Pipeline";
   };
+  const fixable = items.filter((i) => i.fix).length;
 
   return (
-    <div className="border-border bg-card/95 absolute right-3 bottom-3 z-10 w-80 rounded-lg border text-xs shadow-md backdrop-blur">
+    <div
+      className={cn(
+        "border-border rounded-lg border text-xs",
+        floating
+          ? "bg-card/95 absolute right-3 bottom-3 z-10 w-80 shadow-md backdrop-blur"
+          : "bg-card",
+      )}
+    >
       <button
         type="button"
         className="flex w-full items-center justify-between px-3 py-2 font-medium"
@@ -49,18 +69,21 @@ export function ValidationList({
           {validation.errors.length > 0
             ? `${validation.errors.length} error(s) block publishing`
             : `${validation.warnings.length} warning(s)`}
+          {fixable > 0 && (
+            <span className="text-muted-foreground font-normal"> · {fixable} with a fix</span>
+          )}
         </span>
         <span className="text-muted-foreground">{open ? "Hide" : "Show"}</span>
       </button>
       {open && (
-        <ul className="border-border max-h-64 divide-y overflow-auto border-t">
+        <ul className={cn("border-border divide-y overflow-auto border-t", floating && "max-h-64")}>
           {items.map((i, k) => (
-            <li key={`${i.level}-${i.code}-${k}`}>
+            <li key={`${i.level}-${i.code}-${k}`} className="px-3 py-2">
               <button
                 type="button"
-                disabled={!i.node_id}
-                onClick={() => i.node_id && onSelectNode(i.node_id)}
-                className="hover:bg-muted/60 w-full px-3 py-2 text-left disabled:cursor-default"
+                disabled={!i.node_id || !onSelectNode}
+                onClick={() => i.node_id && onSelectNode?.(i.node_id)}
+                className="hover:bg-muted/60 -mx-1 w-full rounded px-1 text-left disabled:cursor-default disabled:hover:bg-transparent"
               >
                 <div className="flex items-center gap-2">
                   <Badge variant={i.level === "error" ? "destructive" : "warning"}>{i.level}</Badge>
@@ -68,6 +91,17 @@ export function ValidationList({
                 </div>
                 <p className="mt-1">{i.message}</p>
               </button>
+              {i.fix && onFix && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-1.5 h-7"
+                  disabled={busy}
+                  onClick={() => onFix(i.fix!)}
+                >
+                  {i.fix.label}
+                </Button>
+              )}
             </li>
           ))}
         </ul>

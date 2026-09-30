@@ -5,7 +5,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Form, UploadFile, status
 
-from app.api.deps import AssistantCtx, ClientIP, EditableAssistantCtx, PageQuery, SessionDep
+from app.api.deps import (
+    AssistantCtx,
+    ClientIP,
+    EditableAssistantCtx,
+    PageQuery,
+    SessionDep,
+    per_user_limit,
+)
 from app.models.rag import DataSourceStatus
 from app.rag import progress as ingest_progress
 from app.schemas.common import Message, Page
@@ -18,6 +25,9 @@ from app.schemas.data_source import (
 from app.services import data_sources as svc
 
 router = APIRouter(tags=["data-sources"])
+
+#: Reaches other systems or starts a job: limited per caller (task 5.8).
+HEAVY = per_user_limit("heavy", "rate_limit_heavy")
 
 
 @router.get("/assistants/{assistant_id}/data-sources", response_model=Page[DataSourceSummary])
@@ -41,6 +51,7 @@ async def list_data_sources(
 
 @router.post(
     "/assistants/{assistant_id}/data-sources",
+    dependencies=[HEAVY],
     response_model=DataSourceSummary,
     status_code=status.HTTP_201_CREATED,
 )
@@ -73,6 +84,7 @@ async def create_data_source(
 
 @router.post(
     "/assistants/{assistant_id}/data-sources/upload",
+    dependencies=[HEAVY],
     response_model=DataSourceSummary,
     status_code=status.HTTP_201_CREATED,
 )
@@ -128,6 +140,7 @@ async def data_source_content_url(
 
 @router.post(
     "/assistants/{assistant_id}/data-sources/{data_source_id}:reindex",
+    dependencies=[HEAVY],
     response_model=DataSourceSummary,
 )
 async def reindex_data_source(

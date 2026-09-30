@@ -16,6 +16,7 @@ const ACCENT: Record<string, string> = {
   tool: "border-node-tool",
   mcp_server: "border-node-mcp",
   subagent: "border-node-subagent",
+  router: "border-node-router",
 };
 
 export function StudioNode({ data, selected }: NodeProps) {
@@ -30,6 +31,8 @@ export function StudioNode({ data, selected }: NodeProps) {
   // node itself only stores an id, and "Data source / 8f3a-…" tells nobody
   // which document they wired in.
   const label = (data as { sourceLabel?: string }).sourceLabel;
+  // A run shown on the canvas (task 5.9): the nodes it touched stand out.
+  const trace = (data as { trace?: "lit" | "dim" }).trace;
   const t = node.type;
   const showTarget = t !== "input";
   const showSource = t !== "output";
@@ -40,18 +43,24 @@ export function StudioNode({ data, selected }: NodeProps) {
       : t === "tool"
         ? String(node.data.key ?? "")
         : t === "subagent"
-          ? String(node.data.role ?? "")
-          : t === "data_source"
-            ? (label ?? "unknown source")
-            : t === "database"
-              ? (label ?? "unknown connection")
-              : t === "mcp_server"
-                ? `${label ?? "unknown server"} · ${
-                    ((node.data.tool_allowlist as string[] | undefined) ?? []).length
-                  } tools allowed`
-                : t === "knowledge_base"
-                  ? `${(node.data.retrieval as { rerank_top_n?: number })?.rerank_top_n ?? "?"} results`
-                  : "";
+          ? `${String(node.data.role ?? "")}${
+              (node.data.model as { model?: string } | null)?.model
+                ? ` · ${(node.data.model as { model: string }).model}`
+                : ""
+            }`
+          : t === "router"
+            ? `routes effort · ${String((node.data.model as { model?: string })?.model ?? "")}`
+            : t === "data_source"
+              ? (label ?? "unknown source")
+              : t === "database"
+                ? (label ?? "unknown connection")
+                : t === "mcp_server"
+                  ? `${label ?? "unknown server"} · ${
+                      ((node.data.tool_allowlist as string[] | undefined) ?? []).length
+                    } tools allowed`
+                  : t === "knowledge_base"
+                    ? `${(node.data.retrieval as { rerank_top_n?: number })?.rerank_top_n ?? "?"} results`
+                    : "";
 
   return (
     <div
@@ -60,6 +69,8 @@ export function StudioNode({ data, selected }: NodeProps) {
         "bg-card relative min-w-[150px] rounded-lg border-2 px-3 py-2 shadow-sm",
         ACCENT[t] ?? "border-border",
         selected && "ring-ring ring-2",
+        trace === "lit" && "ring-primary shadow-md ring-2 ring-offset-2",
+        trace === "dim" && "opacity-35",
         warnings.length > 0 && "border-warning",
         errors.length > 0 && "border-destructive",
       )}

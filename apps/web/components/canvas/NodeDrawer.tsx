@@ -1,5 +1,7 @@
 "use client";
 
+import type { ReactNode } from "react";
+
 import { STRUCTURAL_NODE_TYPES } from "@/components/canvas/graph-sync";
 import { NODE_LABEL } from "@/components/canvas/graph-sync";
 import {
@@ -10,6 +12,8 @@ import {
   GuardrailsPanel,
   KnowledgeBasePanel,
   MemoryPanel,
+  RouterNodePanel,
+  SubagentNodePanel,
 } from "@/components/config/panels";
 import { McpServerNodePanel } from "@/components/config/mcp-node";
 import { TOOL_LABEL, ToolNodePanel, type ApprovalMode } from "@/components/config/tool-settings";
@@ -27,6 +31,9 @@ export function NodeDrawer({
   httpPolicy = "require",
   mcpServers = [],
   mcpDefault = "require",
+  agentAssist,
+  sharedSubagentModel = "",
+  wiredIn = [],
   onPatch,
   onDelete,
   onClose,
@@ -41,6 +48,12 @@ export function NodeDrawer({
   mcpServers?: McpServer[];
   /** The assistant's `mcp_default` rule. */
   mcpDefault?: ApprovalMode;
+  /** "Write it for me" under the agent node's system prompt (task 5.5). */
+  agentAssist?: ReactNode;
+  /** The shared subagent model, which a subagent node follows by default. */
+  sharedSubagentModel?: string;
+  /** What is wired into the selected node, by label (task 5.10). */
+  wiredIn?: string[];
   onPatch: (patch: Record<string, unknown>) => void;
   onDelete?: (id: string) => void;
   onClose: () => void;
@@ -70,7 +83,9 @@ export function NodeDrawer({
       </div>
 
       <div className="flex-1">
-        {t === "agent" && <AgentPanel data={node.data} models={models} onChange={onPatch} />}
+        {t === "agent" && (
+          <AgentPanel data={node.data} models={models} onChange={onPatch} assist={agentAssist} />
+        )}
         {t === "guardrail" && <GuardrailsPanel data={node.data} onChange={onPatch} />}
         {t === "memory" && <MemoryPanel data={node.data} onChange={onPatch} />}
         {t === "knowledge_base" && <KnowledgeBasePanel data={node.data} onChange={onPatch} />}
@@ -111,11 +126,16 @@ export function NodeDrawer({
             onChange={onPatch}
           />
         )}
-        {["subagent", "router"].includes(t) && (
-          <p className="text-muted-foreground text-sm">
-            This node type gets an editor in a later phase.
-          </p>
+        {t === "subagent" && (
+          <SubagentNodePanel
+            data={node.data}
+            models={models}
+            sharedModel={sharedSubagentModel}
+            wiredIn={wiredIn}
+            onChange={onPatch}
+          />
         )}
+        {t === "router" && <RouterNodePanel data={node.data} models={models} onChange={onPatch} />}
       </div>
 
       {canDelete && (

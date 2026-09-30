@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import ForeignKey, Integer, Numeric, String, func
+from sqlalchemy import ForeignKey, Index, Integer, Numeric, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, UUIDPrimaryKeyMixin
@@ -27,6 +27,12 @@ class UsageKind(enum.StrEnum):
 
 class UsageEvent(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "usage_events"
+    #: Budgets sum an org's, or one assistant's, spend since the start of the
+    #: day or month on every turn (task 5.7).
+    __table_args__ = (
+        Index("ix_usage_events_org_created", "org_id", "created_at"),
+        Index("ix_usage_events_assistant_created", "assistant_id", "created_at"),
+    )
 
     org_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True

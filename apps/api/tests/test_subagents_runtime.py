@@ -191,9 +191,13 @@ def test_a_subagent_nodes_overrides_are_compiled_not_dropped() -> None:
             {"max_turns": 4, "model": {"model": "claude-sonnet-5", "effort": "medium"}}
         )
     )
-    assert config.models.subagent.model == "claude-sonnet-5"
-    assert config.models.subagent.max_turns == 4
-    assert build_subagent_specs(config)[0].max_turns == 4
+    # The node's settings are its role's own (task 5.1); the shared subagent
+    # role, which the other subagents use, is left alone.
+    own = config.subagents.models["retrieval"]
+    assert (own.model, own.max_turns) == ("claude-sonnet-5", 4)
+    assert config.models.subagent.model == "claude-haiku-4-5"
+    (spec,) = build_subagent_specs(config)
+    assert (spec.model, spec.max_turns) == ("claude-sonnet-5", 4)
 
 
 def test_a_subagent_node_without_overrides_keeps_the_role() -> None:

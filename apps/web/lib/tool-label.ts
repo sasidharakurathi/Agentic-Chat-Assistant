@@ -15,3 +15,14 @@ export function toolShortName(name: string): string {
   const m = /^mcp__[^_]+(?:-[^_]+)*__(.+)$/.exec(name);
   return m ? m[1] : name;
 }
+
+/** A delegation call names its subagent (task 5.1: there are three now):
+ *  `Agent` with `{subagent_type: "sql"}` -> `sql subagent`. Null for any
+ *  other call. */
+export function subagentLabel(
+  name: string,
+  input: Record<string, unknown> | undefined,
+): string | null {
+  const role = input?.subagent_type;
+  return name === "Agent" && typeof role === "string" && role ? `${role} subagent` : null;
+}

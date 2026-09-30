@@ -36,6 +36,7 @@ export function Canvas({
   onConnect,
   onDeleteNodes,
   onDeleteEdges,
+  highlight = null,
 }: {
   graph: Graph;
   /** Wiring rules from `GET /meta/graph-schema` — the validator's own
@@ -51,11 +52,13 @@ export function Canvas({
   onConnect?: (source: string, target: string) => void;
   onDeleteNodes?: (ids: string[]) => void;
   onDeleteEdges?: (edges: { source: string; target: string }[]) => void;
+  /** Nodes to light up: a run's, or one step's (task 5.9). */
+  highlight?: Set<string> | null;
 }) {
   const { resolvedTheme } = useTheme();
   const flow = useMemo(
-    () => toFlow(graph, issues, sourceLabels ?? {}),
-    [graph, issues, sourceLabels],
+    () => toFlow(graph, issues, sourceLabels ?? {}, highlight),
+    [graph, issues, sourceLabels, highlight],
   );
 
   // React Flow's own copy of the nodes and edges. It reports each node's

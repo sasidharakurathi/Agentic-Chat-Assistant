@@ -52,6 +52,7 @@ from app.rag.parsers import ParsedDocument, parse_by_mime, parse_text
 from app.rag.usage import Meter
 from app.rag.vectorstore import ChunkRecord, PgVectorStore
 from app.schemas.assistant_config import AssistantConfig, RagConfig
+from app.services import budgets
 from app.storage import get_object
 
 #: Texts per embedding step (and progress report).
@@ -273,6 +274,14 @@ async def _context_prefixes(
         report.context_skipped = (
             f"estimated ${estimate:.2f} for {len(texts)} chunks is over the "
             f"${budget:.2f} per-source budget (INGEST_CONTEXT_BUDGET_USD)"
+        )
+        return prefixes, None
+    # Nor past what's left of the org's or the assistant's budget (task 5.7).
+    tight = (await budgets.gate(session, source.org_id, source.assistant_id)).tightest
+    if tight is not None and estimate > tight.remaining_usd:
+        report.context_skipped = (
+            f"estimated {budgets.usd(estimate)} for {len(texts)} chunks is more than the "
+            f"{budgets.usd(tight.remaining_usd)} left in the {tight.short}"
         )
         return prefixes, None
 

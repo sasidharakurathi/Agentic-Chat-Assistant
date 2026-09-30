@@ -185,6 +185,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
             onNewChat={() => void newChat()}
             onRename={(title) => current && void rename(current, title)}
             onArchive={() => current && void archive(current)}
+            onTitle={(title) =>
+              setRows((r) => r.map((x) => (x.id === active ? { ...x, title } : x)))
+            }
           />
         ) : (
           <div className="flex h-full items-center justify-center">

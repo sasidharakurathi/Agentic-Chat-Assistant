@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { formatCountdown, inputAddsDetail, URGENT_S } from "@/lib/approvals";
 import { toolLabel } from "@/lib/tool-label";
 import { ApiError, approvals, type ApprovalRisk } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -85,7 +86,17 @@ export function ApprovalCard({
         <div className="flex items-center gap-2">
           <Badge variant={RISK_VARIANT[approval.risk]}>{approval.risk} risk</Badge>
           {secondsLeft !== null && !expired && (
-            <span className="text-muted-foreground tabular-nums">{secondsLeft}s</span>
+            <span
+              className={cn(
+                "tabular-nums",
+                secondsLeft <= URGENT_S
+                  ? "text-destructive font-semibold"
+                  : "text-muted-foreground",
+              )}
+              aria-label={`${formatCountdown(secondsLeft)} left to answer`}
+            >
+              {formatCountdown(secondsLeft)}
+            </span>
           )}
         </div>
       </div>
@@ -96,6 +107,19 @@ export function ApprovalCard({
         <pre className="border-border bg-background mt-2 overflow-auto rounded border px-2 py-1.5 font-mono text-[11px] whitespace-pre-wrap">
           {approval.rationale}
         </pre>
+      )}
+
+      {/* The full input, when it says more than the statement above: an
+          MCP tool's arguments, an HTTP request's body (task 5.9). */}
+      {inputAddsDetail(approval.rationale ?? "", approval.input) && (
+        <details className="mt-2">
+          <summary className="text-muted-foreground cursor-pointer">
+            Everything it would send
+          </summary>
+          <pre className="border-border bg-background mt-1 max-h-48 overflow-auto rounded border px-2 py-1.5 font-mono text-[11px] whitespace-pre-wrap">
+            {JSON.stringify(approval.input, null, 2)}
+          </pre>
+        </details>
       )}
 
       {expired ? (

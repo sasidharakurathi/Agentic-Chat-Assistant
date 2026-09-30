@@ -8,6 +8,8 @@ import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import type { AssistantConfig, DbPermissions, EffortLevel } from "@/lib/api";
+import { useOfflineMode } from "@/lib/instance";
+import { carryShared, pickModel, selectedModel, setTurns } from "@/lib/subagent-models";
 import { cn } from "@/lib/utils";
 
 type Data = Record<string, unknown>;
@@ -92,10 +94,13 @@ export function AgentPanel({
   data,
   models,
   onChange,
+  assist,
 }: {
   data: Data;
   models: string[];
   onChange: (patch: Data) => void;
+  /** "Write it for me" (task 5.5), where the assistant already exists. */
+  assist?: ReactNode;
 }) {
   const modelsObj = (data.models as Data) ?? {};
   const main = (modelsObj.main as Data) ?? {};
@@ -105,11 +110,15 @@ export function AgentPanel({
     <div className="flex flex-col gap-4">
       <Field label="System prompt">
         <Textarea
+          // Remounts when the saved prompt changes from outside (an accepted
+          // draft), which an uncontrolled textarea would otherwise not show.
+          key={s(data.system_prompt)}
           rows={7}
           defaultValue={s(data.system_prompt)}
           onBlur={(e) => onChange({ system_prompt: e.target.value })}
         />
       </Field>
+      {assist}
       <Field label="Main model">
         <Select
           value={s(main.model)}
@@ -204,6 +213,7 @@ export function GuardrailsPanel({
     <div className="flex flex-col gap-3">
       <Field label="Rules" hint="One rule per line. Injected into the system prompt.">
         <Textarea
+          key={rules.join("\n")}
           rows={5}
           defaultValue={rules.join("\n")}
           onBlur={(e) =>
@@ -217,15 +227,25 @@ export function GuardrailsPanel({
         />
       </Field>
       <Toggle
-        label="Redact PII in tool inputs"
+        label="Redact personal data"
         checked={b(data.pii_redaction)}
         onChange={(v) => onChange({ pii_redaction: v })}
       />
+      <p className="text-muted-foreground -mt-1 text-xs">
+        Emails, phone numbers, card numbers and ID numbers are taken out of web searches and of
+        traces. Your own databases and allowlisted systems still get them: looking someone up is
+        their job.
+      </p>
       <Toggle
-        label="Scan tool inputs for injection"
+        label="Guard against prompt injection"
         checked={b(data.injection_scan)}
         onChange={(v) => onChange({ injection_scan: v })}
       />
+      <p className="text-muted-foreground -mt-1 text-xs">
+        Messages that try to override or reveal the instructions are answered under the normal
+        rules. Tool results that read like instructions reach the model marked as data. Nothing
+        shaped like a credential is sent to another system. Each shows as a note in chat.
+      </p>
       <Toggle
         label="Tell the model retrieved content is untrusted data"
         checked={b(data.untrusted_content_notice)}
@@ -240,63 +260,377 @@ export function GuardrailsPanel({
   );
 }
 
+/** What the assistant remembers (task 5.2): each setting says what it does,
+ *  now that all four are enforced. */
 export function MemoryPanel({ data, onChange }: { data: Data; onChange: (patch: Data) => void }) {
+  const persist = data.persist_history !== false;
   return (
     <div className="flex flex-col gap-3">
-      <Field label="Summarize after N tokens">
-        <Input
-          type="number"
-          defaultValue={s(data.summarize_after_tokens, "120000")}
-          onBlur={(e) => onChange({ summarize_after_tokens: Number(e.target.value) })}
-        />
-      </Field>
       <Toggle
-        label="Persist conversation history"
-        checked={b(data.persist_history)}
+        label="Remember earlier messages"
+        checked={persist}
         onChange={(v) => onChange({ persist_history: v })}
       />
+      <p className="text-muted-foreground -mt-1 text-xs">
+        {persist
+          ? "Each message is answered with the conversation so far."
+          : "Each message is answered on its own; earlier ones are not shown to the model. They are still saved."}
+      </p>
+      {persist && (
+        <Field
+          label="Summarize after (tokens)"
+          hint="When a conversation grows past this, its older part is replaced by a summary and only recent messages are kept word for word. 8,000 to 900,000. Summaries are written by the background worker."
+        >
+          <Input
+            type="number"
+            min={8000}
+            max={900000}
+            step={1000}
+            defaultValue={s(data.summarize_after_tokens, "120000")}
+            onBlur={(e) => {
+              const n = Math.min(900000, Math.max(8000, Math.round(Number(e.target.value) || 0)));
+              e.target.value = String(n);
+              onChange({ summarize_after_tokens: n });
+            }}
+          />
+        </Field>
+      )}
       <Toggle
-        label="Auto-generate conversation titles"
+        label="Name conversations automatically"
         checked={b(data.auto_title)}
         onChange={(v) => onChange({ auto_title: v })}
       />
+      <p className="text-muted-foreground -mt-1 text-xs">
+        The first message names the conversation, unless someone renames it first.
+      </p>
       <Toggle
-        label="Enable the memory tool"
+        label="Memory tool"
         checked={b(data.memory_tool)}
         onChange={(v) => onChange({ memory_tool: v })}
       />
+      <p className="text-muted-foreground -mt-1 text-xs">
+        Lets the assistant keep notes about each person between conversations: their preferences,
+        facts, where work stands. Notes are private to that person, who can see and clear them with
+        /memory in chat.
+      </p>
     </div>
   );
 }
 
+/** Built-in subagents (task 5.1): which are on, and each one's model.
+ *  Mirrors `agent/subagents.py`: a role is only used when what it needs is
+ *  there, so each says what it needs when it isn't. */
+const SUBAGENT_ROLES = [
+  {
+    key: "retrieval",
+    label: "Retrieval",
+    does: "Searches the knowledge base over several queries, drops duplicates, and returns the passages worth citing.",
+    defaultTurns: 6,
+  },
+  {
+    key: "sql",
+    label: "SQL",
+    does: "Explores the database schema, runs one correct query, and returns the rows with the exact statement.",
+    defaultTurns: 8,
+  },
+  {
+    key: "research",
+    label: "Research",
+    does: "Searches the web (and the knowledge base, if any) and returns findings with their sources.",
+    defaultTurns: 8,
+  },
+] as const;
+
 export function SubagentsPanel({
   config,
+  models,
   onChange,
 }: {
   config: AssistantConfig;
+  models: string[];
   onChange: (next: AssistantConfig) => void;
 }) {
+  const offline = useOfflineMode();
   const subagents = (config.subagents ?? {}) as Data;
+  const own = (subagents.models ?? {}) as Record<string, Data>;
+  const roles = (config.models ?? {}) as unknown as Data;
+  const shared = (roles.subagent ?? {}) as Data;
   const ragOn = Boolean((config.rag as Data | undefined)?.enabled);
-  const set = (key: string, enabled: boolean) =>
-    onChange({ ...config, subagents: { ...subagents, [key]: enabled } });
+  const dbOn = ((config.databases as unknown[] | undefined) ?? []).length > 0;
+  const webOn = Boolean(
+    ((config.tools as unknown as Data | undefined)?.web_search as Data | undefined)?.enabled,
+  );
+
+  const save = (patch: Data) =>
+    onChange({ ...config, subagents: { ...subagents, ...patch } } as AssistantConfig);
+  const setShared = (patch: Data) =>
+    onChange({
+      ...config,
+      models: { ...roles, subagent: { ...shared, ...patch } },
+      // Roles that only add a turn limit follow the shared model.
+      subagents: { ...subagents, models: carryShared(own, shared, patch) },
+    } as unknown as AssistantConfig);
+  /** A role's own settings; none left means it uses the shared model. */
+  const setOwn = (role: string, next: Data | null) => {
+    const rest = { ...own };
+    delete rest[role];
+    save({ models: next ? { ...rest, [role]: next } : rest });
+  };
+
+  const missing = (role: string): string | null => {
+    if (role === "retrieval" && !ragOn)
+      return "Needs a knowledge base: wire one into the agent or into this subagent on the canvas, or this stays inactive.";
+    if (role === "sql" && !dbOn)
+      return "Needs a database: wire one into the agent or into this subagent, or this stays inactive.";
+    if (role === "research" && !webOn)
+      return "Needs web search: switch on the Web search tool, or this stays inactive.";
+    if (role === "research" && offline)
+      return "This instance runs in offline mode (RAG_OFFLINE=1), so web search, and with it this subagent, is off.";
+    return null;
+  };
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-4">
       <p className="text-muted-foreground text-xs">
-        A subagent runs a multi-step job in its own context on a cheaper model and hands back only
-        its findings — the main agent never sees the dead ends.
+        A subagent runs a multi-step job in its own context, usually on a cheaper model, and hands
+        back only its findings. The main agent never sees the dead ends.
       </p>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Subagent model" hint="Used by every subagent without its own.">
+          <Select value={s(shared.model)} onChange={(e) => setShared({ model: e.target.value })}>
+            {models.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Effort">
+          <Select
+            value={s(shared.effort, "high")}
+            onChange={(e) => setShared({ effort: e.target.value })}
+          >
+            {EFFORTS.map((x) => (
+              <option key={x}>{x}</option>
+            ))}
+          </Select>
+        </Field>
+      </div>
+      {SUBAGENT_ROLES.map((role) => {
+        const on = b(subagents[role.key]);
+        const mine = own[role.key];
+        const problem = missing(role.key);
+        return (
+          <div key={role.key} className="flex flex-col gap-2">
+            <Toggle label={role.label} checked={on} onChange={(v) => save({ [role.key]: v })} />
+            <p className={problem && on ? "text-warning text-xs" : "text-muted-foreground text-xs"}>
+              {problem ?? role.does}
+            </p>
+            {on && (
+              <div className="border-border ml-1 grid grid-cols-2 gap-3 border-l-2 pl-4">
+                <Field label="Model">
+                  <Select
+                    aria-label={`${role.label} subagent model`}
+                    value={selectedModel(mine, shared)}
+                    onChange={(e) => setOwn(role.key, pickModel(mine, shared, e.target.value))}
+                  >
+                    <option value="">Subagent model ({s(shared.model)})</option>
+                    {models.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="Max turns" hint={`Empty: ${role.defaultTurns}.`}>
+                  <OptionalNumber
+                    key={String(mine?.max_turns ?? "")}
+                    value={mine?.max_turns as number | null | undefined}
+                    min={1}
+                    placeholder={String(role.defaultTurns)}
+                    onCommit={(v) => {
+                      if (v === null && !mine) return;
+                      setOwn(role.key, setTurns(mine, shared, v));
+                    }}
+                  />
+                </Field>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A subagent node's drawer (task 5.10): what it does, its model (its own,
+ *  or the shared subagent model) and turn limit, and what it can use. */
+export function SubagentNodePanel({
+  data,
+  models,
+  sharedModel,
+  wiredIn,
+  onChange,
+}: {
+  data: Data;
+  models: string[];
+  /** The shared subagent model it follows without its own. */
+  sharedModel: string;
+  /** The capabilities wired into this node, by label: this subagent's alone. */
+  wiredIn: string[];
+  onChange: (patch: Data) => void;
+}) {
+  const role = SUBAGENT_ROLES.find((r) => r.key === data.role);
+  const own = (data.model as Data | null | undefined) ?? null;
+  return (
+    <div className="flex flex-col gap-4">
+      <p className="text-sm">
+        <span className="font-medium">{role?.label ?? s(data.role)} subagent.</span>{" "}
+        <span className="text-muted-foreground">{role?.does}</span>
+      </p>
+      <Field label="Model">
+        <Select
+          aria-label="Subagent model"
+          value={s(own?.model)}
+          onChange={(e) =>
+            onChange({
+              model: e.target.value ? { ...(own ?? {}), model: e.target.value } : null,
+            })
+          }
+        >
+          <option value="">Subagent model ({sharedModel})</option>
+          {models.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      {own && (
+        <Field label="Effort">
+          <Select
+            value={s(own.effort, "high")}
+            onChange={(e) => onChange({ model: { ...own, effort: e.target.value } })}
+          >
+            {EFFORTS.map((x) => (
+              <option key={x}>{x}</option>
+            ))}
+          </Select>
+        </Field>
+      )}
+      <Field label="Max turns" hint={`Empty: ${role?.defaultTurns ?? "the default"}.`}>
+        <OptionalNumber
+          key={String(data.max_turns ?? "")}
+          value={data.max_turns as number | null | undefined}
+          min={1}
+          placeholder={String(role?.defaultTurns ?? "")}
+          onCommit={(v) => onChange({ max_turns: v })}
+        />
+      </Field>
+      <div className="flex flex-col gap-1">
+        <p className="text-xs font-medium">What it can use</p>
+        {wiredIn.length > 0 ? (
+          <ul className="list-disc pl-5 text-xs">
+            {wiredIn.map((w) => (
+              <li key={w}>{w} (its alone unless also wired to the agent)</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-muted-foreground text-xs">Nothing wired into it directly.</p>
+        )}
+        <p className="text-muted-foreground text-xs">
+          Plus, within its job, what is wired to the agent. Wire a capability into this node instead
+          of the agent to keep it away from the main agent.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** The router node's drawer (task 5.10). */
+export function RouterNodePanel({
+  data,
+  models,
+  onChange,
+}: {
+  data: Data;
+  models: string[];
+  onChange: (patch: Data) => void;
+}) {
+  const model = (data.model as Data | undefined) ?? {};
+  return (
+    <div className="flex flex-col gap-4">
+      <RouterExplainer />
+      <Field label="Router model" hint="A small, fast model is enough to sort a message.">
+        <Select
+          value={s(model.model)}
+          onChange={(e) => onChange({ model: { ...model, model: e.target.value } })}
+        >
+          {models.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </Select>
+      </Field>
+    </div>
+  );
+}
+
+function RouterExplainer() {
+  return (
+    <p className="text-muted-foreground text-xs">
+      Before each message, the router sorts it as simple, normal or hard. Simple ones (a greeting, a
+      thank-you) run at low effort; hard ones (several steps, comparing, planning, code) at high
+      effort or more; the rest at the agent&apos;s own. Only the effort changes. Run details show
+      how each message was routed.
+    </p>
+  );
+}
+
+/** The router in the Panels view: on or off, and its model (task 5.10).
+ *  Switching it on places a router node before the agent. */
+export function RouterPanel({
+  config,
+  models,
+  onChange,
+}: {
+  config: AssistantConfig;
+  models: string[];
+  onChange: (next: AssistantConfig) => void;
+}) {
+  const on = b((config.router as Data | undefined)?.enabled);
+  const roles = (config.models ?? {}) as unknown as Data;
+  const routerModel = (roles.router ?? {}) as Data;
+  return (
+    <div className="flex flex-col gap-3">
       <Toggle
-        label="Retrieval"
-        checked={b(subagents.retrieval)}
-        onChange={(v) => set("retrieval", v)}
+        label="Route effort per message"
+        checked={on}
+        onChange={(v) =>
+          onChange({ ...config, router: { ...(config.router as Data), enabled: v } })
+        }
       />
-      <p className="text-muted-foreground text-xs">
-        {ragOn
-          ? "Searches the knowledge base over several queries, drops duplicates, and returns the passages worth citing."
-          : "Needs a knowledge base — wire one into the agent on the canvas first, or this stays inactive."}
-      </p>
+      <RouterExplainer />
+      {on && (
+        <Field label="Router model">
+          <Select
+            value={s(routerModel.model)}
+            onChange={(e) =>
+              onChange({
+                ...config,
+                models: { ...roles, router: { ...routerModel, model: e.target.value } },
+              } as unknown as AssistantConfig)
+            }
+          >
+            {models.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      )}
     </div>
   );
 }

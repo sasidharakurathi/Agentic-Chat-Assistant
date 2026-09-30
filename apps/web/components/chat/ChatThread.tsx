@@ -8,9 +8,12 @@ import { Markdown } from "@/components/chat/Markdown";
 import { SourcesPanel } from "@/components/chat/SourcesPanel";
 import { RunningBadge, TypingDots } from "@/components/chat/TypingDots";
 import { ToolCallCard, type ToolCallView } from "@/components/chat/ToolCallCard";
+import { GuardrailNotes } from "@/components/chat/GuardrailNotes";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { useConfirm } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/toast";
+import { splitBlocks } from "@/lib/message-blocks";
 import {
   approvals as approvalsApi,
   conversations,
@@ -18,7 +21,11 @@ import {
   type ChatMessage,
   type Citation,
   type MessageBlock,
+  memories as memoriesApi,
+  type MemoryFile,
+  type GuardrailFinding,
 } from "@/lib/api";
+import { titleWithPending } from "@/lib/approvals";
 import { formatCount, formatUsd } from "@/lib/format";
 import {
   SLASH_COMMANDS,
@@ -31,7 +38,12 @@ import {
 import { appendSubagentText, nestCalls } from "@/lib/tool-tree";
 import { cn } from "@/lib/utils";
 
-type Live = { text: string; tools: ToolCallView[]; citations: Citation[] };
+type Live = {
+  text: string;
+  tools: ToolCallView[];
+  citations: Citation[];
+  guardrails: GuardrailFinding[];
+};
 /** What the conversation has cost so far (task 1.8). */
 type Spend = { cost: number; tokensIn: number; tokensOut: number };
 
@@ -42,10 +54,13 @@ export function ChatThread({
   onNewChat,
   onRename,
   onArchive,
+  onTitle,
 }: {
   conversationId: string;
   assistantId: string;
   title?: string;
+  /** The first turn named the conversation (task 5.2). */
+  onTitle?: (title: string) => void;
   /** For the slash commands that act on the conversation list. */
   onNewChat?: () => void;
   onRename?: (title: string) => void;
@@ -56,6 +71,10 @@ export function ChatThread({
   const [pendingUser, setPendingUser] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The typed failure behind `error`, when the turn reported one (5.4). */
+  const [failure, setFailure] = useState<{ code: string; retryable: boolean } | null>(null);
+  /** Budget warnings from the last turn (task 5.7). */
+  const [budgetNotes, setBudgetNotes] = useState<string[]>([]);
   const [input, setInput] = useState("");
   // Approvals are kept outside `live` on purpose: a pending one must survive
   // the stream ending (a turn can finish denied-by-timeout) and must also be
@@ -126,6 +145,7 @@ export function ChatThread({
     setLive(null);
     setPendingUser(null);
     setError(null);
+    setFailure(null);
     setPending([]);
     setSpend(null);
     void loadMessages();
@@ -134,6 +154,13 @@ export function ChatThread({
     // stream as an aborted turn, so nothing is lost by letting go of it.
     return () => abortRef.current?.abort();
   }, [loadMessages, loadPending]);
+
+  // While approvals wait, the tab says so: the assistant is stuck on a
+  // person, who may be looking at another tab (task 5.9).
+  useEffect(() => {
+    document.title = titleWithPending(document.title, pending.length);
+  }, [pending.length]);
+  useEffect(() => () => void (document.title = titleWithPending(document.title, 0)), []);
 
   const stop = useCallback(async () => {
     setStopping(true);
@@ -165,8 +192,10 @@ export function ChatThread({
     async (text: string) => {
       if (!text || sending) return;
       setError(null);
+      setFailure(null);
+      setBudgetNotes([]);
       setPendingUser(text);
-      setLive({ text: "", tools: [], citations: [] });
+      setLive({ text: "", tools: [], citations: [], guardrails: [] });
       setSending(true);
       const controller = new AbortController();
       abortRef.current = controller;
@@ -214,6 +243,8 @@ export function ChatThread({
                     },
                   ]);
                   return prev;
+                case "guardrail":
+                  return { ...prev, guardrails: [...prev.guardrails, e] };
                 case "citation":
                   // Arrives at finalize, after the full answer — a [n] marker only
                   // means something once every search in the turn has been seen.
@@ -222,7 +253,12 @@ export function ChatThread({
                   return prev;
               }
             });
-            if (e.type === "error") setError(e.message);
+            if (e.type === "error") {
+              setError(e.message);
+              setFailure({ code: e.code, retryable: Boolean(e.retryable) });
+            }
+            if (e.type === "title") onTitle?.(e.title);
+            if (e.type === "budget") setBudgetNotes((n) => [...n, e.message]);
             // Spend as it is incurred, so a long turn is visibly costing money;
             // replaced by the server's total once the turn is saved.
             if (e.type === "usage") {
@@ -258,7 +294,7 @@ export function ChatThread({
         if (!controller.signal.aborted) void loadPending();
       }
     },
-    [conversationId, sending, loadMessages, loadPending],
+    [conversationId, sending, loadMessages, loadPending, onTitle],
   );
 
   // ── slash commands ──────────────────────────────────────────
@@ -266,6 +302,42 @@ export function ChatThread({
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const suggestions = menuDismissed ? [] : suggestCommands(input);
+
+  const confirm = useConfirm();
+  /** `/memory`: the memory tool's notes about you, with a way to forget them. */
+  const showMemory = useCallback(async () => {
+    let files: MemoryFile[];
+    try {
+      files = await memoriesApi.list(assistantId);
+    } catch {
+      toast("Couldn't load what this assistant remembers.");
+      return;
+    }
+    if (files.length === 0) {
+      toast("This assistant remembers nothing about you.");
+      return;
+    }
+    const forget = await confirm({
+      title: "What this assistant remembers about you",
+      description: (
+        <div className="flex max-h-80 flex-col gap-3 overflow-auto">
+          {files.map((f) => (
+            <div key={f.path}>
+              <p className="font-mono text-xs font-medium">{f.path}</p>
+              <pre className="bg-muted mt-1 rounded p-2 text-xs whitespace-pre-wrap">
+                {f.content}
+              </pre>
+            </div>
+          ))}
+        </div>
+      ),
+      confirmLabel: "Forget all of it",
+      destructive: true,
+    });
+    if (!forget) return;
+    const { deleted } = await memoriesApi.clear(assistantId);
+    toast(`Forgotten (${deleted} ${deleted === 1 ? "file" : "files"}).`);
+  }, [assistantId, confirm, toast]);
 
   const runCommand = useCallback(
     (name: SlashCommandName, arg: string) => {
@@ -309,6 +381,9 @@ export function ChatThread({
               : "No spend recorded yet.",
           );
           return;
+        case "memory":
+          void showMemory();
+          return;
         case "export": {
           const blob = new Blob([conversationMarkdown(title, messages)], {
             type: "text/markdown",
@@ -323,7 +398,19 @@ export function ChatThread({
         }
       }
     },
-    [sending, toast, onNewChat, onRename, onArchive, messages, sendText, stop, spend, title],
+    [
+      sending,
+      toast,
+      onNewChat,
+      onRename,
+      onArchive,
+      messages,
+      sendText,
+      stop,
+      spend,
+      title,
+      showMemory,
+    ],
   );
 
   const submit = useCallback(() => {
@@ -398,6 +485,7 @@ export function ChatThread({
               text={live.text}
               working
               citations={live.citations}
+              guardrails={live.guardrails}
               assistantId={assistantId}
             />
           </div>
@@ -413,7 +501,30 @@ export function ChatThread({
             }}
           />
         ))}
-        {error && <p className="text-destructive text-sm">{error}</p>}
+        {budgetNotes.map((note) => (
+          // A budget 80% or more used (task 5.7): said, not blocking.
+          <p
+            key={note}
+            role="status"
+            className="border-warning bg-warning/10 rounded-md border px-3 py-2 text-xs"
+          >
+            {note}
+          </p>
+        ))}
+        {error && (
+          <TurnError
+            message={error}
+            failure={failure}
+            onRetry={
+              failure?.retryable && !sending
+                ? () => {
+                    const last = [...messages].reverse().find((m) => m.role === "user");
+                    if (last) void sendText(last.content);
+                  }
+                : undefined
+            }
+          />
+        )}
       </div>
       <div className="border-border relative border-t p-4">
         {suggestions.length > 0 && (
@@ -543,25 +654,12 @@ function ToolCalls({ calls }: { calls: ToolCallView[] }) {
   );
 }
 
-/** Split a message's blocks into tool calls and citations.
- *
- *  The tool filter is NEGATIVE on purpose. Messages persisted before task 2.9
- *  have blocks with no `type` key at all, so filtering for `type ===
- *  "tool_call"` would silently stop rendering tool cards across every existing
- *  conversation. "Not a citation" is the condition that stays true for both. */
-function splitBlocks(blocks?: MessageBlock[]): { tools: ToolCallView[]; cites: Citation[] } {
-  const all = (blocks ?? []) as Array<Record<string, unknown>>;
-  return {
-    tools: all.filter((b) => b?.type !== "citation") as unknown as ToolCallView[],
-    cites: all.filter((b) => b?.type === "citation") as unknown as Citation[],
-  };
-}
-
 function Bubble({
   role,
   text,
   blocks,
   citations,
+  guardrails,
   assistantId,
   run,
   working = false,
@@ -572,6 +670,8 @@ function Bubble({
   working?: boolean;
   blocks?: MessageBlock[];
   citations?: Citation[];
+  /** A live turn's findings; saved ones come from `blocks`. */
+  guardrails?: GuardrailFinding[];
   assistantId: string;
   run?: { conversationId: string; messageId: string };
 }) {
@@ -580,6 +680,7 @@ function Bubble({
   // Live turns pass citations in directly (they arrive as SSE events, before
   // the message has been re-fetched); persisted ones carry them in blocks.
   const cites = citations ?? split.cites;
+  const guards = guardrails ?? split.guards;
   const isAssistant = role === "assistant";
 
   return (
@@ -591,6 +692,7 @@ function Bubble({
         )}
       >
         {isAssistant && <ToolCalls calls={split.tools} />}
+        {isAssistant && <GuardrailNotes items={guards} />}
         {isAssistant && working && !text ? (
           <TypingDots />
         ) : isAssistant ? (
@@ -610,6 +712,36 @@ function Bubble({
         )}
         {run && <RunDetails conversationId={run.conversationId} messageId={run.messageId} />}
       </div>
+    </div>
+  );
+}
+
+/** How a turn that didn't finish normally is shown (task 5.4): a refusal is
+ *  the model declining, not an error, and a failure that may pass on its own
+ *  offers to send the message again. */
+function TurnError({
+  message,
+  failure,
+  onRetry,
+}: {
+  message: string;
+  failure: { code: string; retryable: boolean } | null;
+  onRetry?: () => void;
+}) {
+  const refused = failure?.code === "refused";
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-3 text-sm",
+        refused ? "text-muted-foreground" : "text-destructive",
+      )}
+    >
+      <p>{message}</p>
+      {onRetry && (
+        <Button size="sm" variant="outline" onClick={onRetry}>
+          Try again
+        </Button>
+      )}
     </div>
   );
 }

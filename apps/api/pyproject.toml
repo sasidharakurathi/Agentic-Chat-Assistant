@@ -13,6 +13,8 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "claude-agent-sdk>=0.2.150",
+    # Direct Messages API calls outside agent turns (agent/claude_api.py)
+    "anthropic>=1.9,<2",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "sqlalchemy[asyncio]>=2.0.36",
@@ -98,7 +100,17 @@ module = ["tests.*", "scripts.*", "alembic.*"]
 disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
-module = ["opentelemetry.*", "boto3.*", "botocore.*", "aiomysql.*", "motor.*", "asyncpg.*"]
+# jsonschema: no stubs; it arrives with claude-agent-sdk and mcp (the tool gate
+# validates inputs with it, task 5.3).
+module = [
+    "opentelemetry.*",
+    "boto3.*",
+    "botocore.*",
+    "aiomysql.*",
+    "motor.*",
+    "asyncpg.*",
+    "jsonschema.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

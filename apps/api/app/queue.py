@@ -61,3 +61,25 @@ async def enqueue_schema_refresh(connection_id: uuid.UUID) -> None:
 
 
 __all__ = ["enqueue_ingest", "enqueue_schema_refresh", "get_queue"]
+
+
+async def enqueue_summary(conversation_id: uuid.UUID, version: int) -> bool:
+    """Queue a conversation summary (task 5.2); False if the queue is down.
+
+    The job id is per summary *version*, so the turns that keep crossing the
+    threshold while one summary is pending queue it once, not once each; the
+    next version gets a new id once this one is written. A missed summary is
+    harmless: the next turn over the threshold queues it again."""
+    try:
+        queue = await get_queue()
+        await queue.enqueue_job(
+            "summarize_conversation_job",
+            str(conversation_id),
+            version,
+            _job_id=f"summarize:{conversation_id}:{version}",
+        )
+    except Exception as exc:
+        log.warning("enqueue_summary_failed", conversation_id=str(conversation_id), error=str(exc))
+        _state.pool = None
+        return False
+    return True

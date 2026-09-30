@@ -29,13 +29,16 @@ export function Dialog({
   description,
   children,
   footer,
+  wide = false,
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   description?: ReactNode;
   children?: ReactNode;
-  footer: ReactNode;
+  footer?: ReactNode;
+  /** Room for a longer body (a preview), which scrolls within the screen. */
+  wide?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -59,7 +62,12 @@ export function Dialog({
         // A click on the backdrop lands on the <dialog> itself.
         if (e.target === e.currentTarget) onClose();
       }}
-      className="bg-background text-foreground border-border m-auto w-[min(28rem,calc(100vw-2rem))] rounded-lg border p-0 shadow-lg backdrop:bg-black/40"
+      className={
+        "bg-background text-foreground border-border m-auto rounded-lg border p-0 shadow-lg backdrop:bg-black/40 " +
+        (wide
+          ? "max-h-[85vh] w-[min(40rem,calc(100vw-2rem))] overflow-auto"
+          : "w-[min(28rem,calc(100vw-2rem))]")
+      }
     >
       <div className="space-y-3 p-5">
         <h2 id={titleId} className="text-base font-semibold">
@@ -72,7 +80,9 @@ export function Dialog({
         )}
         {children}
       </div>
-      <div className="border-border flex justify-end gap-2 border-t px-5 py-3">{footer}</div>
+      {footer && (
+        <div className="border-border flex justify-end gap-2 border-t px-5 py-3">{footer}</div>
+      )}
     </dialog>
   );
 }

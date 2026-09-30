@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import get_args
 
 import pytest
+from app.agent import claude_api
 from app.config import settings
 from app.graph.nodes import NodeType
 from app.graph.validate import ALLOWED_EDGES, SINGLETON_TYPES
@@ -34,6 +35,16 @@ async def test_config_schema_says_whether_the_instance_is_offline(
     monkeypatch.setattr(settings, "rag_offline", offline)
     body = (await client.get("/api/v1/meta/config-schema")).json()
     assert body["offline"] is offline
+
+
+@pytest.mark.parametrize("real", [True, False])
+async def test_config_schema_says_whether_ai_helpers_bill(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, real: bool
+) -> None:
+    """The prompt writer says up front whether generating costs money."""
+    monkeypatch.setattr(claude_api, "real_model_allowed", lambda: real)
+    body = (await client.get("/api/v1/meta/config-schema")).json()
+    assert body["real_model"] is real
 
 
 async def test_graph_schema_matches_the_validators_own_rules(client: AsyncClient) -> None:

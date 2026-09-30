@@ -3,7 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Request, status
 from sqlalchemy import select
 
-from app.api.deps import ClientIP, CurrentUser, SessionDep
+from app.api import ratelimit
+from app.api.deps import ClientIP, CurrentUser, SessionDep, per_ip_limit
+from app.config import settings
 from app.models.membership import Membership
 from app.schemas.auth import (
     LoginRequest,
@@ -19,6 +21,9 @@ from app.services import auth as auth_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+#: Signing up and signing in, per client IP (task 5.8).
+AUTH = per_ip_limit("auth", "rate_limit_auth")
+
 
 def _pair(tokens: auth_service.IssuedTokens) -> TokenPair:
     return TokenPair(
@@ -28,7 +33,12 @@ def _pair(tokens: auth_service.IssuedTokens) -> TokenPair:
     )
 
 
-@router.post("/register", response_model=TokenPair, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/register",
+    response_model=TokenPair,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[AUTH],
+)
 async def register(
     body: RegisterRequest, session: SessionDep, request: Request, ip: ClientIP
 ) -> TokenPair:
@@ -44,10 +54,14 @@ async def register(
     return _pair(tokens)
 
 
-@router.post("/login", response_model=TokenPair)
+@router.post("/login", response_model=TokenPair, dependencies=[AUTH])
 async def login(
     body: LoginRequest, session: SessionDep, request: Request, ip: ClientIP
 ) -> TokenPair:
+    # Guesses at one account from one address, before the password is
+    # checked. Keyed by both, so an attacker elsewhere can't lock the real
+    # user out.
+    await ratelimit.enforce("login", f"{ip}|{body.email.lower()}", settings.rate_limit_login)
     user = await auth_service.authenticate(session, email=body.email, password=body.password)
     tokens = await auth_service.issue_tokens(
         session, user_id=user.id, user_agent=request.headers.get("user-agent"), ip=ip
@@ -55,7 +69,7 @@ async def login(
     return _pair(tokens)
 
 
-@router.post("/refresh", response_model=TokenPair)
+@router.post("/refresh", response_model=TokenPair, dependencies=[AUTH])
 async def refresh(
     body: RefreshRequest, session: SessionDep, request: Request, ip: ClientIP
 ) -> TokenPair:

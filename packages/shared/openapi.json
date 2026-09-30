@@ -405,6 +405,9 @@
           "rag": {
             "$ref": "#/components/schemas/RagConfig-Input"
           },
+          "router": {
+            "$ref": "#/components/schemas/RouterConfig-Input"
+          },
           "schema_version": {
             "const": 1,
             "default": 1,
@@ -459,6 +462,9 @@
           "rag": {
             "$ref": "#/components/schemas/RagConfig-Output"
           },
+          "router": {
+            "$ref": "#/components/schemas/RouterConfig-Output"
+          },
           "schema_version": {
             "const": 1,
             "default": 1,
@@ -489,7 +495,8 @@
           "mcp_servers",
           "subagents",
           "memory",
-          "approval_policy"
+          "approval_policy",
+          "router"
         ],
         "title": "AssistantConfig",
         "type": "object"
@@ -822,6 +829,142 @@
           "file"
         ],
         "title": "Body_upload_data_source_api_v1_assistants__assistant_id__data_sources_upload_post",
+        "type": "object"
+      },
+      "BudgetLimits": {
+        "description": "The day and month limits of one scope, in USD (task 5.7). `null`\nremoves that limit.",
+        "properties": {
+          "daily_usd": {
+            "anyOf": [
+              {
+                "maximum": 1000000.0,
+                "minimum": 0.01,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daily Usd"
+          },
+          "monthly_usd": {
+            "anyOf": [
+              {
+                "maximum": 10000000.0,
+                "minimum": 0.01,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Monthly Usd"
+          }
+        },
+        "title": "BudgetLimits",
+        "type": "object"
+      },
+      "BudgetStatusOut": {
+        "properties": {
+          "assistant_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assistant Id"
+          },
+          "assistant_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assistant Name"
+          },
+          "limit_usd": {
+            "title": "Limit Usd",
+            "type": "number"
+          },
+          "period": {
+            "enum": [
+              "day",
+              "month"
+            ],
+            "title": "Period",
+            "type": "string"
+          },
+          "ratio": {
+            "title": "Ratio",
+            "type": "number"
+          },
+          "resets_at": {
+            "format": "date-time",
+            "title": "Resets At",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "org",
+              "assistant"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "spent_usd": {
+            "title": "Spent Usd",
+            "type": "number"
+          },
+          "state": {
+            "enum": [
+              "ok",
+              "warning",
+              "exceeded"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "assistant_id",
+          "assistant_name",
+          "period",
+          "limit_usd",
+          "spent_usd",
+          "ratio",
+          "state",
+          "resets_at"
+        ],
+        "title": "BudgetStatusOut",
+        "type": "object"
+      },
+      "BudgetsOut": {
+        "properties": {
+          "budgets": {
+            "items": {
+              "$ref": "#/components/schemas/BudgetStatusOut"
+            },
+            "title": "Budgets",
+            "type": "array"
+          },
+          "can_edit": {
+            "title": "Can Edit",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "budgets",
+          "can_edit"
+        ],
+        "title": "BudgetsOut",
         "type": "object"
       },
       "ContentUrl": {
@@ -1489,6 +1632,11 @@
       "DatabaseRef-Input": {
         "additionalProperties": false,
         "properties": {
+          "agent": {
+            "default": true,
+            "title": "Agent",
+            "type": "boolean"
+          },
           "connection_id": {
             "title": "Connection Id",
             "type": "string"
@@ -1502,6 +1650,18 @@
             "default": true,
             "title": "Nl2Sql",
             "type": "boolean"
+          },
+          "subagents": {
+            "items": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ],
+              "type": "string"
+            },
+            "title": "Subagents",
+            "type": "array"
           }
         },
         "required": [
@@ -1513,6 +1673,11 @@
       "DatabaseRef-Output": {
         "additionalProperties": false,
         "properties": {
+          "agent": {
+            "default": true,
+            "title": "Agent",
+            "type": "boolean"
+          },
           "connection_id": {
             "title": "Connection Id",
             "type": "string"
@@ -1526,9 +1691,23 @@
             "default": true,
             "title": "Nl2Sql",
             "type": "boolean"
+          },
+          "subagents": {
+            "items": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ],
+              "type": "string"
+            },
+            "title": "Subagents",
+            "type": "array"
           }
         },
         "required": [
+          "agent",
+          "subagents",
           "connection_id",
           "nl2sql",
           "expose_write"
@@ -2334,6 +2513,102 @@
         "title": "Edge",
         "type": "object"
       },
+      "FixOp": {
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "node_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Type"
+          },
+          "op": {
+            "enum": [
+              "add_edge",
+              "remove_edge",
+              "remove_node",
+              "patch_node",
+              "add_node"
+            ],
+            "title": "Op",
+            "type": "string"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target"
+          }
+        },
+        "required": [
+          "op",
+          "source",
+          "target",
+          "node_id",
+          "node_type",
+          "data",
+          "position"
+        ],
+        "title": "FixOp",
+        "type": "object"
+      },
       "Graph-Input": {
         "additionalProperties": false,
         "properties": {
@@ -2589,6 +2864,28 @@
         "title": "GraphDiff",
         "type": "object"
       },
+      "GraphFix": {
+        "description": "A suggested fix: what the button says, and what it does.",
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "ops": {
+            "items": {
+              "$ref": "#/components/schemas/FixOp"
+            },
+            "title": "Ops",
+            "type": "array"
+          }
+        },
+        "required": [
+          "label",
+          "ops"
+        ],
+        "title": "GraphFix",
+        "type": "object"
+      },
       "GraphIssue": {
         "properties": {
           "code": {
@@ -2616,6 +2913,16 @@
             ],
             "title": "Edge"
           },
+          "fix": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GraphFix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "message": {
             "title": "Message",
             "type": "string"
@@ -2636,7 +2943,8 @@
           "code",
           "message",
           "node_id",
-          "edge"
+          "edge",
+          "fix"
         ],
         "title": "GraphIssue",
         "type": "object"
@@ -2884,6 +3192,11 @@
       "HttpRequestTool-Input": {
         "additionalProperties": false,
         "properties": {
+          "agent": {
+            "default": true,
+            "title": "Agent",
+            "type": "boolean"
+          },
           "allowed_domains": {
             "items": {
               "type": "string"
@@ -2905,6 +3218,18 @@
             "default": false,
             "title": "Enabled",
             "type": "boolean"
+          },
+          "subagents": {
+            "items": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ],
+              "type": "string"
+            },
+            "title": "Subagents",
+            "type": "array"
           }
         },
         "title": "HttpRequestTool",
@@ -2913,6 +3238,11 @@
       "HttpRequestTool-Output": {
         "additionalProperties": false,
         "properties": {
+          "agent": {
+            "default": true,
+            "title": "Agent",
+            "type": "boolean"
+          },
           "allowed_domains": {
             "items": {
               "type": "string"
@@ -2934,9 +3264,23 @@
             "default": false,
             "title": "Enabled",
             "type": "boolean"
+          },
+          "subagents": {
+            "items": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ],
+              "type": "string"
+            },
+            "title": "Subagents",
+            "type": "array"
           }
         },
         "required": [
+          "agent",
+          "subagents",
           "enabled",
           "allowed_domains",
           "approval"
@@ -3872,6 +4216,11 @@
         "additionalProperties": false,
         "description": "One registered MCP server, as this assistant version uses it (tasks 4.6 / 4.7).\n\n`tools` is the allowlist: only these, and only if the server still lists\nthem, are offered to the model. Empty means none; nothing from a server\nis usable until someone chooses it.\n\nApproval, most specific first: `tool_approvals[tool]`, then `approval`\nfor the server, then the assistant's `approval_policy.mcp_default`\n(see `approvals.mcp_mode`). `None` means \"not set here\".",
         "properties": {
+          "agent": {
+            "default": true,
+            "title": "Agent",
+            "type": "boolean"
+          },
           "approval": {
             "anyOf": [
               {
@@ -3892,6 +4241,18 @@
             "pattern": "^[0-9a-fA-F-]{8,64}$",
             "title": "Id",
             "type": "string"
+          },
+          "subagents": {
+            "items": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ],
+              "type": "string"
+            },
+            "title": "Subagents",
+            "type": "array"
           },
           "tool_approvals": {
             "patternProperties": {
@@ -3926,6 +4287,11 @@
         "additionalProperties": false,
         "description": "One registered MCP server, as this assistant version uses it (tasks 4.6 / 4.7).\n\n`tools` is the allowlist: only these, and only if the server still lists\nthem, are offered to the model. Empty means none; nothing from a server\nis usable until someone chooses it.\n\nApproval, most specific first: `tool_approvals[tool]`, then `approval`\nfor the server, then the assistant's `approval_policy.mcp_default`\n(see `approvals.mcp_mode`). `None` means \"not set here\".",
         "properties": {
+          "agent": {
+            "default": true,
+            "title": "Agent",
+            "type": "boolean"
+          },
           "approval": {
             "anyOf": [
               {
@@ -3946,6 +4312,18 @@
             "pattern": "^[0-9a-fA-F-]{8,64}$",
             "title": "Id",
             "type": "string"
+          },
+          "subagents": {
+            "items": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ],
+              "type": "string"
+            },
+            "title": "Subagents",
+            "type": "array"
           },
           "tool_approvals": {
             "patternProperties": {
@@ -3971,6 +4349,8 @@
           }
         },
         "required": [
+          "agent",
+          "subagents",
           "id",
           "tools",
           "approval",
@@ -4365,6 +4745,19 @@
         "title": "MembershipOut",
         "type": "object"
       },
+      "MemoryCleared": {
+        "properties": {
+          "deleted": {
+            "title": "Deleted",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deleted"
+        ],
+        "title": "MemoryCleared",
+        "type": "object"
+      },
       "MemoryConfig-Input": {
         "additionalProperties": false,
         "properties": {
@@ -4427,6 +4820,31 @@
           "auto_title"
         ],
         "title": "MemoryConfig",
+        "type": "object"
+      },
+      "MemoryFileOut": {
+        "description": "One of the memory tool's files (task 5.2).",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content",
+          "updated_at"
+        ],
+        "title": "MemoryFileOut",
         "type": "object"
       },
       "MemoryNode-Input": {
@@ -5287,6 +5705,124 @@
         "title": "Page[VersionSummary]",
         "type": "object"
       },
+      "PipelineCapability": {
+        "description": "One thing the recommended pipeline uses, and why.",
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "why": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Why"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "why"
+        ],
+        "title": "PipelineCapability",
+        "type": "object"
+      },
+      "PipelineRecommendIn": {
+        "description": "What the assistant is for, in the builder's words (task 5.6).",
+        "properties": {
+          "description": {
+            "maxLength": 4000,
+            "minLength": 10,
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "default": "the assistant",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "description"
+        ],
+        "title": "PipelineRecommendIn",
+        "type": "object"
+      },
+      "PipelineSuggestion": {
+        "description": "A whole starter pipeline to preview: nothing has been saved. Apply it\nby saving `config` as the draft config, which lays out the graph.",
+        "properties": {
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/PipelineCapability"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "changes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "config": {
+            "$ref": "#/components/schemas/AssistantConfig-Output"
+          },
+          "cost_usd": {
+            "default": 0.0,
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "graph": {
+            "$ref": "#/components/schemas/Graph-Output"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "source": {
+            "enum": [
+              "model",
+              "template"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/ValidationResult"
+          }
+        },
+        "required": [
+          "config",
+          "graph",
+          "validation",
+          "capabilities",
+          "changes",
+          "source",
+          "model",
+          "cost_usd"
+        ],
+        "title": "PipelineSuggestion",
+        "type": "object"
+      },
       "Position-Input": {
         "additionalProperties": false,
         "properties": {
@@ -5323,6 +5859,83 @@
           "y"
         ],
         "title": "Position",
+        "type": "object"
+      },
+      "PromptGenerateIn": {
+        "description": "What the assistant is for, in the builder's words (task 5.5).",
+        "properties": {
+          "current_prompt": {
+            "anyOf": [
+              {
+                "maxLength": 100000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Prompt"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 10,
+            "title": "Description",
+            "type": "string"
+          }
+        },
+        "required": [
+          "description"
+        ],
+        "title": "PromptGenerateIn",
+        "type": "object"
+      },
+      "PromptSuggestion": {
+        "description": "A draft to review: nothing has been saved.",
+        "properties": {
+          "cost_usd": {
+            "default": 0.0,
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "rules": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Rules",
+            "type": "array"
+          },
+          "source": {
+            "enum": [
+              "model",
+              "template"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "system_prompt": {
+            "title": "System Prompt",
+            "type": "string"
+          }
+        },
+        "required": [
+          "system_prompt",
+          "rules",
+          "source",
+          "model",
+          "cost_usd"
+        ],
+        "title": "PromptSuggestion",
         "type": "object"
       },
       "PublishRequest": {
@@ -5399,6 +6012,11 @@
       "RagConfig-Input": {
         "additionalProperties": false,
         "properties": {
+          "agent": {
+            "default": true,
+            "title": "Agent",
+            "type": "boolean"
+          },
           "chunking": {
             "$ref": "#/components/schemas/RagChunking-Input"
           },
@@ -5436,6 +6054,18 @@
             },
             "title": "Source Ids",
             "type": "array"
+          },
+          "subagents": {
+            "items": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ],
+              "type": "string"
+            },
+            "title": "Subagents",
+            "type": "array"
           }
         },
         "title": "RagConfig",
@@ -5444,6 +6074,11 @@
       "RagConfig-Output": {
         "additionalProperties": false,
         "properties": {
+          "agent": {
+            "default": true,
+            "title": "Agent",
+            "type": "boolean"
+          },
           "chunking": {
             "$ref": "#/components/schemas/RagChunking-Output"
           },
@@ -5481,9 +6116,23 @@
             },
             "title": "Source Ids",
             "type": "array"
+          },
+          "subagents": {
+            "items": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ],
+              "type": "string"
+            },
+            "title": "Subagents",
+            "type": "array"
           }
         },
         "required": [
+          "agent",
+          "subagents",
           "enabled",
           "embedder",
           "reranker",
@@ -5686,6 +6335,35 @@
         "title": "RoleUpdate",
         "type": "object"
       },
+      "RouterConfig-Input": {
+        "additionalProperties": false,
+        "description": "Route each message's effort before its turn (task 5.10): the\nrouter's model (`models.router`) sorts it as simple, normal or hard, and\nthe turn runs at low effort, the agent's own, or high. On when a router\nnode is wired in.",
+        "properties": {
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "title": "RouterConfig",
+        "type": "object"
+      },
+      "RouterConfig-Output": {
+        "additionalProperties": false,
+        "description": "Route each message's effort before its turn (task 5.10): the\nrouter's model (`models.router`) sorts it as simple, normal or hard, and\nthe turn runs at low effort, the agent's own, or high. On when a router\nnode is wired in.",
+        "properties": {
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "RouterConfig",
+        "type": "object"
+      },
       "RouterNode-Input": {
         "additionalProperties": false,
         "properties": {
@@ -5774,6 +6452,11 @@
       },
       "RunDetail": {
         "properties": {
+          "assistant_id": {
+            "format": "uuid",
+            "title": "Assistant Id",
+            "type": "string"
+          },
           "conversation_id": {
             "format": "uuid",
             "title": "Conversation Id",
@@ -5833,6 +6516,26 @@
             ],
             "title": "Error"
           },
+          "fallback_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallback Model"
+          },
+          "graph": {
+            "default": "draft",
+            "enum": [
+              "version",
+              "draft"
+            ],
+            "title": "Graph",
+            "type": "string"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -5861,9 +6564,27 @@
             ],
             "title": "Model"
           },
+          "nodes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Nodes",
+            "type": "array"
+          },
           "num_turns": {
             "title": "Num Turns",
             "type": "integer"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
           },
           "status": {
             "$ref": "#/components/schemas/RunStatus"
@@ -5873,6 +6594,24 @@
               "$ref": "#/components/schemas/RunStep"
             },
             "title": "Steps",
+            "type": "array"
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Reason"
+          },
+          "timeline": {
+            "items": {
+              "$ref": "#/components/schemas/TraceStep"
+            },
+            "title": "Timeline",
             "type": "array"
           },
           "tokens_in": {
@@ -5922,8 +6661,15 @@
           "duration_ms",
           "status",
           "error",
+          "stop_reason",
+          "fallback_model",
+          "route",
           "created_at",
-          "steps"
+          "steps",
+          "assistant_id",
+          "timeline",
+          "nodes",
+          "graph"
         ],
         "title": "RunDetail",
         "type": "object"
@@ -5990,6 +6736,17 @@
             ],
             "title": "Error"
           },
+          "fallback_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallback Model"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -6022,8 +6779,30 @@
             "title": "Num Turns",
             "type": "integer"
           },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
           "status": {
             "$ref": "#/components/schemas/RunStatus"
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Reason"
           },
           "tokens_in": {
             "title": "Tokens In",
@@ -6072,6 +6851,9 @@
           "duration_ms",
           "status",
           "error",
+          "stop_reason",
+          "fallback_model",
+          "route",
           "created_at"
         ],
         "title": "RunOut",
@@ -6081,7 +6863,8 @@
         "enum": [
           "ok",
           "error",
-          "aborted"
+          "aborted",
+          "refused"
         ],
         "title": "RunStatus",
         "type": "string"
@@ -6258,12 +7041,12 @@
       },
       "SubagentNodeData-Input": {
         "additionalProperties": false,
-        "description": "`model` and `max_turns` override the assistant's subagent model role\n(`models.subagent`); None keeps it. They used to be accepted and then\ndropped by compile.",
+        "description": "`model` and `max_turns` are this role's own model settings\n(`subagents.models[role]`, task 5.1); both None keeps the shared subagent\nrole (`models.subagent`). The limit matches `ModelSpec.max_turns`, so any\nconfig projects onto a valid node.",
         "properties": {
           "max_turns": {
             "anyOf": [
               {
-                "maximum": 100.0,
+                "maximum": 200.0,
                 "minimum": 1.0,
                 "type": "integer"
               },
@@ -6301,12 +7084,12 @@
       },
       "SubagentNodeData-Output": {
         "additionalProperties": false,
-        "description": "`model` and `max_turns` override the assistant's subagent model role\n(`models.subagent`); None keeps it. They used to be accepted and then\ndropped by compile.",
+        "description": "`model` and `max_turns` are this role's own model settings\n(`subagents.models[role]`, task 5.1); both None keeps the shared subagent\nrole (`models.subagent`). The limit matches `ModelSpec.max_turns`, so any\nconfig projects onto a valid node.",
         "properties": {
           "max_turns": {
             "anyOf": [
               {
-                "maximum": 100.0,
+                "maximum": 200.0,
                 "minimum": 1.0,
                 "type": "integer"
               },
@@ -6347,6 +7130,20 @@
       "SubagentsConfig-Input": {
         "additionalProperties": false,
         "properties": {
+          "models": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ModelSpec-Input"
+            },
+            "propertyNames": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ]
+            },
+            "title": "Models",
+            "type": "object"
+          },
           "research": {
             "default": false,
             "title": "Research",
@@ -6369,6 +7166,20 @@
       "SubagentsConfig-Output": {
         "additionalProperties": false,
         "properties": {
+          "models": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ModelSpec-Output"
+            },
+            "propertyNames": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ]
+            },
+            "title": "Models",
+            "type": "object"
+          },
           "research": {
             "default": false,
             "title": "Research",
@@ -6388,7 +7199,8 @@
         "required": [
           "retrieval",
           "sql",
-          "research"
+          "research",
+          "models"
         ],
         "title": "SubagentsConfig",
         "type": "object"
@@ -6431,10 +7243,27 @@
       "ToggleTool-Input": {
         "additionalProperties": false,
         "properties": {
+          "agent": {
+            "default": true,
+            "title": "Agent",
+            "type": "boolean"
+          },
           "enabled": {
             "default": false,
             "title": "Enabled",
             "type": "boolean"
+          },
+          "subagents": {
+            "items": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ],
+              "type": "string"
+            },
+            "title": "Subagents",
+            "type": "array"
           }
         },
         "title": "ToggleTool",
@@ -6443,13 +7272,32 @@
       "ToggleTool-Output": {
         "additionalProperties": false,
         "properties": {
+          "agent": {
+            "default": true,
+            "title": "Agent",
+            "type": "boolean"
+          },
           "enabled": {
             "default": false,
             "title": "Enabled",
             "type": "boolean"
+          },
+          "subagents": {
+            "items": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ],
+              "type": "string"
+            },
+            "title": "Subagents",
+            "type": "array"
           }
         },
         "required": [
+          "agent",
+          "subagents",
           "enabled"
         ],
         "title": "ToggleTool",
@@ -6660,12 +7508,251 @@
         "title": "ToolsConfig",
         "type": "object"
       },
+      "TraceApproval": {
+        "description": "The approval a step waited on, and who answered.",
+        "properties": {
+          "decided_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By"
+          },
+          "requested_at": {
+            "format": "date-time",
+            "title": "Requested At",
+            "type": "string"
+          },
+          "risk": {
+            "title": "Risk",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "wait_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wait Ms"
+          }
+        },
+        "required": [
+          "status",
+          "risk",
+          "requested_at",
+          "decided_at",
+          "wait_ms",
+          "decided_by"
+        ],
+        "title": "TraceApproval",
+        "type": "object"
+      },
+      "TraceGuardrail": {
+        "properties": {
+          "check": {
+            "title": "Check",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "where": {
+            "title": "Where",
+            "type": "string"
+          }
+        },
+        "required": [
+          "check",
+          "where",
+          "detail"
+        ],
+        "title": "TraceGuardrail",
+        "type": "object"
+      },
+      "TraceStep": {
+        "description": "One thing the run did, in order (task 5.9): a tool call, or a\nguardrail acting.",
+        "properties": {
+          "approval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TraceApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          },
+          "guardrail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TraceGuardrail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "kind": {
+            "enum": [
+              "tool",
+              "guardrail"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nodes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Nodes",
+            "type": "array"
+          },
+          "output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "permission": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Permission"
+          },
+          "started_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started Ms"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "subagent_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subagent Text"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "parent_id",
+          "started_ms",
+          "duration_ms",
+          "status",
+          "permission",
+          "input",
+          "output",
+          "subagent_text",
+          "approval",
+          "guardrail",
+          "nodes"
+        ],
+        "title": "TraceStep",
+        "type": "object"
+      },
       "UsageRollupResponse": {
         "properties": {
           "group_by": {
             "enum": [
               "assistant",
-              "model"
+              "model",
+              "conversation"
             ],
             "title": "Group By",
             "type": "string"
@@ -6692,6 +7779,17 @@
             "title": "Cost Usd",
             "type": "string"
           },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
           "event_count": {
             "title": "Event Count",
             "type": "integer"
@@ -6707,6 +7805,17 @@
             ],
             "title": "Group Key"
           },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
           "tokens_in": {
             "title": "Tokens In",
             "type": "integer"
@@ -6718,6 +7827,8 @@
         },
         "required": [
           "group_key",
+          "label",
+          "detail",
           "event_count",
           "tokens_in",
           "tokens_out",
@@ -6965,6 +8076,11 @@
       "WebSearchTool-Input": {
         "additionalProperties": false,
         "properties": {
+          "agent": {
+            "default": true,
+            "title": "Agent",
+            "type": "boolean"
+          },
           "allowed_domains": {
             "items": {
               "type": "string"
@@ -6983,6 +8099,18 @@
             "minimum": 1.0,
             "title": "Max Uses",
             "type": "integer"
+          },
+          "subagents": {
+            "items": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ],
+              "type": "string"
+            },
+            "title": "Subagents",
+            "type": "array"
           }
         },
         "title": "WebSearchTool",
@@ -6991,6 +8119,11 @@
       "WebSearchTool-Output": {
         "additionalProperties": false,
         "properties": {
+          "agent": {
+            "default": true,
+            "title": "Agent",
+            "type": "boolean"
+          },
           "allowed_domains": {
             "items": {
               "type": "string"
@@ -7009,9 +8142,23 @@
             "minimum": 1.0,
             "title": "Max Uses",
             "type": "integer"
+          },
+          "subagents": {
+            "items": {
+              "enum": [
+                "retrieval",
+                "sql",
+                "research"
+              ],
+              "type": "string"
+            },
+            "title": "Subagents",
+            "type": "array"
           }
         },
         "required": [
+          "agent",
+          "subagents",
           "enabled",
           "max_uses",
           "allowed_domains"
@@ -7449,6 +8596,133 @@
         "summary": "Update Assistant",
         "tags": [
           "assistants"
+        ]
+      }
+    },
+    "/api/v1/assistants/{assistant_id}/budget": {
+      "get": {
+        "description": "What applies to this assistant: the org's budgets and its own.",
+        "operationId": "get_assistant_budget_api_v1_assistants__assistant_id__budget_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Assistant Budget",
+        "tags": [
+          "budgets"
+        ]
+      },
+      "put": {
+        "operationId": "put_assistant_budget_api_v1_assistants__assistant_id__budget_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BudgetLimits"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Assistant Budget",
+        "tags": [
+          "budgets"
         ]
       }
     },
@@ -9569,6 +10843,321 @@
         ]
       }
     },
+    "/api/v1/assistants/{assistant_id}/memories": {
+      "delete": {
+        "description": "Forget everything, or one file (`path`).",
+        "operationId": "clear_memories_api_v1_assistants__assistant_id__memories_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "An embedding app's end user; assistant editors only.",
+            "in": "query",
+            "name": "external_user_ref",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "An embedding app's end user; assistant editors only.",
+              "title": "External User Ref"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Path"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryCleared"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Memories",
+        "tags": [
+          "memory"
+        ]
+      },
+      "get": {
+        "operationId": "list_memories_api_v1_assistants__assistant_id__memories_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "An embedding app's end user; assistant editors only.",
+            "in": "query",
+            "name": "external_user_ref",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "An embedding app's end user; assistant editors only.",
+              "title": "External User Ref"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MemoryFileOut"
+                  },
+                  "title": "Response List Memories Api V1 Assistants  Assistant Id  Memories Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Memories",
+        "tags": [
+          "memory"
+        ]
+      }
+    },
+    "/api/v1/assistants/{assistant_id}/pipeline:recommend": {
+      "post": {
+        "description": "A starter pipeline for this assistant, from what it already has.",
+        "operationId": "recommend_pipeline_api_v1_assistants__assistant_id__pipeline_recommend_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PipelineRecommendIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineSuggestion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recommend Pipeline",
+        "tags": [
+          "assist"
+        ]
+      }
+    },
+    "/api/v1/assistants/{assistant_id}/prompt:generate": {
+      "post": {
+        "operationId": "generate_prompt_api_v1_assistants__assistant_id__prompt_generate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptGenerateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptSuggestion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Generate Prompt",
+        "tags": [
+          "assist"
+        ]
+      }
+    },
     "/api/v1/assistants/{assistant_id}/versions": {
       "get": {
         "operationId": "list_versions_api_v1_assistants__assistant_id__versions_get",
@@ -11241,6 +12830,133 @@
         ]
       }
     },
+    "/api/v1/orgs/{org_id}/budgets": {
+      "get": {
+        "description": "Every budget in the org (its own and each assistant's), with spend.",
+        "operationId": "get_org_budgets_api_v1_orgs__org_id__budgets_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Org Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Org Budgets",
+        "tags": [
+          "budgets"
+        ]
+      },
+      "put": {
+        "operationId": "put_org_budgets_api_v1_orgs__org_id__budgets_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Org Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BudgetLimits"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Org Budgets",
+        "tags": [
+          "budgets"
+        ]
+      }
+    },
     "/api/v1/orgs/{org_id}/invites": {
       "post": {
         "operationId": "create_invite_api_v1_orgs__org_id__invites_post",
@@ -11502,7 +13218,8 @@
               "default": "assistant",
               "enum": [
                 "assistant",
-                "model"
+                "model",
+                "conversation"
               ],
               "title": "Group By",
               "type": "string"
@@ -11540,6 +13257,24 @@
                 }
               ],
               "title": "To"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 500,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
             }
           },
           {
@@ -11584,6 +13319,83 @@
         "summary": "Get Usage",
         "tags": [
           "orgs"
+        ]
+      }
+    },
+    "/api/v1/pipeline:recommend": {
+      "post": {
+        "description": "A starter pipeline before the assistant exists (the guided setup):\nanyone who may create an assistant may ask. Nothing is registered yet,\nso it can't wire in databases or MCP servers.",
+        "operationId": "recommend_starter_api_v1_pipeline_recommend_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Org-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PipelineRecommendIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineSuggestion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recommend Starter",
+        "tags": [
+          "assist"
         ]
       }
     },

@@ -41,6 +41,9 @@ class CapabilityTool:
     #: The in-process SDK server it belongs to: `caps` for the platform's
     #: own tools, a registered MCP server's name for its tools (task 4.6).
     server: str = CAPS_SERVER_NAME
+    #: For a registered MCP server's tool, the server's id (task 5.10: which
+    #: agent may use it is set per server).
+    source_id: str | None = None
 
     @property
     def qualified_name(self) -> str:
@@ -160,7 +163,7 @@ def build_sdk_server(name: str, tools: list[CapabilityTool]) -> McpSdkServerConf
     """Wrap capability tools as a claude_agent_sdk in-process MCP server."""
     sdk_tools = [
         tool(t.name, t.description, t.input_schema, annotations=annotations_for(t))(
-            _wrap(t.handler)
+            _wrap(t.handler, t.qualified_name)
         )
         for t in tools
     ]
@@ -180,11 +183,11 @@ def build_sdk_servers(tools: list[CapabilityTool]) -> dict[str, McpSdkServerConf
     return {name: build_sdk_server(name, group) for name, group in groups.items()}
 
 
-def _wrap(handler: ToolHandler) -> ToolHandler:
+def _wrap(handler: ToolHandler, name: str) -> ToolHandler:
     async def _inner(args: dict[str, Any]) -> dict[str, Any]:
-        # Every capability result is size-capped and secret-stripped on its
-        # way to the model (app/agent/post_tool.py).
-        return await run_capability(handler, args)
+        # Every capability result is size-capped, secret-stripped and
+        # scanned for injection on its way to the model (post_tool.py).
+        return await run_capability(handler, args, name)
 
     return _inner
 

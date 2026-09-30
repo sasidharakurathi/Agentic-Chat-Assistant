@@ -34,6 +34,7 @@
      deliberate set rather than assorted named colors. */
   --node-agent: var(--primary);
   --node-guardrail: oklch(0.72 0.15 80);
+  --node-router: oklch(0.68 0.14 110);
   --node-kb: oklch(0.65 0.14 140);
   /* Sits between kb (140) and tool (190) on purpose: a data source feeds the
      knowledge base, so reading as its close relative is the right signal. */
@@ -67,6 +68,7 @@
 
   --node-agent: var(--primary);
   --node-guardrail: oklch(0.78 0.14 80);
+  --node-router: oklch(0.74 0.14 110);
   --node-kb: oklch(0.7 0.14 140);
   --node-datasource: oklch(0.7 0.13 165);
   --node-tool: oklch(0.7 0.12 190);
@@ -94,6 +96,7 @@
   --color-ring: var(--ring);
   --color-node-agent: var(--node-agent);
   --color-node-guardrail: var(--node-guardrail);
+  --color-node-router: var(--node-router);
   --color-node-kb: var(--node-kb);
   --color-node-datasource: var(--node-datasource);
   --color-node-tool: var(--node-tool);

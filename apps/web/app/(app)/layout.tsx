@@ -33,6 +33,9 @@ export default function AppLayout({ children }: { children: ReactNode }) {
           <NavLink href="/assistants" active={pathname.startsWith("/assistants")}>
             Assistants
           </NavLink>
+          <NavLink href="/usage" active={pathname.startsWith("/usage")}>
+            Usage
+          </NavLink>
           <NavLink href="/members" active={pathname.startsWith("/members")}>
             Members
           </NavLink>

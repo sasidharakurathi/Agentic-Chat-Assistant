@@ -181,6 +181,18 @@ def spawn_parameters(req: SessionRequest, workdir: Path) -> StdioServerParameter
     return StdioServerParameters(command=req.command, args=list(req.args), env=env, cwd=workdir)
 
 
+async def _remove_workdir(workdir: Path) -> None:
+    """Delete a session's private folder. On Windows a folder can't be removed
+    while a process still has it as its working directory, and the server is
+    often still exiting when the session ends: the files went, the empty
+    folder stayed (dozens of `mcp-*` folders). So try a few times."""
+    for _ in range(10):
+        shutil.rmtree(workdir, ignore_errors=True)
+        if not await anyio.Path(workdir).exists():
+            return
+        await anyio.sleep(0.2)
+
+
 class Runner:
     def __init__(self, config: RunnerConfig) -> None:
         self.config = config
@@ -259,8 +271,9 @@ class Runner:
             session.ended_at = time.monotonic()
             session.ready.set()
             session.done.set()
-            with contextlib.suppress(OSError):
-                shutil.rmtree(session.workdir, ignore_errors=True)
+            # Shielded: this runs while the session is being cancelled.
+            with anyio.CancelScope(shield=True):
+                await _remove_workdir(session.workdir)
 
     async def stop(self, session: Session) -> None:
         if session.task is not None and not session.task.done():

@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.datasources.sql_guard import Permissions
+from app.graph import fixes
 from app.graph.nodes import DatabaseNode, DataSourceNode, Graph, McpServerNode
 from app.graph.validate import GraphIssue
 from app.models.integration import DbConnection, McpServer
@@ -94,6 +95,7 @@ async def reference_issues(
                     message="This database connection does not exist on this assistant. "
                     "Pick one from the Databases tab, or remove the node.",
                     node_id=db_node.id,
+                    fix=fixes.remove_node(db_node.id),
                 )
             )
         elif db_node.data.expose_write and not Permissions.from_dict(conn.permissions).write:
@@ -103,6 +105,7 @@ async def reference_issues(
                     message=f"Writes are exposed, but '{conn.name}' is read-only. Allow writes "
                     "on the connection first, or turn off 'Expose writes'.",
                     node_id=db_node.id,
+                    fix=fixes.patch(db_node.id, {"expose_write": False}, "Turn off Expose writes"),
                 )
             )
 
@@ -115,6 +118,7 @@ async def reference_issues(
                     message="This data source does not exist on this assistant. "
                     "Pick one from the Sources tab, or remove the node.",
                     node_id=ds_node.id,
+                    fix=fixes.remove_node(ds_node.id),
                 )
             )
 
@@ -132,6 +136,7 @@ async def reference_issues(
                     message="This MCP server is not registered on this assistant. "
                     "Pick one from the MCP servers tab, or remove the node.",
                     node_id=mcp_node.id,
+                    fix=fixes.remove_node(mcp_node.id),
                 )
             )
     return issues

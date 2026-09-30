@@ -3,7 +3,7 @@
 import { useState } from "react";
 
 import { Markdown } from "@/components/chat/Markdown";
-import { toolLabel, toolShortName } from "@/lib/tool-label";
+import { subagentLabel, toolLabel, toolShortName } from "@/lib/tool-label";
 import { permissionText, type ToolCallView } from "@/lib/tool-tree";
 import { cn } from "@/lib/utils";
 
@@ -23,7 +23,8 @@ export function ToolCallCard({
   // boundary on the chat route, so one bad deref here blanks the whole
   // conversation rather than degrading a single card.
   const short = toolShortName(call.name ?? "tool");
-  const label = toolLabel(call.name ?? "tool");
+  const role = subagentLabel(call.name ?? "", call.input);
+  const label = role ?? toolLabel(call.name ?? "tool");
   const sql = typeof call.input?.sql === "string" ? (call.input.sql as string) : null;
   const rows = parseRows(call.output);
   return (
@@ -34,7 +35,7 @@ export function ToolCallCard({
       >
         <span className="font-medium">
           🔧 {label}
-          {delegated && <span className="text-muted-foreground ml-2">subagent</span>}
+          {delegated && !role && <span className="text-muted-foreground ml-2">subagent</span>}
           {call.status && (
             <span
               className={cn(

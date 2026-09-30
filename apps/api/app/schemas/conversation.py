@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -69,6 +69,12 @@ class RunOut(ORMModel):
     duration_ms: int | None
     status: RunStatus
     error: str | None
+    #: Why the model stopped ("end_turn", "refusal", ...), when reported.
+    stop_reason: str | None = None
+    #: The model that answered instead of `model`, when the fallback did.
+    fallback_model: str | None = None
+    #: How the router sorted the message (task 5.10), when one is wired in.
+    route: str | None = None
     created_at: datetime
 
 
@@ -82,8 +88,63 @@ class RunStep(ApiModel):
     output: str | None = None
 
 
+class TraceApproval(ApiModel):
+    """The approval a step waited on, and who answered."""
+
+    status: str
+    risk: str
+    requested_at: datetime
+    decided_at: datetime | None = None
+    #: How long the step waited for a person.
+    wait_ms: int | None = None
+    #: Who answered: their name, or their email when they have none.
+    decided_by: str | None = None
+
+
+class TraceGuardrail(ApiModel):
+    check: str
+    where: str
+    detail: str
+
+
+class TraceStep(ApiModel):
+    """One thing the run did, in order (task 5.9): a tool call, or a
+    guardrail acting."""
+
+    id: str | None = None
+    kind: Literal["tool", "guardrail"]
+    name: str
+    #: The delegation this ran inside, for a subagent's own calls.
+    parent_id: str | None = None
+    #: When it started, from the start of the turn; None for runs saved
+    #: before this was recorded.
+    started_ms: int | None = None
+    duration_ms: int | None = None
+    status: str | None = None
+    #: How the call was allowed: "auto", "approved", "denied", ...
+    permission: str | None = None
+    input: Any = None
+    #: The start of the output (the whole of it is in the message).
+    output: str | None = None
+    #: What a subagent wrote while it worked, for a delegation.
+    subagent_text: str | None = None
+    approval: TraceApproval | None = None
+    guardrail: TraceGuardrail | None = None
+    #: The canvas nodes it touched.
+    nodes: list[str] = Field(default_factory=list)
+
+
 class RunDetail(RunOut):
     steps: list[RunStep]
+    assistant_id: uuid.UUID
+    #: The run step by step: calls with their timing, approvals, subagents'
+    #: notes and guardrail findings.
+    timeline: list[TraceStep] = Field(default_factory=list)
+    #: Every canvas node the run touched.
+    nodes: list[str] = Field(default_factory=list)
+    #: Which graph the nodes are from: the published version that answered,
+    #: or the current draft (which may have changed since).
+    graph: Literal["version", "draft"] = "draft"
 
 
 class ConversationDetail(ConversationSummary):
@@ -104,4 +165,7 @@ __all__ = [
     "RunDetail",
     "RunOut",
     "RunStep",
+    "TraceApproval",
+    "TraceGuardrail",
+    "TraceStep",
 ]

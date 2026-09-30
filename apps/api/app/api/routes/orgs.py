@@ -173,9 +173,10 @@ async def get_usage(
     group_by: Annotated[GroupBy, Query()] = "assistant",
     from_: Annotated[datetime | None, Query(alias="from")] = None,
     to: Annotated[datetime | None, Query()] = None,
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
 ) -> UsageRollupResponse:
     rows = await usage_service.rollup(
-        session, org_id=org_id, group_by=group_by, date_from=from_, date_to=to
+        session, org_id=org_id, group_by=group_by, date_from=from_, date_to=to, limit=limit
     )
     return UsageRollupResponse(group_by=group_by, rows=rows)
 

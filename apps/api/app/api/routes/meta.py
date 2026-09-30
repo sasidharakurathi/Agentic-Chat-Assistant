@@ -4,6 +4,7 @@ from typing import Any, get_args
 
 from fastapi import APIRouter
 
+from app.agent import claude_api
 from app.agent.models import ALLOWED_MODELS, DEFAULT_MODEL_BY_ROLE
 from app.config import settings
 from app.graph.nodes import NodeType
@@ -25,6 +26,9 @@ async def get_config_schema() -> dict[str, Any]:
         # Offline mode (RAG_OFFLINE=1) switches web search off instance-wide,
         # whatever an assistant's config says; the panels say so.
         "offline": settings.rag_offline,
+        # Whether the AI helpers (e.g. writing a system prompt) call the real
+        # model and bill for it, or use their free stand-ins (task 5.5).
+        "real_model": claude_api.real_model_allowed(),
     }
 
 

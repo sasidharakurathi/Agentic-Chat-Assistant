@@ -29,6 +29,7 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from app.guardrails.pii import redact as redact_pii
 from app.logging import get_logger
 from app.models.conversation import RunStatus
 from app.observability.otel import LLM_SCOPE
@@ -44,9 +45,14 @@ log = get_logger(__name__)
 SPAN_TEXT_CHARS = 20_000
 
 
-def _text(value: Any) -> str:
+def _text(value: Any, pii: bool = False) -> str:
+    """What a span may hold: no secrets ever, and no personal data when the
+    assistant redacts it (`guardrails.pii_redaction`, task 5.3)."""
     raw = value if isinstance(value, str) else json.dumps(value, default=str)
-    return strip_secrets(raw)[:SPAN_TEXT_CHARS]
+    raw = strip_secrets(raw)
+    if pii:
+        raw = redact_pii(raw)[0]
+    return raw[:SPAN_TEXT_CHARS]
 
 
 def _tracer() -> Any | None:
@@ -67,8 +73,10 @@ class TurnTrace:
         started_ns: int,
         tracer: Any | None = None,
         conversation_id: uuid.UUID | None = None,
+        pii_redaction: bool = False,
     ) -> None:
         self._conversation_id = conversation_id
+        self._pii = pii_redaction
         self._span = span
         self._tracer = tracer
         self.trace_id = trace_id
@@ -85,6 +93,7 @@ class TurnTrace:
         user_ref: str | None,
         model: str,
         prompt: str,
+        pii_redaction: bool = False,
     ) -> TurnTrace:
         started_ns = time.time_ns()
         tracer = _tracer()
@@ -93,8 +102,8 @@ class TurnTrace:
             attributes: dict[str, Any] = {
                 "langfuse.trace.name": "chat turn",
                 "langfuse.session.id": str(conversation_id),
-                "langfuse.trace.input": _text(prompt),
-                "langfuse.observation.input": _text(prompt),
+                "langfuse.trace.input": _text(prompt, pii_redaction),
+                "langfuse.observation.input": _text(prompt, pii_redaction),
                 "langfuse.trace.metadata.assistant_id": str(assistant_id),
                 "langfuse.trace.metadata.org_id": str(org_id),
                 "assistant_studio.conversation_id": str(conversation_id),
@@ -120,6 +129,7 @@ class TurnTrace:
             started_ns=started_ns,
             tracer=tracer,
             conversation_id=conversation_id,
+            pii_redaction=pii_redaction,
         )
 
     def finish(self, outcome: TurnOutcome, *, duration_ms: int, model_calls: int = 0) -> None:
@@ -156,7 +166,7 @@ class TurnTrace:
         assert turn_span is not None and tracer is not None
         parent = trace.set_span_in_context(turn_span)
         end_ns = time.time_ns()
-        answer = _text(outcome.text.strip())
+        answer = _text(outcome.text.strip(), self._pii)
 
         generation = tracer.start_span(
             "claude",
@@ -185,8 +195,8 @@ class TurnTrace:
                 context=parent,
                 start_time=start,
                 attributes={
-                    "langfuse.observation.input": _text(call.get("input") or {}),
-                    "langfuse.observation.output": _text(call.get("output") or ""),
+                    "langfuse.observation.input": _text(call.get("input") or {}, self._pii),
+                    "langfuse.observation.output": _text(call.get("output") or "", self._pii),
                     "assistant_studio.tool.name": str(call.get("name", "")),
                     "assistant_studio.tool.status": str(call.get("status") or "pending"),
                 },

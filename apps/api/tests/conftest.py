@@ -1,16 +1,34 @@
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-# Must be set before anything under app.* imports app.config.
-_TMP = Path(tempfile.mkdtemp(prefix="assistant-studio-test-"))
+from tests.temp_dirs import new_run_dir, sweep
+
+# Everything a test run writes to "temp" goes into one folder,
+# %TEMP%/assistant-studio-tests/run-XXXX, removed when the run ends; finished
+# runs' leftovers are swept first (see tests/temp_dirs.py). They used to
+# scatter across the system temp directory and were never removed: hundreds
+# of folders. KEEP_TEST_FILES=1 keeps a run's folder.
+# Must happen before anything under app.* imports app.config.
+sweep()
+_TMP = new_run_dir()
+for _var in ("TMP", "TEMP", "TMPDIR"):
+    os.environ[_var] = str(_TMP)
+tempfile.tempdir = str(_TMP)
+if not os.environ.get("KEEP_TEST_FILES"):
+    atexit.register(shutil.rmtree, _TMP, ignore_errors=True)
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("DATABASE_URL", f"sqlite+aiosqlite:///{_TMP / 'test.db'}")
 os.environ.setdefault("JWT_SECRET", "test-secret-value-that-is-long-enough-xxxxxxxx")
 os.environ.setdefault("LOG_FORMAT", "console")
+# The suite makes hundreds of requests from one address in seconds; rate
+# limits are off unless a test turns them on (test_rate_limit.py).
+os.environ.setdefault("RATE_LIMIT_ENABLED", "0")
 # Tests that need an MCP runner start their own; nothing else should reach one.
 os.environ.setdefault("MCP_RUNNER_URL", "")
 

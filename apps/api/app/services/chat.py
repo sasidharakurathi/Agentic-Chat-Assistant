@@ -16,20 +16,24 @@ from typing import Any
 
 import anyio
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent import approval_registry, interrupts, session_store
+from app.agent import approval_registry, interrupts, router, session_store
 from app.agent.approvals import ApprovalRequest
+from app.agent.caps_memory import MemoryScope
+from app.agent.caps_memory import owner_key as memory_owner
 from app.agent.citations import blocks_from
 from app.agent.events import (
     AgentEvent,
     ApprovalRequiredEvent,
+    BudgetEvent,
     CitationEvent,
     DoneEvent,
     ErrorEvent,
 )
 from app.agent.runtime import Turn
+from app.agent.titles import DEFAULT_TITLE, Title
 from app.api.errors import NotFound
 from app.config import settings
 from app.db.pagination import PageResult, keyset_page
@@ -49,7 +53,7 @@ from app.models.usage import UsageEvent, UsageKind
 from app.observability.turn_trace import TurnTrace
 from app.schemas.assistant_config import AssistantConfig
 from app.services import approvals as approvals_svc
-from app.services import audit
+from app.services import audit, budgets, conversation_memory
 
 log = get_logger(__name__)
 
@@ -80,7 +84,7 @@ async def create_conversation(
         assistant_version_id=assistant.current_version_id,
         org_id=assistant.org_id,
         created_by=user_id,
-        title=(title or "New conversation").strip() or "New conversation",
+        title=(title or DEFAULT_TITLE).strip() or DEFAULT_TITLE,
         external_user_ref=external_user_ref,
     )
     session.add(conv)
@@ -223,7 +227,7 @@ async def archive(
     await session.commit()
 
 
-async def _config_for(session: AsyncSession, conv: Conversation) -> AssistantConfig:
+async def config_for(session: AsyncSession, conv: Conversation) -> AssistantConfig:
     """The config this turn runs with: the assistant's current published
     version, or its draft while nothing is published.
 
@@ -345,7 +349,7 @@ async def run_message(
     session: AsyncSession, *, conversation_id: uuid.UUID, text: str
 ) -> AsyncGenerator[AgentEvent, None]:
     conv = await load(session, conversation_id)
-    config = await _config_for(session, conv)
+    config = await config_for(session, conv)
 
     cap = config.models.main.max_budget_usd
     spent = float(conv.cost_usd)
@@ -354,6 +358,19 @@ async def run_message(
             code="budget_exceeded", message="This conversation has reached its spend limit."
         )
         return
+    # The org's and the assistant's budgets (task 5.7): stop at 100%, say so
+    # from 80%.
+    gate = await budgets.gate(session, conv.org_id, conv.assistant_id)
+    if (over := gate.exceeded) is not None:
+        yield ErrorEvent(code="budget_exceeded", message=over.exceeded_message())
+        return
+    for w in gate.warnings:
+        yield BudgetEvent(
+            scope=w.scope,
+            period=w.period.value,
+            ratio=round(w.ratio, 4),
+            message=w.warning_message(),
+        )
 
     # Bounded concurrency (plan §4.1): each turn runs a CLI subprocess, so an
     # unbounded burst of messages is an unbounded burst of processes. The
@@ -369,7 +386,7 @@ async def run_message(
         return
     try:
         async with contextlib.aclosing(
-            _run_admitted(session, conv, config, text, cap, spent)
+            _run_admitted(session, conv, config, text, cap, spent, gate)
         ) as events:
             async for ev in events:
                 yield ev
@@ -377,27 +394,30 @@ async def run_message(
         slots.release()
 
 
-async def _run_admitted(
-    session: AsyncSession,
+async def _routed(
+    config: AssistantConfig, text: str
+) -> tuple[AssistantConfig, router.Routing | None]:
+    """The router (task 5.10): how much effort this message gets. Only the
+    effort changes; the turn is otherwise the agent's own."""
+    if not config.router.enabled:
+        return config, None
+    routing = await router.route(config, text)
+    routed = config.model_copy(deep=True)
+    routed.models.main.effort = routing.effort
+    return routed, routing
+
+
+def _new_turn(
     conv: Conversation,
     config: AssistantConfig,
     text: str,
-    cap: float | None,
-    spent: float,
-) -> AsyncGenerator[AgentEvent, None]:
-    """One turn, once it holds a concurrency slot."""
-    user_msg = Message(
-        conversation_id=conv.id,
-        org_id=conv.org_id,
-        role=MessageRole.user,
-        content=text,
-    )
-    session.add(user_msg)
-    await session.flush()
-    await session.commit()  # keep the user's message even if the client disconnects
-
-    resume_id = await _session_to_resume(conv)
-    remaining = None if cap is None else max(0.0, cap - spent)
+    plan: Any,
+    remaining: float | None,
+    budget_message: str | None,
+    routing: router.Routing | None,
+) -> Turn:
+    """The turn's runtime object, with its approval hook and how it was
+    routed."""
 
     def request_approval(
         tool_name: str,
@@ -424,14 +444,69 @@ async def _run_admitted(
         config,
         prompt=text,
         assistant_id=conv.assistant_id,
-        session_id=resume_id,
+        session_id=plan.resume_id,
+        history=plan.replay,
+        memory_scope=MemoryScope(
+            org_id=conv.org_id,
+            assistant_id=conv.assistant_id,
+            owner_key=memory_owner(
+                external_user_ref=conv.external_user_ref,
+                user_id=conv.created_by,
+                conversation_id=conv.id,
+            ),
+        ),
         budget_remaining_usd=remaining,
+        budget_message=budget_message,
         scratch_dir=_scratch_dir(conv.id),
         citation_state=dict(conv.citation_state or {}),
         approvals=ApprovalRequest(
             conversation_id=conv.id, org_id=conv.org_id, request=request_approval
         ),
     )
+    if routing is not None:
+        turn.outcome.route = routing.level
+        turn.outcome.route_spend = routing.spend
+    return turn
+
+
+async def _run_admitted(
+    session: AsyncSession,
+    conv: Conversation,
+    config: AssistantConfig,
+    text: str,
+    cap: float | None,
+    spent: float,
+    gate: budgets.Gate,
+) -> AsyncGenerator[AgentEvent, None]:
+    """One turn, once it holds a concurrency slot."""
+    user_msg = Message(
+        conversation_id=conv.id,
+        org_id=conv.org_id,
+        role=MessageRole.user,
+        content=text,
+    )
+    session.add(user_msg)
+    await session.flush()
+    await session.commit()  # keep the user's message even if the client disconnects
+
+    # Resume the SDK session, or start fresh from the summary and recent
+    # messages, or (history off) neither (task 5.2).
+    plan = await conversation_memory.plan_turn(
+        session,
+        conv,
+        config,
+        current_message_id=user_msg.id,
+        resume_id=await _session_to_resume(conv),
+    )
+    config, routing = await _routed(config, text)
+    # The first turn names its conversation, in parallel with the answer.
+    title_task = conversation_memory.start_title(conv, config, text)
+    # A turn stops at whichever runs out first: the conversation's own cap or
+    # the tightest of the org's and the assistant's budgets.
+    remaining, budget_message = budgets.narrower(
+        None if cap is None else max(0.0, cap - spent), gate
+    )
+    turn = _new_turn(conv, config, text, plan, remaining, budget_message, routing)
     started = time.perf_counter()
     # One id for the whole turn: stored on the run row, and bound into every
     # log line written while it runs, including from the driver and tool
@@ -445,6 +520,7 @@ async def _run_admitted(
         user_ref=conv.external_user_ref,
         model=config.models.main.model,
         prompt=text,
+        pii_redaction=config.guardrails.pii_redaction,
     )
     trace_id = tracing.trace_id
     structlog.contextvars.bind_contextvars(trace_id=trace_id, conversation_id=str(conv.id))
@@ -472,9 +548,13 @@ async def _run_admitted(
         # so an unshielded commit here would itself be cancelled.
         turn.outcome.status = RunStatus.aborted
         turn.outcome.error = "client disconnected"
+        if title_task is not None:
+            title_task.cancel()
         with anyio.CancelScope(shield=True):
             try:
-                await _finalize(session, conv, config, user_msg, turn, started, spent, trace_id)
+                await _finalize(
+                    session, conv, config, user_msg, turn, started, plan.summary_version, trace_id
+                )
             except Exception:
                 log.exception("abort_finalize_failed", conversation_id=str(conv.id))
             _end_trace(tracing, turn, started)
@@ -484,6 +564,8 @@ async def _run_admitted(
         # still ended, or it would never be exported.
         turn.outcome.status = RunStatus.error
         turn.outcome.error = f"{type(exc).__name__}: {exc}"
+        if title_task is not None:
+            title_task.cancel()
         _end_trace(tracing, turn, started)
         raise
     finally:
@@ -499,16 +581,38 @@ async def _run_admitted(
     # turn (reproduced: `_finalize` interrupted with status still "ok").
     with anyio.CancelScope(shield=True):
         asst_msg, run = await _finalize(
-            session, conv, config, user_msg, turn, started, spent, trace_id
+            session, conv, config, user_msg, turn, started, plan.summary_version, trace_id
         )
+        # Over the assistant's threshold: summarize in the background (5.2).
+        await conversation_memory.after_turn(session, conv, config)
     _end_trace(tracing, turn, started)
 
-    # After the commit, deliberately. Every yield before it is a point where a
-    # client disconnect could interrupt; emitting citations here adds none.
+    async for ev in _closing_events(session, conv, turn, title_task):
+        yield ev
+    yield DoneEvent(message_id=str(asst_msg.id), run_id=str(run.id), trace_id=trace_id)
+
+
+async def _closing_events(
+    session: AsyncSession,
+    conv: Conversation,
+    turn: Turn,
+    title_task: asyncio.Task[Title] | None,
+) -> AsyncGenerator[AgentEvent, None]:
+    """What follows a saved turn, before `done`: its citations, then the
+    conversation's new title on a first turn (task 5.2).
+
+    After the commit, deliberately. Every yield before it is a point where a
+    client disconnect could interrupt; emitting these here adds none."""
     for citation in turn.outcome.citations:
         yield CitationEvent(**asdict(citation))
-
-    yield DoneEvent(message_id=str(asst_msg.id), run_id=str(run.id), trace_id=trace_id)
+    if title_task is None:
+        return
+    try:
+        title = await conversation_memory.apply_title(session, conv, title_task)
+    finally:
+        title_task.cancel()  # a no-op once finished; stops one still running
+    if title is not None:
+        yield title
 
 
 async def _session_to_resume(conv: Conversation) -> str | None:
@@ -546,7 +650,7 @@ async def _finalize(
     user_msg: Message,
     turn: Turn,
     started: float,
-    spent: float,
+    summary_version: int,
     trace_id: str | None = None,
 ) -> tuple[Message, Run]:
     """Persist a turn: the assistant message, its run row, the usage event and
@@ -580,7 +684,11 @@ async def _finalize(
         # discriminator from here on) and citations sit alongside them. Rows
         # written before 2.9 have no "type" key at all, so readers must treat
         # "absent" as a tool call rather than filtering for type == tool_call.
-        blocks=[{"type": "tool_call", **call} for call in o.tool_calls] + blocks_from(o.citations),
+        blocks=[{"type": "tool_call", **call} for call in o.tool_calls]
+        + blocks_from(o.citations)
+        # What the guardrails did (task 5.3), so the chat still shows it
+        # after a reload.
+        + [{"type": "guardrail", **f} for f in turn.guard.findings],
         model=config.models.main.model,
         tokens_in=o.tokens_in,
         tokens_out=o.tokens_out,
@@ -610,9 +718,28 @@ async def _finalize(
         duration_ms=elapsed_ms,
         status=o.status,
         error=o.error,
+        stop_reason=o.stop_reason,
+        fallback_model=o.fallback_model,
+        route=o.route,
         trace_id=trace_id,
     )
     session.add(run)
+    route_cost = 0.0
+    if o.route_spend is not None:
+        # The router's own call (task 5.10), on the ledger under its model.
+        route_cost = o.route_spend.cost_usd
+        session.add(
+            UsageEvent(
+                org_id=conv.org_id,
+                assistant_id=conv.assistant_id,
+                conversation_id=conv.id,
+                kind=UsageKind.llm,
+                model=o.route_spend.model,
+                tokens_in=o.route_spend.tokens_in,
+                tokens_out=o.route_spend.tokens_out,
+                cost_usd=route_cost,
+            )
+        )
 
     session.add(
         UsageEvent(
@@ -676,19 +803,37 @@ async def _finalize(
             )
         )
 
-    conv.cost_usd = spent + o.cost_usd + turn.rag_usage.cost_usd
+    # Added in SQL, not written as a total read at the start of the turn: a
+    # summary or title (task 5.2) may have added its own cost meanwhile, and
+    # an absolute write would silently drop it.
+    await session.execute(
+        update(Conversation)
+        .where(Conversation.id == conv.id)
+        .values(cost_usd=Conversation.cost_usd + o.cost_usd + turn.rag_usage.cost_usd + route_cost)
+        # Not mirrored onto `conv` in Python (Decimal + float); refreshed
+        # from the row after the commit instead.
+        .execution_options(synchronize_session=False)
+    )
     usage = dict(conv.token_usage or {})
     usage["in"] = int(usage.get("in", 0)) + o.tokens_in
     usage["out"] = int(usage.get("out", 0)) + o.tokens_out
     conv.token_usage = usage
     conv.last_message_at = datetime.now(UTC)
-    if o.sdk_session_id and o.sdk_session_id != conv.sdk_session_id:
+    if not config.memory.persist_history:
+        # Nothing to resume next time: each message is answered on its own.
+        conv.sdk_session_id = None
+    elif o.sdk_session_id and o.sdk_session_id != conv.sdk_session_id:
         conv.sdk_session_id = o.sdk_session_id
+    # The summary this session was started from (or resumed at), captured
+    # when the turn began: a summary written during the turn is newer, so the
+    # next turn starts fresh from it.
+    conv.session_summary_version = summary_version
     state = turn.citation_state()
     if state is not None:
         conv.citation_state = state
     await session.flush()
     await session.commit()
+    await session.refresh(conv, attribute_names=["cost_usd"])
     # After the commit, so the cache is never ahead of the row, and on every
     # turn, not only when the id changes: that refills it after an eviction or
     # a Redis restart, and keeps its TTL counting from the last use.
@@ -699,6 +844,7 @@ async def _finalize(
 
 __all__ = [
     "archive",
+    "config_for",
     "create_conversation",
     "get_run",
     "list_conversations",

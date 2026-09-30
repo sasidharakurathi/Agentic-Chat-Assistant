@@ -3,14 +3,17 @@
 The bulk of this file is about the *gate*, not the prompt. This is the first
 thing in the project that spends money without a user pressing send — it
 fires on a file upload, once per chunk — so "it is off unless three separate
-things agree" is the property worth pinning hardest. The Haiku call itself is
-exercised through `httpx.MockTransport`: no network, no key, no spend.
+things agree" is the property worth pinning hardest. The Haiku call itself
+runs on the official SDK over a mock transport (`tests/claude_stub.py`): no
+network, no key, no spend.
 """
 
 from __future__ import annotations
 
-import httpx
+from typing import Any
+
 import pytest
+from app.agent.claude_api import MAX_RETRIES
 from app.config import settings
 from app.rag.contextualize import (
     ContextResult,
@@ -19,30 +22,7 @@ from app.rag.contextualize import (
     apply_prefix,
     get_contextualizer,
 )
-
-
-def _mock_client(handler: object) -> object:
-    """Patch httpx.AsyncClient so the contextualizer's own internally-built
-    client is the mocked one (same trick test_rag_embedders.py uses)."""
-    transport = httpx.MockTransport(handler)  # type: ignore[arg-type]
-
-    class _Client(httpx.AsyncClient):
-        def __init__(self, *a: object, **kw: object) -> None:
-            kw.pop("transport", None)
-            super().__init__(*a, transport=transport, **kw)  # type: ignore[arg-type]
-
-    return _Client
-
-
-def _reply(text: str, tokens_in: int = 500, tokens_out: int = 20) -> httpx.Response:
-    return httpx.Response(
-        200,
-        json={
-            "content": [{"type": "text", "text": text}],
-            "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out},
-        },
-    )
-
+from tests import claude_stub
 
 # ── the spend gate ───────────────────────────────────────────
 
@@ -111,22 +91,11 @@ def test_apply_prefix_is_a_no_op_without_a_prefix() -> None:
     assert apply_prefix("Context.", "chunk text") == "Context.\n\nchunk text"
 
 
-# ── the paid path, mocked ────────────────────────────────────
+# ── the paid path, on a mock transport ───────────────────────
 
 
 def _tagged(*lines: str) -> str:
     return "\n".join(f'<context index="{i}">{line}</context>' for i, line in enumerate(lines, 1))
-
-
-@pytest.fixture(autouse=True)
-def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    slept: list[float] = []
-
-    async def fake_sleep(delay: float) -> None:
-        slept.append(delay)
-
-    monkeypatch.setattr("app.rag.http_retry._sleep", fake_sleep)
-    return slept
 
 
 async def test_chunks_are_batched_into_one_call_and_costs_are_summed(
@@ -134,42 +103,33 @@ async def test_chunks_are_batched_into_one_call_and_costs_are_summed(
 ) -> None:
     """The document excerpt is most of every request; sending it once for a
     batch of chunks instead of once per chunk is what "batched" buys."""
-    seen: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        import json as _json
-
-        body = _json.loads(request.content)
-        seen.append(body["messages"][0]["content"])
-        return _reply(_tagged("About alpha.", "About beta."), tokens_in=1000, tokens_out=10)
-
-    monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    monkeypatch.setattr(settings, "anthropic_api_key", "sk-test")
-
+    stub = claude_stub.install(
+        monkeypatch,
+        lambda r: claude_stub.message(
+            _tagged("About alpha.", "About beta."), tokens_in=1000, tokens_out=10
+        ),
+    )
     result = await HaikuContextualizer().contextualize("THE DOCUMENT", ["alpha", "beta"])
 
     assert result.prefixes == ["About alpha.", "About beta."]
-    assert len(seen) == 1, "one request for both chunks"
-    assert seen[0].count("THE DOCUMENT") == 1
-    assert '<chunk index="1">\nalpha' in seen[0] and '<chunk index="2">\nbeta' in seen[0]
+    (request,) = stub.requests
+    sent = claude_stub.body(request)
+    assert (sent["model"], sent["max_tokens"]) == ("claude-haiku-4-5", 300)
+    prompt = claude_stub.prompt(request)
+    assert prompt.count("THE DOCUMENT") == 1
+    assert '<chunk index="1">\nalpha' in prompt and '<chunk index="2">\nbeta' in prompt
     # haiku is (1.00, 5.00) per Mtok
     assert (result.tokens_in, result.tokens_out) == (1000, 10)
     assert result.cost_usd == pytest.approx(1000 / 1e6 * 1.0 + 10 / 1e6 * 5.0)
+    assert stub.timeouts == [60.0], "one client for the whole document"
 
 
 async def test_batches_are_capped_at_the_batch_size(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = {"n": 0}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
-        return _reply(_tagged(*["c"] * 8))
-
-    monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    monkeypatch.setattr(settings, "anthropic_api_key", "sk-test")
+    stub = claude_stub.install(monkeypatch, lambda r: claude_stub.message(_tagged(*["c"] * 8)))
     result = await HaikuContextualizer(batch_size=8).contextualize(
         "doc", [str(i) for i in range(20)]
     )
-    assert calls["n"] == 3
+    assert len(stub.requests) == 3
     assert len(result.prefixes) == 20
 
 
@@ -177,54 +137,59 @@ async def test_a_line_the_model_left_out_is_no_prefix_not_a_shifted_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     reply = '<context index="1">one</context>\n<context index="3">three</context>'
-    monkeypatch.setattr(httpx, "AsyncClient", _mock_client(lambda r: _reply(reply)))
-    monkeypatch.setattr(settings, "anthropic_api_key", "sk-test")
+    claude_stub.install(monkeypatch, lambda r: claude_stub.message(reply))
     result = await HaikuContextualizer().contextualize("doc", ["a", "b", "c"])
     assert result.prefixes == ["one", None, "three"]
 
 
 async def test_a_rate_limit_is_retried_after_the_time_it_asks_for(
-    monkeypatch: pytest.MonkeyPatch, _no_real_sleep: list[float]
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = {"n": 0}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return httpx.Response(429, headers={"retry-after": "7"}, json={"error": "rate"})
-        return _reply(_tagged("ctx"))
-
-    monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    monkeypatch.setattr(settings, "anthropic_api_key", "sk-test")
+    answers = iter(
+        [
+            claude_stub.error(429, "rate_limit_error", {"retry-after": "7"}),
+            claude_stub.message("ctx"),
+        ]
+    )
+    stub = claude_stub.install(monkeypatch, lambda r: next(answers))
     result = await HaikuContextualizer().contextualize("doc", ["a"])
     assert result.prefixes == ["ctx"]
-    assert _no_real_sleep == [7.0]
+    assert stub.slept == [7.0]
     assert result.failed == 0
 
 
 async def test_a_batch_that_keeps_failing_does_not_lose_the_others(
-    monkeypatch: pytest.MonkeyPatch, _no_real_sleep: list[float]
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A failed prefix costs a little retrieval quality; a raised exception
     would cost the user the entire ingestion."""
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        import json as _json
+    def handler(request: Any) -> Any:
+        if '<chunk index="1">\nb\n' in claude_stub.prompt(request):
+            return claude_stub.error(529, "overloaded_error")
+        return claude_stub.message(_tagged("ok"))
 
-        prompt = _json.loads(request.content)["messages"][0]["content"]
-        if '<chunk index="1">\nb\n' in prompt:
-            return httpx.Response(529, json={"error": "overloaded"})
-        return _reply(_tagged("ok"))
-
-    monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    monkeypatch.setattr(settings, "anthropic_api_key", "sk-test")
-
+    stub = claude_stub.install(monkeypatch, handler)
     result = await HaikuContextualizer(concurrency=1, batch_size=1).contextualize(
         "doc", ["a", "b", "c"]
     )
     assert result.prefixes == ["ok", None, "ok"]
     assert result.failed == 1
-    assert len(_no_real_sleep) == 4, "retried before giving up"
+    assert len(stub.slept) == MAX_RETRIES, "retried before giving up"
+    assert len(stub.requests) == 3 + MAX_RETRIES
+
+
+async def test_a_refusal_is_no_prefix_even_for_one_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A one-chunk answer without tags is taken as the line itself, so a
+    refusal's text must not get that far."""
+    claude_stub.install(
+        monkeypatch,
+        lambda r: claude_stub.message("I can't help with that.", stop_reason="refusal"),
+    )
+    result = await HaikuContextualizer().contextualize("doc", ["a"])
+    assert result.prefixes == [None]
+    assert result.failed == 1
+    assert result.tokens_in == 500, "a refusal is still billed"
 
 
 def test_the_estimate_scales_with_batches_not_chunks() -> None:
@@ -238,18 +203,15 @@ def test_the_estimate_scales_with_batches_not_chunks() -> None:
 async def test_an_empty_response_becomes_no_prefix_not_an_empty_string(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(httpx, "AsyncClient", _mock_client(lambda r: _reply("   ")))
-    monkeypatch.setattr(settings, "anthropic_api_key", "sk-test")
+    claude_stub.install(monkeypatch, lambda r: claude_stub.message("   "))
     result = await HaikuContextualizer().contextualize("doc", ["a"])
     assert result.prefixes == [None]
 
 
 async def test_no_chunks_means_no_calls_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
-        raise AssertionError("should not have been called")
-
-    monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
+    stub = claude_stub.install(monkeypatch, lambda r: pytest.fail("should not have been called"))
     assert await HaikuContextualizer().contextualize("doc", []) == ContextResult(prefixes=[])
+    assert stub.timeouts == [], "not even a client"
 
 
 async def test_the_document_shown_to_the_model_is_truncated(
@@ -259,15 +221,6 @@ async def test_the_document_shown_to_the_model_is_truncated(
     large PDF quadratic in cost."""
     from app.rag.contextualize import DOC_CONTEXT_CHARS
 
-    sizes: list[int] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        import json as _json
-
-        sizes.append(len(_json.loads(request.content)["messages"][0]["content"]))
-        return _reply("ctx")
-
-    monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    monkeypatch.setattr(settings, "anthropic_api_key", "sk-test")
+    stub = claude_stub.install(monkeypatch, lambda r: claude_stub.message("ctx"))
     await HaikuContextualizer().contextualize("x" * (DOC_CONTEXT_CHARS * 4), ["chunk"])
-    assert sizes[0] < DOC_CONTEXT_CHARS * 2
+    assert len(claude_stub.prompt(stub.requests[0])) < DOC_CONTEXT_CHARS * 2

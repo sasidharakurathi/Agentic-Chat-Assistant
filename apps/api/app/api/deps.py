@@ -10,13 +10,15 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, Header, Path, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api import ratelimit
 from app.api.errors import BadRequest, Forbidden, NotFound, Unauthorized
+from app.config import settings
 from app.db.session import get_session
 from app.db.tenancy import bind_org
 from app.models.assistant import Assistant
@@ -48,10 +50,9 @@ PageQuery = Annotated[PageParams, Depends(page_params)]
 
 
 def client_ip(request: Request) -> str | None:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
+    # Believes X-Forwarded-For only behind trusted proxies (task 5.8); it
+    # used to take the header's first entry, which the caller chooses.
+    return ratelimit.client_ip(request)
 
 
 ClientIP = Annotated[str | None, Depends(client_ip)]
@@ -72,10 +73,30 @@ async def get_current_user(
     user = await session.get(User, claims.user_id)
     if user is None or not user.is_active:
         raise Unauthorized("User not found or inactive", code="invalid_token")
+    await ratelimit.enforce("user", str(user.id), settings.rate_limit_user)
     return user
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+def per_user_limit(bucket: str, setting: str) -> Any:
+    """A route dependency: a rate limit for this caller (task 5.8), from
+    `settings.<setting>`. For routes that cost more than an ordinary read."""
+
+    async def _limit(user: CurrentUser) -> None:
+        await ratelimit.enforce(bucket, str(user.id), getattr(settings, setting))
+
+    return Depends(_limit)
+
+
+def per_ip_limit(bucket: str, setting: str) -> Any:
+    """The same, per client IP: for routes used before anyone is signed in."""
+
+    async def _limit(request: Request) -> None:
+        await ratelimit.enforce(bucket, ratelimit.client_ip(request), getattr(settings, setting))
+
+    return Depends(_limit)
 
 
 async def get_org_membership(
@@ -254,6 +275,8 @@ __all__ = [
     "get_conversation_context",
     "get_current_user",
     "get_org_membership",
+    "per_ip_limit",
+    "per_user_limit",
     "require_assistant_editor",
     "require_conversation_editor",
     "require_role",

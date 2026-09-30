@@ -5,7 +5,12 @@ export function formatUsd(amount: number | string): string {
   const n = typeof amount === "string" ? Number(amount) : amount;
   if (!Number.isFinite(n) || n <= 0) return "$0.00";
   if (n < 0.0001) return "<$0.0001";
-  if (n < 1) return `$${n.toFixed(4)}`;
+  // Four places below a dollar, without zeros past the cents: "$0.50",
+  // "$0.045", "$0.0042" (a limit of $0.50 read "$0.5000").
+  if (n < 1) {
+    const short = String(Number(n.toFixed(4)));
+    return `$${(short.split(".")[1] ?? "").length < 2 ? n.toFixed(2) : short}`;
+  }
   return `$${n.toFixed(2)}`;
 }
 

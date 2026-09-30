@@ -84,12 +84,48 @@ class Settings(BaseSettings):
     agent_queue_wait_s: float = 30.0
     #: Per-request timeout the Claude CLI uses (its API_TIMEOUT_MS).
     agent_api_timeout_ms: int = 120_000
+    #: Retries of a failed model API call, made inside the CLI with backoff
+    #: (its CLAUDE_CODE_MAX_RETRIES; task 5.4). Kept low for chat: a user
+    #: waiting through ten retries is worse than a clear "try again".
+    agent_max_retries: int = 4
+    #: The CLI's stream watchdog (CLAUDE_STREAM_IDLE_TIMEOUT_MS): a response
+    #: that goes silent this long is abandoned and retried.
+    agent_stream_idle_timeout_ms: int = 90_000
+    #: Times the platform restarts a turn whose runtime failed to start or
+    #: died before saying anything (`agent/errors.PROCESS_LEVEL`).
+    agent_turn_retries: int = 1
     approval_timeout_s: int = 300
     #: How old a cached database schema may get before the agent's next
     #: introspection refreshes it (plan 6.2: "auto-refresh TTL configurable").
     schema_cache_ttl_s: int = 86_400
     # auto = real SDK when ANTHROPIC_API_KEY is set (and not APP_ENV=test), else fake
     agent_driver: Literal["auto", "claude", "fake"] = "auto"
+
+    # ── Rate limiting (task 5.8) ─────────────────────────────
+    #: Token buckets in Redis (see `security/ratelimit.py`). Each limit is
+    #: "<requests>/<seconds>": that many at once, refilling over that time.
+    rate_limit_enabled: bool = True
+    #: How many reverse proxies in front of the API append to
+    #: X-Forwarded-For. 0 (the default, and docker-compose's setup): the
+    #: header is ignored, since anyone can send one, and the socket's peer is
+    #: the client.
+    trusted_proxy_hops: int = 0
+    #: Every API request, per client IP.
+    rate_limit_ip: str = "600/60"
+    #: Every authenticated request, per user (API tokens included).
+    rate_limit_user: str = "1200/60"
+    #: Register, log in, refresh: per IP. And logging in to one account,
+    #: per IP, against password guessing.
+    rate_limit_auth: str = "20/60"
+    rate_limit_login: str = "10/300"
+    #: Sending a chat message: per user, and per org across its members.
+    rate_limit_chat_user: str = "30/60"
+    rate_limit_chat_org: str = "300/60"
+    #: The AI helpers (writing a prompt, recommending a pipeline), per user.
+    rate_limit_assist: str = "10/60"
+    #: Work that reaches other systems or starts jobs (uploads, reindexing,
+    #: connection tests, MCP checks), per user.
+    rate_limit_heavy: str = "30/60"
 
     # ── MCP servers (Phase 4) ────────────────────────────────
     #: Accept plain-http MCP URLs. Off by default: headers usually carry a
