@@ -6,24 +6,54 @@ import {
   ReactFlow,
   applyEdgeChanges,
   applyNodeChanges,
+  type AriaLabelConfig,
   type Connection,
   type Edge,
   type EdgeChange,
+  type EdgeTypes,
   type IsValidConnection,
   type Node,
   type NodeChange,
   type NodeMouseHandler,
   type NodeTypes,
+  type OnSelectionChangeFunc,
 } from "@xyflow/react";
 import { useTheme } from "next-themes";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { CanvasKey } from "@/components/canvas/CanvasKey";
+import { CanvasViewContext, prefersReducedMotion } from "@/components/canvas/canvas-view";
 import type { GraphIssues } from "@/components/canvas/graph-sync";
+import { GRID, mergeFlowNodes, toFlow } from "@/components/canvas/graph-sync";
+import { RouteConnectionLine, RouteEdge } from "@/components/canvas/RouteEdge";
 import { StudioNode } from "@/components/canvas/StudioNode";
-import { mergeFlowNodes, toFlow } from "@/components/canvas/graph-sync";
+import type { LineFamily } from "@/components/ui/line-bullet";
 import type { Graph, GraphSchema } from "@/lib/api";
 
 const nodeTypes: NodeTypes = { studio: StudioNode };
+
+/** React Flow's own words for its controls and keyboard help, in sentence
+ *  case and plain words. */
+const ARIA_LABELS: Partial<AriaLabelConfig> = {
+  "node.a11yDescription.default":
+    "Press Enter to open its settings. Press Delete to remove it, or Escape to cancel.",
+  "node.a11yDescription.keyboardDisabled":
+    "Press Enter to open its settings. The arrow keys then move it. Press Delete to remove it, or Escape to cancel.",
+  "node.a11yDescription.ariaLiveMessage": ({ direction }) => `Moved ${direction}.`,
+  "edge.a11yDescription.default":
+    "Press Enter to select this connection, then Delete to remove it, or Escape to cancel.",
+  "controls.ariaLabel": "Zoom",
+  "controls.zoomIn.ariaLabel": "Zoom in",
+  "controls.zoomOut.ariaLabel": "Zoom out",
+  "controls.fitView.ariaLabel": "Fit everything in view",
+  "handle.ariaLabel": "Connection point",
+};
+const edgeTypes: EdgeTypes = { route: RouteEdge };
+
+/** Tidy up (or any graph update that moves several stations at once)
+ *  glides them to their new places; one moved station just lands. */
+const GLIDE_MS = 240;
+const easeOut = (t: number) => 1 - (1 - t) ** 3;
 
 export function Canvas({
   graph,
@@ -37,6 +67,9 @@ export function Canvas({
   onDeleteNodes,
   onDeleteEdges,
   highlight = null,
+  switchedOff,
+  times,
+  drawKey = null,
 }: {
   graph: Graph;
   /** Wiring rules from `GET /meta/graph-schema` — the validator's own
@@ -54,12 +87,20 @@ export function Canvas({
   onDeleteEdges?: (edges: { source: string; target: string }[]) => void;
   /** Nodes to light up: a run's, or one step's (task 5.9). */
   highlight?: Set<string> | null;
+  /** Node ids drawn as switched off (an MCP server turned off). */
+  switchedOff?: ReadonlySet<string>;
+  /** Node id -> time the shown run spent there, in ms. */
+  times?: ReadonlyMap<string, number>;
+  /** An id for the run being shown: its lit route draws itself once. */
+  drawKey?: string | null;
 }) {
   const { resolvedTheme } = useTheme();
   const flow = useMemo(
-    () => toFlow(graph, issues, sourceLabels ?? {}, highlight),
-    [graph, issues, sourceLabels, highlight],
+    () => toFlow(graph, issues, sourceLabels ?? {}, highlight, { switchedOff, times, drawKey }),
+    [graph, issues, sourceLabels, highlight, switchedOff, times, drawKey],
   );
+  const [keyFocus, setKeyFocus] = useState<LineFamily | null>(null);
+  const view = useMemo(() => ({ keyFocus }), [keyFocus]);
 
   // React Flow's own copy of the nodes and edges. It reports each node's
   // measured size, drags and selection through onNodesChange / onEdgesChange,
@@ -69,9 +110,49 @@ export function Canvas({
   // size and left them invisible until a tab switch remounted the canvas.
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
+  const current = useRef<Node[]>([]);
+  current.current = nodes;
+  const glide = useRef<number | null>(null);
 
   useEffect(() => {
-    setNodes((prev) => mergeFlowNodes(prev, flow.nodes, selectedId));
+    if (glide.current !== null) cancelAnimationFrame(glide.current);
+    glide.current = null;
+    const prev = current.current;
+    const next = mergeFlowNodes(prev, flow.nodes, selectedId);
+    const from = new Map(prev.map((n) => [n.id, n.position]));
+    const moving = next.filter((n) => {
+      const p = from.get(n.id);
+      return p !== undefined && (p.x !== n.position.x || p.y !== n.position.y);
+    });
+    if (moving.length < 2 || prefersReducedMotion()) {
+      setNodes(next);
+      return;
+    }
+    // Start where they were, then move only positions each frame, so a size
+    // React Flow measures meanwhile is never overwritten.
+    const to = new Map(moving.map((n) => [n.id, n.position]));
+    setNodes(next.map((n) => (to.has(n.id) ? { ...n, position: from.get(n.id)! } : n)));
+    const start = performance.now();
+    const step = (now: number) => {
+      const t = Math.min(1, (now - start) / GLIDE_MS);
+      const k = easeOut(t);
+      setNodes((ns) =>
+        ns.map((n) => {
+          const a = from.get(n.id);
+          const b = to.get(n.id);
+          if (!a || !b) return n;
+          return { ...n, position: { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k } };
+        }),
+      );
+      glide.current = t < 1 ? requestAnimationFrame(step) : null;
+    };
+    glide.current = requestAnimationFrame(step);
+    return () => {
+      if (glide.current !== null) cancelAnimationFrame(glide.current);
+      glide.current = null;
+      // Interrupted: land everything where the graph says.
+      setNodes((ns) => ns.map((n) => (to.has(n.id) ? { ...n, position: to.get(n.id)! } : n)));
+    };
   }, [flow.nodes, selectedId]);
   useEffect(() => {
     setEdges((prev) => {
@@ -127,39 +208,75 @@ export function Canvas({
   );
 
   const handleNodeClick: NodeMouseHandler = (_, node) => onSelect(node.id);
+  // Selecting a station from the keyboard (focus, then Enter) opens its
+  // settings as a click does. Only from the keyboard: React Flow also
+  // selects a station when a drag starts, and a drag must not open the
+  // drawer (a click opens it through onNodeClick, which a drag never fires).
+  // Only a single selection: an empty one also happens while a just-added
+  // node is still being saved.
+  const byKeyboard = useRef(false);
+  const handleSelectionChange: OnSelectionChangeFunc = useCallback(
+    ({ nodes: picked }) => {
+      if (byKeyboard.current && picked.length === 1) onSelect(picked[0].id);
+    },
+    [onSelect],
+  );
 
   return (
-    <div className="studio-canvas h-full w-full">
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        nodeTypes={nodeTypes}
-        onNodeClick={handleNodeClick}
-        onPaneClick={() => onSelect(null)}
-        onNodeDragStop={(_, node) => onNodeMoved(node.id, node.position)}
-        onConnect={(c) => c.source && c.target && onConnect?.(c.source, c.target)}
-        isValidConnection={isValidConnection}
-        onNodesDelete={(ns: Node[]) => onDeleteNodes?.(ns.map((n) => n.id))}
-        onEdgesDelete={(es: Edge[]) =>
-          onDeleteEdges?.(es.map((e) => ({ source: e.source, target: e.target })))
-        }
-        // Wiring: releasing anywhere within 40px of an input connects to it,
-        // and a click on an output then an input works as well as a drag.
-        connectionRadius={40}
-        connectOnClick
-        connectionLineStyle={{ stroke: "var(--primary)", strokeWidth: 2 }}
-        defaultEdgeOptions={{ interactionWidth: 24 }}
-        colorMode={resolvedTheme === "dark" ? "dark" : "light"}
-        fitView
-        proOptions={{ hideAttribution: true }}
-        nodesConnectable={Boolean(onConnect)}
-        deleteKeyCode={onDeleteNodes ? ["Backspace", "Delete"] : null}
+    <CanvasViewContext.Provider value={view}>
+      <div
+        className="studio-canvas relative h-full w-full"
+        onPointerDownCapture={() => {
+          byKeyboard.current = false;
+        }}
+        onKeyDownCapture={() => {
+          byKeyboard.current = true;
+        }}
       >
-        <Background gap={16} />
-        <Controls showInteractive={false} />
-      </ReactFlow>
-    </div>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          onNodeClick={handleNodeClick}
+          onSelectionChange={handleSelectionChange}
+          onPaneClick={() => onSelect(null)}
+          onNodeDragStop={(_, node) => onNodeMoved(node.id, node.position)}
+          // Only the pair is saved: which of the Agent's inputs a line uses
+          // is worked out again from positions every render.
+          onConnect={(c) => c.source && c.target && onConnect?.(c.source, c.target)}
+          isValidConnection={isValidConnection}
+          onNodesDelete={(ns: Node[]) => onDeleteNodes?.(ns.map((n) => n.id))}
+          onEdgesDelete={(es: Edge[]) =>
+            onDeleteEdges?.(es.map((e) => ({ source: e.source, target: e.target })))
+          }
+          // Wiring: releasing anywhere within 40px of an input connects to it,
+          // and a click on an output then an input works as well as a drag.
+          connectionRadius={40}
+          connectOnClick
+          connectionLineComponent={RouteConnectionLine}
+          defaultEdgeOptions={{ interactionWidth: 16 }}
+          snapToGrid
+          snapGrid={[GRID, GRID]}
+          colorMode={resolvedTheme === "dark" ? "dark" : "light"}
+          fitView
+          fitViewOptions={{ padding: 0.2 }}
+          proOptions={{ hideAttribution: true }}
+          ariaLabelConfig={ARIA_LABELS}
+          nodesConnectable={Boolean(onConnect)}
+          deleteKeyCode={onDeleteNodes ? ["Backspace", "Delete"] : null}
+        >
+          <Background gap={GRID} size={1.25} />
+          <Controls showInteractive={false} position="bottom-left" />
+        </ReactFlow>
+        {/* Next to the zoom controls (React Flow's panel sits 15px in and
+            is 34px wide). Capped to the canvas height, opening upward. */}
+        <div className="pointer-events-none absolute top-3 bottom-[15px] left-16 z-10 flex">
+          <CanvasKey graph={graph} onFocusFamily={setKeyFocus} />
+        </div>
+      </div>
+    </CanvasViewContext.Provider>
   );
 }

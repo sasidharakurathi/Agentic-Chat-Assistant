@@ -1,4 +1,4 @@
-/** A subagent role's own model settings (task 5.1), as Panels edits them.
+/** A subagent role's own model settings, as the Settings tab edits them.
  *
  *  The config holds, per role, either nothing (the role uses the shared
  *  subagent model, `models.subagent`) or a full model spec of its own
@@ -51,4 +51,13 @@ export function carryShared(
 /** What the model select shows. */
 export function selectedModel(own: Spec | undefined, shared: Spec): string {
   return own && !followsShared(own, shared) ? str(own.model) : "";
+}
+
+/** A model id in plain words: "claude-haiku-4-5" reads "Haiku 4.5". Ids that
+ *  don't follow that shape are shown as they are. */
+export function modelName(id: string): string {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(id);
+  if (!m) return id;
+  const family = m[1].charAt(0).toUpperCase() + m[1].slice(1);
+  return `${family} ${m[2]}${m[3] ? `.${m[3]}` : ""}`;
 }

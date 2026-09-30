@@ -29,9 +29,9 @@ describe("parsePairs", () => {
 
   it("says which line is wrong, and refuses duplicates", () => {
     expect(parsePairs("A=1\nnot a pair", "env").error).toBe(
-      "Line 2 should look like API_KEY=abc123",
+      "Line 2 should look like API_KEY=abc123.",
     );
-    expect(parsePairs("A=1\nA=2", "env").error).toBe("A appears twice");
+    expect(parsePairs("A=1\nA=2", "env").error).toBe("A appears twice. Keep one line for it.");
   });
 });
 
@@ -40,12 +40,12 @@ describe("nameProblem", () => {
     expect(nameProblem("github-tools")).toBeNull();
     expect(nameProblem("GitHub")).not.toBeNull();
     expect(nameProblem("my_tools")).not.toBeNull();
-    expect(nameProblem("caps")).toBe("That name is reserved.");
+    expect(nameProblem("caps")).toBe("That name is reserved. Pick another.");
   });
 });
 
 describe("describeLimits", () => {
-  it("reads like a sentence, in sensible units", () => {
+  it("reads like a sentence, in sensible units, with no dotted separators", () => {
     expect(
       describeLimits({
         memory_mb: 1024,
@@ -56,7 +56,9 @@ describe("describeLimits", () => {
         wall_clock_s: 3600,
         idle_timeout_s: 90,
       }),
-    ).toBe("1 GB memory · 10 min CPU · 128 processes · 1 h per session · stops after 90 s idle");
+    ).toBe(
+      "1 GB memory, 10 min of CPU time, 128 processes, 1 h per session, stops after 90 s idle",
+    );
   });
 });
 

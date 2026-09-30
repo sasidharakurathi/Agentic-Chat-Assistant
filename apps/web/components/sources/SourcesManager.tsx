@@ -1,28 +1,34 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Upload } from "lucide-react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 
+import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/dialog";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Tabs } from "@/components/ui/tabs";
+import { Loading } from "@/components/ui/loading";
+import { SectionHeading } from "@/components/ui/section-heading";
+import { Segmented } from "@/components/ui/segmented";
 import { Textarea } from "@/components/ui/textarea";
-import { ApiError, dataSources, type DataSource, type DataSourceStatus } from "@/lib/api";
+import { ApiError, dataSources, type DataSource } from "@/lib/api";
+import { formatRelative, failureMessage } from "@/lib/format";
 import { progressLabel, reportLabel } from "@/lib/ingest-status";
 import { cn } from "@/lib/utils";
 
 /** How often to re-poll while anything is still indexing. Ingestion is an Arq
  *  job; it reports each stage to Redis and the list endpoint attaches that to
- *  a processing source, so polling it shows "Embedding 3/12" as it goes. */
+ *  a processing source, so polling it shows "Embedding passages: 3 of 12" as
+ *  it goes. */
 const POLL_MS = 2000;
 
-const STATUS_VARIANT: Record<DataSourceStatus, "muted" | "warning" | "success" | "destructive"> = {
-  pending: "muted",
-  processing: "warning",
-  ready: "success",
-  error: "destructive",
+const TYPE_LABEL: Record<DataSource["type"], string> = {
+  file: "File",
+  url: "Web page",
+  text: "Pasted text",
 };
 
 function formatBytes(n: number | null): string | null {
@@ -32,21 +38,28 @@ function formatBytes(n: number | null): string | null {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function errorMessage(err: unknown): string {
-  if (err instanceof ApiError) return err.message;
-  return err instanceof Error ? err.message : "Something went wrong";
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
 }
 
+/** The server's own message, or null when it could not be reached. */
+function reasonOf(err: unknown): string | null {
+  return err instanceof ApiError ? err.message : null;
+}
+
+type Failure = { what: string; todo: string };
 type AddMode = "file" | "url" | "text";
 
 export function SourcesManager({ assistantId }: { assistantId: string }) {
   const [rows, setRows] = useState<DataSource[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState(0);
   const [mode, setMode] = useState<AddMode>("file");
   const confirm = useConfirm();
   const [dragging, setDragging] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const ids = useId();
 
   const [urlName, setUrlName] = useState("");
   const [urlValue, setUrlValue] = useState("");
@@ -57,7 +70,13 @@ export function SourcesManager({ assistantId }: { assistantId: string }) {
     try {
       setRows(await dataSources.list(assistantId));
     } catch (err) {
-      setError(errorMessage(err));
+      setError(
+        failureMessage(
+          "Couldn't load the sources.",
+          reasonOf(err),
+          "Reload the page to try again.",
+        ),
+      );
     }
   }, [assistantId]);
 
@@ -66,7 +85,7 @@ export function SourcesManager({ assistantId }: { assistantId: string }) {
   }, [load]);
 
   // Poll only while something is actually in flight, and stop as soon as
-  // everything has settled — an idle sources tab shouldn't hit the API twice
+  // everything has settled: an idle sources tab shouldn't hit the API twice
   // a second forever.
   const indexing = (rows ?? []).some((r) => r.status === "pending" || r.status === "processing");
   useEffect(() => {
@@ -76,14 +95,14 @@ export function SourcesManager({ assistantId }: { assistantId: string }) {
   }, [indexing, load]);
 
   const run = useCallback(
-    async (fn: () => Promise<unknown>) => {
+    async (fn: () => Promise<unknown>, failure: Failure) => {
       setBusy(true);
       setError(null);
       try {
         await fn();
         await load();
       } catch (err) {
-        setError(errorMessage(err));
+        setError(failureMessage(failure.what, reasonOf(err), failure.todo));
       } finally {
         setBusy(false);
       }
@@ -94,13 +113,25 @@ export function SourcesManager({ assistantId }: { assistantId: string }) {
   const uploadFiles = useCallback(
     (files: FileList | null) => {
       if (!files?.length) return;
-      void run(async () => {
-        // Sequential, not Promise.all: each upload is a multi-MB body and the
-        // failure of one shouldn't cancel the rest.
-        for (const file of Array.from(files)) {
-          await dataSources.upload(assistantId, file);
-        }
-      });
+      const list = Array.from(files);
+      let current = "";
+      setUploading(list.length);
+      void run(
+        async () => {
+          // Sequential, not Promise.all: each upload is a multi-MB body and the
+          // failure of one shouldn't cancel the rest.
+          for (const file of list) {
+            current = file.name;
+            await dataSources.upload(assistantId, file);
+          }
+        },
+        {
+          get what() {
+            return `Couldn't upload ${current || "the file"}.`;
+          },
+          todo: "Check that it is a supported file under 50 MB, then upload it again.",
+        },
+      ).finally(() => setUploading(0));
     },
     [assistantId, run],
   );
@@ -108,60 +139,87 @@ export function SourcesManager({ assistantId }: { assistantId: string }) {
   const addUrl = useCallback(() => {
     const url = urlValue.trim();
     if (!url) return;
-    void run(async () => {
-      await dataSources.addUrl(assistantId, urlName.trim() || url, url);
-      setUrlName("");
-      setUrlValue("");
-    });
+    void run(
+      async () => {
+        await dataSources.addUrl(assistantId, urlName.trim() || url, url);
+        setUrlName("");
+        setUrlValue("");
+      },
+      {
+        what: "Couldn't add the web page.",
+        todo: "Check the URL, then add it again.",
+      },
+    );
   }, [assistantId, run, urlName, urlValue]);
 
   const addText = useCallback(() => {
     const text = textValue.trim();
     if (!text) return;
-    void run(async () => {
-      await dataSources.addText(assistantId, textName.trim() || "Pasted text", text);
-      setTextName("");
-      setTextValue("");
-    });
+    void run(
+      async () => {
+        await dataSources.addText(assistantId, textName.trim() || "Pasted text", text);
+        setTextName("");
+        setTextValue("");
+      },
+      { what: "Couldn't add the text.", todo: "Try adding it again." },
+    );
   }, [assistantId, run, textName, textValue]);
 
   const remove = useCallback(
     (row: DataSource) => {
       // Deleting a source drops its documents and chunks too (FK cascade), so
-      // the assistant genuinely forgets it — worth confirming.
+      // the assistant genuinely forgets it: worth confirming.
       void (async () => {
         const sure = await confirm({
           title: `Delete "${row.name}"?`,
-          description: "Its indexed content is removed too.",
-          confirmLabel: "Delete",
+          description:
+            "Its indexed content is deleted too, so the assistant can no longer find anything from it.",
+          confirmLabel: "Delete source",
           destructive: true,
         });
-        if (sure) void run(() => dataSources.remove(assistantId, row.id));
+        if (sure)
+          void run(() => dataSources.remove(assistantId, row.id), {
+            what: `Couldn't delete ${row.name}.`,
+            todo: "Try again.",
+          });
       })();
     },
     [assistantId, run, confirm],
   );
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 overflow-auto p-6">
-      <section className="border-border rounded-lg border">
-        <div className="border-border flex items-center justify-between border-b px-4 py-3">
-          <h2 className="text-sm font-semibold">Add a source</h2>
-          <Tabs
-            label="Kind of source"
-            value={mode}
-            onChange={setMode}
-            options={[
-              { value: "file", label: "File" },
-              { value: "url", label: "URL" },
-              { value: "text", label: "Text" },
-            ]}
-          />
-        </div>
+    <div className="min-h-0 flex-1 overflow-auto px-4 py-6 md:px-6 lg:px-8">
+      <div className="mx-auto flex w-full max-w-[40rem] flex-col gap-6">
+        <SectionHeading
+          level={2}
+          title="Sources"
+          description="Documents the assistant can search: files, web pages and pasted text. Each one is indexed automatically after you add it."
+        />
 
-        <div className="p-4">
+        <section
+          aria-labelledby={`${ids}-add`}
+          className="border-border bg-card flex flex-col gap-4 rounded-lg border p-4 sm:p-6"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h3 id={`${ids}-add`} className="text-h3 font-semibold">
+              Add a source
+            </h3>
+            <Segmented
+              label="Kind of source"
+              value={mode}
+              onChange={setMode}
+              options={[
+                { value: "file", label: "File" },
+                { value: "url", label: "Web page" },
+                { value: "text", label: "Text" },
+              ]}
+            />
+          </div>
+
           {mode === "file" && (
             <div
+              role="group"
+              aria-label="Upload files"
               onDragOver={(e) => {
                 e.preventDefault();
                 setDragging(true);
@@ -173,13 +231,14 @@ export function SourcesManager({ assistantId }: { assistantId: string }) {
                 uploadFiles(e.dataTransfer.files);
               }}
               className={cn(
-                "flex flex-col items-center gap-2 rounded-md border border-dashed px-6 py-8 text-center transition-colors",
-                dragging ? "border-primary bg-primary/5" : "border-border",
+                "flex flex-col items-center gap-2 rounded-md border px-6 py-8 text-center transition-colors duration-120 ease-out",
+                dragging ? "border-ring bg-muted ring-ring ring-1" : "border-field-border",
               )}
             >
-              <p className="text-sm font-medium">Drop files here</p>
-              <p className="text-muted-foreground text-xs">
-                PDF, DOCX, Markdown, HTML or plain text · up to 50 MB each
+              <Upload aria-hidden className="text-muted-foreground size-5" />
+              <p className="font-medium">Drop files here</p>
+              <p className="text-small text-muted-foreground">
+                PDF, Word (DOCX), Markdown, HTML or plain text, up to 50 MB each.
               </p>
               <input
                 ref={fileInput}
@@ -199,15 +258,26 @@ export function SourcesManager({ assistantId }: { assistantId: string }) {
               >
                 Choose files
               </Button>
+              <p className="text-small text-muted-foreground min-h-[17px]" aria-live="polite">
+                {uploading > 0 ? `Uploading ${plural(uploading, "file", "files")}…` : ""}
+              </p>
             </div>
           )}
 
           {mode === "url" && (
-            <div className="flex flex-col gap-3">
+            <form
+              className="flex flex-col gap-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                addUrl();
+              }}
+            >
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="src-url">URL</Label>
                 <Input
                   id="src-url"
+                  type="url"
+                  inputMode="url"
                   placeholder="https://example.com/handbook"
                   value={urlValue}
                   onChange={(e) => setUrlValue(e.target.value)}
@@ -223,15 +293,21 @@ export function SourcesManager({ assistantId }: { assistantId: string }) {
                 />
               </div>
               <div>
-                <Button size="sm" onClick={addUrl} disabled={busy || !urlValue.trim()}>
-                  Add URL
+                <Button type="submit" disabled={busy || !urlValue.trim()}>
+                  Add web page
                 </Button>
               </div>
-            </div>
+            </form>
           )}
 
           {mode === "text" && (
-            <div className="flex flex-col gap-3">
+            <form
+              className="flex flex-col gap-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                addText();
+              }}
+            >
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="src-text-name">Name</Label>
                 <Input
@@ -246,54 +322,95 @@ export function SourcesManager({ assistantId }: { assistantId: string }) {
                 <Textarea
                   id="src-text"
                   rows={6}
-                  placeholder="Paste the content to index…"
+                  placeholder="Paste the content to index"
                   value={textValue}
                   onChange={(e) => setTextValue(e.target.value)}
                 />
               </div>
               <div>
-                <Button size="sm" onClick={addText} disabled={busy || !textValue.trim()}>
+                <Button type="submit" disabled={busy || !textValue.trim()}>
                   Add text
                 </Button>
               </div>
-            </div>
+            </form>
           )}
-        </div>
-      </section>
+        </section>
 
-      {error && (
-        <p className="text-destructive text-sm" role="alert">
-          {error}
-        </p>
-      )}
+        {error && <Alert>{error}</Alert>}
 
-      <section className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold">Sources{rows ? ` (${rows.length})` : ""}</h2>
-          {indexing && <span className="text-muted-foreground text-xs">indexing…</span>}
-        </div>
+        <section aria-labelledby={`${ids}-list`} className="flex flex-col gap-3">
+          <h3 id={`${ids}-list`} className="text-h3 font-semibold">
+            Added sources
+          </h3>
 
-        {rows === null && <p className="text-muted-foreground text-sm">Loading…</p>}
-        {rows?.length === 0 && (
-          <p className="text-muted-foreground border-border rounded-md border border-dashed px-4 py-8 text-center text-sm">
-            No sources yet. Add one above and it will be indexed automatically.
-          </p>
-        )}
-
-        <ul className="flex flex-col gap-2">
-          {(rows ?? []).map((row) => (
-            <SourceRow
-              key={row.id}
-              row={row}
-              busy={busy}
-              onReindex={() => void run(() => dataSources.reindex(assistantId, row.id))}
-              onDelete={() => remove(row)}
+          {rows === null && !error && <Loading what="sources" rows={3} rowHeight={72} />}
+          {rows?.length === 0 && (
+            <EmptyState
+              title="Add your first source"
+              description="Upload a file, add a web page or paste text above. Once it is indexed, the knowledge base on the canvas can search it."
             />
-          ))}
-        </ul>
-      </section>
+          )}
+
+          {rows && rows.length > 0 && (
+            <ul className="border-border flex flex-col border-t">
+              {rows.map((row) => (
+                <SourceRow
+                  key={row.id}
+                  row={row}
+                  busy={busy}
+                  onReindex={() =>
+                    void run(() => dataSources.reindex(assistantId, row.id), {
+                      what: `Couldn't reindex ${row.name}.`,
+                      todo: "Try again in a moment.",
+                    })
+                  }
+                  onDelete={() => remove(row)}
+                />
+              ))}
+            </ul>
+          )}
+        </section>
+      </div>
     </div>
   );
+}
+
+function SourceStatus({ row }: { row: DataSource }) {
+  switch (row.status) {
+    case "pending":
+      return (
+        <Badge variant="muted" live>
+          Queued
+        </Badge>
+      );
+    case "processing":
+      return (
+        <Badge variant="muted" live>
+          Indexing
+        </Badge>
+      );
+    case "ready":
+      // A "ready" source with no passages is searchable in name only.
+      return row.chunk_count === 0 ? (
+        <Badge variant="warning">Nothing to search</Badge>
+      ) : (
+        <Badge variant="success">Ready</Badge>
+      );
+    case "error":
+      return <Badge variant="destructive">Failed</Badge>;
+  }
+}
+
+/** "File, 1.2 MB, 3 documents" in plain words; for a web page, its address
+ *  follows on its own line. */
+function describeSource(row: DataSource): string {
+  const parts = [TYPE_LABEL[row.type]];
+  const size = formatBytes(row.bytes);
+  if (size) parts.push(size);
+  if (row.status === "ready" && row.document_count > 1) {
+    parts.push(plural(row.document_count, "document", "documents"));
+  }
+  return parts.join(", ");
 }
 
 function SourceRow({
@@ -307,52 +424,60 @@ function SourceRow({
   onReindex: () => void;
   onDelete: () => void;
 }) {
-  const size = formatBytes(row.bytes);
+  const progress = progressLabel(row);
+  const report = reportLabel(row);
   return (
-    <li className="border-border rounded-md border px-4 py-3">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-medium">{row.name}</span>
-            <Badge variant={STATUS_VARIANT[row.status]}>{row.status}</Badge>
-          </div>
-          <p className="text-muted-foreground mt-1 truncate text-xs">
-            {row.type}
-            {size && ` · ${size}`}
-            {/* Counts are the honest signal that indexing produced anything.
-                A "ready" source with 0 chunks is searchable in name only. */}
-            {row.status === "ready" &&
-              ` · ${row.document_count} doc${row.document_count === 1 ? "" : "s"} · ${row.chunk_count} chunk${row.chunk_count === 1 ? "" : "s"}`}
-            {row.uri && ` · ${row.uri}`}
+    <li className="border-border flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b py-4">
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="min-w-0 truncate font-medium">{row.name}</span>
+          <SourceStatus row={row} />
+        </div>
+        <p className="text-small text-muted-foreground num">
+          {describeSource(row)}
+          {row.status === "ready" && row.indexed_at && (
+            <>. Indexed {formatRelative(row.indexed_at)}</>
+          )}
+          .
+        </p>
+        {row.type === "url" && row.uri && row.uri !== row.name && (
+          <p className="text-small text-muted-foreground break-all">{row.uri}</p>
+        )}
+        {row.error && (
+          <p className="text-small text-destructive break-words">
+            Indexing failed: {row.error.trim().replace(/[.!?]+$/, "")}. Fix the source, then reindex
+            it.
           </p>
-          {row.error && <p className="text-destructive mt-1 text-xs">{row.error}</p>}
-          {progressLabel(row) && (
-            <p className="text-muted-foreground mt-1 text-xs" aria-live="polite">
-              {progressLabel(row)}
-            </p>
-          )}
-          {reportLabel(row) && (
-            <p className="text-muted-foreground mt-1 text-xs">Last index: {reportLabel(row)}</p>
-          )}
-          {row.status === "ready" && row.ingest_report?.context_skipped && (
-            <p className="text-warning mt-1 text-xs">
-              Indexed without context lines: {row.ingest_report.context_skipped}.
-            </p>
-          )}
-          {row.status === "ready" && row.chunk_count === 0 && (
-            <p className="text-warning mt-1 text-xs">
-              Indexed but produced no chunks — nothing here is searchable.
-            </p>
-          )}
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Button size="sm" variant="outline" onClick={onReindex} disabled={busy}>
-            Reindex
-          </Button>
-          <Button size="sm" variant="ghost" onClick={onDelete} disabled={busy}>
-            Delete
-          </Button>
-        </div>
+        )}
+        <p className="text-small text-muted-foreground num empty:hidden" aria-live="polite">
+          {progress}
+        </p>
+        {report && <p className="text-small text-muted-foreground num">Last index: {report}</p>}
+        {row.status === "ready" && row.ingest_report?.context_skipped && (
+          <p className="text-small text-warning">
+            Indexed without context lines: {row.ingest_report.context_skipped}.
+          </p>
+        )}
+        {row.status === "ready" && row.chunk_count === 0 && (
+          <p className="text-small text-warning">
+            Indexing found no text, so nothing here can be searched. Check the file has selectable
+            text, then reindex it.
+          </p>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-1">
+        <Button size="sm" variant="ghost" onClick={onReindex} disabled={busy}>
+          Reindex
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onDelete}
+          disabled={busy}
+          className="hover:text-destructive focus-visible:text-destructive"
+        >
+          Delete
+        </Button>
       </div>
     </li>
   );

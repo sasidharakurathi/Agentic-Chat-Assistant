@@ -2,29 +2,25 @@ import type { HTMLAttributes } from "react";
 
 import { cn } from "@/lib/utils";
 
+/** A plate (docs/DESIGN.md section 4): card fill, 1px border, radius 8, no
+ *  shadow. Only for a bounded group that acts together; lists and settings
+ *  sit directly on the page, separated by rules. */
 export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn(
-        "border-border bg-card text-foreground rounded-lg border shadow-[0_1px_3px_var(--shadow-color)]",
-        className,
-      )}
+      className={cn("border-border bg-card text-foreground rounded-lg border", className)}
       {...props}
     />
   );
 }
 
 export function CardHeader({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("flex flex-col gap-1.5 p-6", className)} {...props} />;
+  return <div className={cn("flex flex-col gap-1 p-6", className)} {...props} />;
 }
 
+/** H3: 16/22 sans 600. */
 export function CardTitle({ className, ...props }: HTMLAttributes<HTMLHeadingElement>) {
-  return (
-    <h3
-      className={cn("font-serif text-lg leading-tight font-semibold tracking-tight", className)}
-      {...props}
-    />
-  );
+  return <h3 className={cn("text-h3 font-semibold", className)} {...props} />;
 }
 
 export function CardDescription({ className, ...props }: HTMLAttributes<HTMLParagraphElement>) {

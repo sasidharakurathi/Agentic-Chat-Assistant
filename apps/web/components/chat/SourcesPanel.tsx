@@ -1,38 +1,45 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { ChevronRight, ExternalLink } from "lucide-react";
+import { useCallback, useId, useState } from "react";
 
+import { failureText } from "@/components/chat/error-text";
+import { citationChipClass } from "@/components/chat/Markdown";
+import { Button } from "@/components/ui/button";
 import { dataSources, type Citation } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-/** Human-readable location line: page range, heading trail, char range.
- *  Each part is omitted when the format genuinely doesn't have it — a DOCX
- *  has headings but no pages, a PDF the reverse, pasted text neither — rather
- *  than printing a placeholder that implies more precision than exists. */
-function locLine(c: Citation): string {
+/** Where in its document a passage sits, as separate plain parts: the page
+ *  range and the heading trail. Each part is left out when the format
+ *  genuinely doesn't have it (a DOCX has headings but no pages, a PDF the
+ *  reverse, pasted text neither). Character offsets are internal and are
+ *  never shown. */
+function locParts(c: Citation): string[] {
   const parts: string[] = [];
-  const { page, page_end, char_start, char_end, breadcrumb } = c.loc ?? {};
+  const { page, page_end, breadcrumb } = c.loc ?? {};
   if (page != null) {
-    parts.push(page_end != null && page_end > page ? `pp. ${page}–${page_end}` : `p. ${page}`);
+    parts.push(page_end != null && page_end > page ? `Pages ${page}–${page_end}` : `Page ${page}`);
   }
-  if (breadcrumb?.length) parts.push(breadcrumb.join(" › "));
-  if (char_start != null && char_end != null) parts.push(`chars ${char_start}–${char_end}`);
-  return parts.join(" · ");
+  if (breadcrumb?.length) parts.push(breadcrumb.join(" / "));
+  return parts;
 }
 
 function kindLabel(c: Citation): string {
   switch (c.source_type) {
     case "file":
-      return "file";
+      return "File";
     case "url":
-      return "web";
+      return "Web page";
     case "text":
-      return "text";
+      return "Pasted text";
     default:
-      return "source";
+      return "Source";
   }
 }
 
+/** The passages an answer cites, as a ruled list under it. Each row's chip
+ *  matches the chip in the answer, and hovering or focusing either one
+ *  highlights both. */
 export function SourcesPanel({
   citations,
   assistantId,
@@ -44,13 +51,14 @@ export function SourcesPanel({
   activeMarker?: number | null;
   onFocus?: (marker: number | null) => void;
 }) {
+  const headingId = useId();
   if (!citations.length) return null;
   return (
-    <div className="border-border mt-2 rounded-md border">
-      <div className="text-muted-foreground border-border border-b px-3 py-1.5 text-xs font-medium">
-        Sources
-      </div>
-      <ul className="divide-border divide-y">
+    <section aria-labelledby={headingId} className="flex max-w-[68ch] flex-col gap-2">
+      <h3 id={headingId} className="text-h4 font-semibold">
+        Sources <span className="num text-muted-foreground font-normal">{citations.length}</span>
+      </h3>
+      <ul className="border-border divide-border divide-y border-y">
         {citations.map((c) => (
           <SourceRow
             key={`${c.marker}-${c.chunk_id}`}
@@ -61,7 +69,7 @@ export function SourcesPanel({
           />
         ))}
       </ul>
-    </div>
+    </section>
   );
 }
 
@@ -79,8 +87,9 @@ function SourceRow({
   const [open, setOpen] = useState(false);
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
+  const bodyId = useId();
 
-  const loc = locLine(citation);
+  const loc = locParts(citation);
 
   const open_ = useCallback(async () => {
     // A web source already carries a complete href (original URL plus a
@@ -96,15 +105,15 @@ function SourceRow({
     try {
       const res = await dataSources.contentUrl(assistantId, citation.data_source_id);
       if (!res.url) {
-        setOpenError("This source has no file to open.");
+        setOpenError("This source has no file to open. The passage above is all there is.");
         return;
       }
       const page = citation.loc?.page;
       // Browsers' built-in PDF viewers honour #page=N; harmless on anything else.
       const target = page != null ? `${res.url}#page=${page}` : res.url;
       window.open(target, "_blank", "noopener,noreferrer");
-    } catch {
-      setOpenError("Couldn't open this source.");
+    } catch (err) {
+      setOpenError(failureText("Couldn't open this source.", err));
     } finally {
       setOpening(false);
     }
@@ -118,40 +127,70 @@ function SourceRow({
   return (
     <li
       id={`citation-${citation.marker}`}
-      className={cn("px-3 py-2 text-xs transition-colors", active && "bg-muted")}
+      className={cn(
+        "scroll-mt-4 px-2 py-2 transition-colors duration-120 ease-out",
+        active && "bg-muted",
+      )}
       onMouseEnter={() => onFocus?.(citation.marker)}
       onMouseLeave={() => onFocus?.(null)}
+      onFocus={() => onFocus?.(citation.marker)}
+      onBlur={() => onFocus?.(null)}
     >
-      <div className="flex items-start gap-2">
-        <span className="bg-primary text-primary-foreground mt-px inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded px-1 text-[10px] font-medium tabular-nums">
+      <div className="flex items-start gap-3">
+        <span className={cn(citationChipClass(active), "mt-0.5")} aria-hidden>
           {citation.marker}
         </span>
         <div className="min-w-0 flex-1">
           <button
+            type="button"
             onClick={() => setOpen((v) => !v)}
-            className="w-full text-left"
+            className="group focus-visible:ring-ring flex w-full items-start gap-2 rounded-sm text-left focus-visible:ring-2 focus-visible:outline-none"
             aria-expanded={open}
+            aria-controls={bodyId}
           >
-            <span className="font-medium">{citation.title || "Untitled source"}</span>
-            <span className="text-muted-foreground ml-2">{kindLabel(citation)}</span>
-            {loc && <span className="text-muted-foreground ml-2">{loc}</span>}
+            <span className="min-w-0 flex-1">
+              <span className="sr-only">Source {citation.marker}: </span>
+              <span className="block font-medium break-words">
+                {citation.title || "Untitled source"}
+              </span>
+              <span className="text-small text-muted-foreground flex flex-wrap gap-x-3">
+                <span>{kindLabel(citation)}</span>
+                {loc.map((part) => (
+                  <span key={part} className="num break-words">
+                    {part}
+                  </span>
+                ))}
+              </span>
+            </span>
+            <ChevronRight
+              aria-hidden
+              className="text-muted-foreground mt-0.5 size-4 shrink-0 transition-transform duration-120 ease-out group-aria-expanded:rotate-90 motion-reduce:transition-none"
+            />
           </button>
           {open && (
-            <div className="mt-1.5 space-y-1.5">
-              <p className="text-muted-foreground whitespace-pre-wrap">{citation.snippet}</p>
-              <div className="flex items-center gap-3">
-                {canOpen && (
-                  <button
+            <div id={bodyId} className="mt-2 flex flex-col gap-2">
+              <p className="text-muted-foreground break-words whitespace-pre-wrap">
+                {citation.snippet}
+              </p>
+              {canOpen && (
+                <div>
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="sm"
                     onClick={() => void open_()}
                     disabled={opening}
-                    className="text-primary font-medium disabled:opacity-50"
                   >
+                    <ExternalLink aria-hidden />
                     {opening ? "Opening…" : "Open source"}
-                  </button>
-                )}
-                <span className="text-muted-foreground">relevance {citation.score.toFixed(2)}</span>
-              </div>
-              {openError && <p className="text-destructive">{openError}</p>}
+                  </Button>
+                </div>
+              )}
+              {openError && (
+                <p role="alert" className="text-small text-destructive">
+                  {openError}
+                </p>
+              )}
             </div>
           )}
         </div>

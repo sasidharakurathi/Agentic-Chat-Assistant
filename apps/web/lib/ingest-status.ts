@@ -3,33 +3,41 @@ import { formatUsd } from "@/lib/format";
 
 const STAGE_LABEL: Record<string, string> = {
   fetching: "Fetching",
-  chunking: "Splitting into chunks",
-  contextualizing: "Writing context",
-  embedding: "Embedding",
+  chunking: "Splitting into passages",
+  contextualizing: "Adding context",
+  embedding: "Embedding passages",
   writing: "Saving",
 };
 
-/** "Embedding 3/12" for a source that is being indexed, else null. */
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** "Embedding passages: 3 of 12" for a source that is being indexed, else
+ *  null. An unknown stage is shown as the server names it. */
 export function progressLabel(row: Pick<DataSource, "status" | "progress">): string | null {
   const p = row.progress;
   if (row.status !== "processing" || !p) return null;
   const stage = STAGE_LABEL[p.stage] ?? p.stage;
-  return p.total ? `${stage} ${p.done ?? 0}/${p.total}` : `${stage}…`;
+  return p.total ? `${stage}: ${p.done ?? 0} of ${p.total}` : `${stage}…`;
 }
 
-/** One line on what the last indexing did, e.g.
- *  "12 embedded, 40 reused · context for 30 · $0.0012". */
+/** What the last indexing did, in a sentence or two, e.g.
+ *  "12 passages embedded, 40 reused. Cost $0.0012." Internal counts the
+ *  person cannot act on (context written, embedding model) are left out;
+ *  passages that got no context are kept, because they search worse. */
 export function reportLabel(row: Pick<DataSource, "status" | "ingest_report">): string | null {
   const r = row.ingest_report;
   if (row.status !== "ready" || !r) return null;
-  const parts = [
+  const embedded = plural(r.embedded, "passage", "passages");
+  const sentences = [
     r.reused_embeddings > 0
-      ? `${r.embedded} embedded, ${r.reused_embeddings} reused`
-      : `${r.embedded} embedded`,
+      ? `${embedded} embedded, ${r.reused_embeddings} reused.`
+      : `${embedded} embedded.`,
   ];
-  const context = r.contextualized + r.reused_context;
-  if (context > 0) parts.push(`context for ${context}`);
-  if (r.context_failed > 0) parts.push(`${r.context_failed} without context`);
-  parts.push(r.cost_usd > 0 ? formatUsd(r.cost_usd) : "no cost");
-  return parts.join(" · ");
+  if (r.context_failed > 0) {
+    sentences.push(`${plural(r.context_failed, "passage", "passages")} got no context.`);
+  }
+  sentences.push(r.cost_usd > 0 ? `Cost ${formatUsd(r.cost_usd)}.` : "No cost.");
+  return sentences.join(" ");
 }

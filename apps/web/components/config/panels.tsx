@@ -1,56 +1,178 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { cloneElement, isValidElement, useId, type ReactElement, type ReactNode } from "react";
 
+import { Alert } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Lamp } from "@/components/ui/lamp";
+import { SectionHeading } from "@/components/ui/section-heading";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import type { AssistantConfig, DbPermissions, EffortLevel } from "@/lib/api";
 import { useOfflineMode } from "@/lib/instance";
-import { carryShared, pickModel, selectedModel, setTurns } from "@/lib/subagent-models";
+import { carryShared, modelName, pickModel, selectedModel, setTurns } from "@/lib/subagent-models";
 import { cn } from "@/lib/utils";
 
 type Data = Record<string, unknown>;
 const s = (v: unknown, d = "") => (v == null ? d : String(v));
 const b = (v: unknown) => v === true;
+const joinIds = (...ids: (string | undefined)[]) => ids.filter(Boolean).join(" ") || undefined;
 
+export { modelName };
+
+function ModelOptions({ models }: { models: string[] }) {
+  return (
+    <>
+      {models.map((m) => (
+        <option key={m} value={m}>
+          {modelName(m)}
+        </option>
+      ))}
+    </>
+  );
+}
+
+/** A labelled form field: label, the control, and a hint below it. The label
+ *  and hint are tied to the control (`htmlFor` and `aria-describedby`) when
+ *  the child is a single element that takes an `id`, as Input, Select and
+ *  Textarea do. */
 export function Field({
   label,
   hint,
   children,
+  id,
+  className,
 }: {
   label: string;
-  hint?: string;
+  hint?: ReactNode;
   children: ReactNode;
+  /** The control's id; one is made up when it has none. */
+  id?: string;
+  className?: string;
 }) {
+  const auto = useId();
+  const single = isValidElement(children)
+    ? (children as ReactElement<{ id?: string; "aria-describedby"?: string }>)
+    : null;
+  const controlId = id ?? single?.props.id ?? `${auto}-control`;
+  const hintId = hint ? `${auto}-hint` : undefined;
+  const control = single
+    ? cloneElement(single, {
+        id: controlId,
+        "aria-describedby": joinIds(single.props["aria-describedby"], hintId),
+      })
+    : children;
   return (
-    <div className="flex flex-col gap-1.5">
-      <Label>{label}</Label>
-      {children}
-      {hint && <p className="text-muted-foreground text-xs">{hint}</p>}
+    <div className={cn("flex min-w-0 flex-col gap-1.5", className)}>
+      <Label htmlFor={single ? controlId : undefined}>{label}</Label>
+      {control}
+      {hint && (
+        <p id={hintId} className="text-muted-foreground text-small max-w-[60ch]">
+          {hint}
+        </p>
+      )}
     </div>
   );
 }
 
+/** The one toggle row: label and hint on the left, the switch on the right,
+ *  and the whole row clickable. A `tone` puts a lamp before the hint, for a
+ *  hint that is a warning or a problem rather than an explanation. */
 export function Toggle({
   label,
   checked,
   onChange,
   disabled,
+  hint,
+  tone,
 }: {
   label: string;
   checked: boolean;
   onChange: (v: boolean) => void;
   disabled?: boolean;
+  hint?: ReactNode;
+  tone?: "warning" | "destructive";
 }) {
+  const id = useId();
+  const labelId = `${id}-label`;
+  const hintId = hint ? `${id}-hint` : undefined;
   return (
-    <label className="flex items-center justify-between gap-3 py-1 text-sm">
-      <span className={disabled ? "text-muted-foreground" : undefined}>{label}</span>
-      <Switch checked={checked} onCheckedChange={onChange} disabled={disabled} />
+    <label
+      htmlFor={id}
+      className={cn(
+        "flex items-start justify-between gap-4 py-1",
+        disabled ? "cursor-not-allowed" : "cursor-pointer",
+      )}
+    >
+      <span className="flex min-w-0 flex-col gap-0.5">
+        <span
+          id={labelId}
+          className={cn("text-sm font-medium", disabled && "text-muted-foreground")}
+        >
+          {label}
+        </span>
+        {hint && (
+          <span
+            id={hintId}
+            className={cn(
+              "text-small flex max-w-[60ch] items-start gap-1.5",
+              tone ? "text-foreground" : "text-muted-foreground",
+            )}
+          >
+            {tone && <Lamp tone={tone} className="mt-[5px]" />}
+            <span>{hint}</span>
+          </span>
+        )}
+      </span>
+      <Switch
+        id={id}
+        checked={checked}
+        onCheckedChange={onChange}
+        disabled={disabled}
+        aria-labelledby={labelId}
+        aria-describedby={hintId}
+        className="mt-0.5"
+      />
     </label>
   );
+}
+
+/** A sub-group inside a panel: an H4 and its fields. */
+function Group({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: ReactNode;
+  children: ReactNode;
+}) {
+  const id = useId();
+  return (
+    <section aria-labelledby={id} className="flex flex-col gap-3">
+      <SectionHeading level={4} id={id} title={title} description={description} />
+      {children}
+    </section>
+  );
+}
+
+/** Two fields side by side where the panel is wide enough (the Settings
+ *  column), stacked in the narrow canvas drawer. */
+function Pair({ children, className }: { children: ReactNode; className?: string }) {
+  return <div className={cn("grid gap-4 @md:grid-cols-2", className)}>{children}</div>;
+}
+
+/** Settings that only apply while the toggle above them is on. */
+function Nested({ children }: { children: ReactNode }) {
+  return <div className="border-border ml-1 flex flex-col gap-4 border-l-2 pl-4">{children}</div>;
+}
+
+/** Root of every panel: a container, so the pairs above respond to the
+ *  panel's own width rather than the window's. */
+function Panel({ children, className }: { children: ReactNode; className?: string }) {
+  return <div className={cn("@container flex flex-col gap-6", className)}>{children}</div>;
 }
 
 // Tied to the API's own enum: `satisfies` rejects a value the API does not
@@ -61,6 +183,26 @@ type Missing = Exclude<EffortLevel, (typeof EFFORTS)[number]>;
 const _allEfforts: [Missing] extends [never] ? true : Missing = true;
 void _allEfforts;
 
+const EFFORT_LABEL: Record<(typeof EFFORTS)[number], string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra high",
+  max: "Maximum",
+};
+
+function EffortOptions() {
+  return (
+    <>
+      {EFFORTS.map((x) => (
+        <option key={x} value={x}>
+          {EFFORT_LABEL[x]}
+        </option>
+      ))}
+    </>
+  );
+}
+
 /** A number input that means "no limit" when empty. */
 function OptionalNumber({
   value,
@@ -68,16 +210,24 @@ function OptionalNumber({
   step,
   min,
   placeholder,
+  id,
+  "aria-describedby": describedBy,
 }: {
   value: number | null | undefined;
   onCommit: (v: number | null) => void;
   step?: string;
   min?: number;
   placeholder: string;
+  id?: string;
+  "aria-describedby"?: string;
 }) {
   return (
     <Input
+      id={id}
+      aria-describedby={describedBy}
       type="number"
+      inputMode="decimal"
+      className="num"
       step={step}
       min={min}
       placeholder={placeholder}
@@ -99,7 +249,7 @@ export function AgentPanel({
   data: Data;
   models: string[];
   onChange: (patch: Data) => void;
-  /** "Write it for me" (task 5.5), where the assistant already exists. */
+  /** "Write it for me", where the assistant already exists. */
   assist?: ReactNode;
 }) {
   const modelsObj = (data.models as Data) ?? {};
@@ -107,97 +257,99 @@ export function AgentPanel({
   const setMain = (patch: Data) =>
     onChange({ models: { ...modelsObj, main: { ...main, ...patch } } });
   return (
-    <div className="flex flex-col gap-4">
-      <Field label="System prompt">
-        <Textarea
-          // Remounts when the saved prompt changes from outside (an accepted
-          // draft), which an uncontrolled textarea would otherwise not show.
-          key={s(data.system_prompt)}
-          rows={7}
-          defaultValue={s(data.system_prompt)}
-          onBlur={(e) => onChange({ system_prompt: e.target.value })}
-        />
-      </Field>
-      {assist}
-      <Field label="Main model">
-        <Select
-          value={s(main.model)}
-          onChange={(e) =>
-            onChange({ models: { ...modelsObj, main: { ...main, model: e.target.value } } })
-          }
+    <Panel>
+      <Group title="Instructions">
+        <Field
+          label="System prompt"
+          hint="Who the assistant is, who it serves and how it answers. It reads this before every message."
         >
-          {models.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </Select>
-      </Field>
-      <Field label="Effort" hint="How hard the model works per turn.">
-        <Select
-          value={s(main.effort, "high")}
-          onChange={(e) =>
-            onChange({ models: { ...modelsObj, main: { ...main, effort: e.target.value } } })
-          }
-        >
-          {EFFORTS.map((x) => (
-            <option key={x}>{x}</option>
-          ))}
-        </Select>
-      </Field>
-      {/* These three were in the schema and reachable only through the raw
-          config API: nothing in the UI could set a spend cap. */}
-      <Field
-        label="Extended thinking"
-        hint="Adaptive lets the model think before answering when it helps."
-      >
-        <Select
-          value={s((main.thinking as Data | undefined)?.type, "adaptive")}
-          onChange={(e) => setMain({ thinking: { type: e.target.value } })}
-        >
-          <option value="adaptive">adaptive</option>
-          <option value="disabled">disabled</option>
-        </Select>
-      </Field>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Max turns" hint="Model calls per message. Empty: no limit.">
-          <OptionalNumber
-            value={main.max_turns as number | null | undefined}
-            min={1}
-            placeholder="no limit"
-            onCommit={(v) => setMain({ max_turns: v })}
+          <Textarea
+            // Remounts when the saved prompt changes from outside (an accepted
+            // draft), which an uncontrolled textarea would otherwise not show.
+            key={s(data.system_prompt)}
+            rows={7}
+            defaultValue={s(data.system_prompt)}
+            onBlur={(e) => onChange({ system_prompt: e.target.value })}
           />
         </Field>
-        <Field label="Budget (USD)" hint="Spend cap per conversation. Empty: none.">
-          <OptionalNumber
-            value={main.max_budget_usd as number | null | undefined}
-            step="0.01"
-            min={0}
-            placeholder="none"
-            onCommit={(v) => setMain({ max_budget_usd: v })}
-          />
+        {assist}
+      </Group>
+      <Group title="Model">
+        <Field label="Main model">
+          <Select
+            value={s(main.model)}
+            onChange={(e) =>
+              onChange({ models: { ...modelsObj, main: { ...main, model: e.target.value } } })
+            }
+          >
+            <ModelOptions models={models} />
+          </Select>
         </Field>
-      </div>
-    </div>
+        <Pair>
+          <Field label="Effort" hint="How hard the model works on each message.">
+            <Select
+              value={s(main.effort, "high")}
+              onChange={(e) =>
+                onChange({ models: { ...modelsObj, main: { ...main, effort: e.target.value } } })
+              }
+            >
+              <EffortOptions />
+            </Select>
+          </Field>
+          {/* These three were in the schema and reachable only through the raw
+              config API: nothing in the UI could set a spend cap. */}
+          <Field
+            label="Thinking"
+            hint="Adaptive lets the model think first when a message needs it."
+          >
+            <Select
+              value={s((main.thinking as Data | undefined)?.type, "adaptive")}
+              onChange={(e) => setMain({ thinking: { type: e.target.value } })}
+            >
+              <option value="adaptive">Adaptive</option>
+              <option value="disabled">Off</option>
+            </Select>
+          </Field>
+        </Pair>
+      </Group>
+      <Group title="Limits">
+        <Pair>
+          <Field label="Model calls per message" hint="Leave empty for no limit.">
+            <OptionalNumber
+              value={main.max_turns as number | null | undefined}
+              min={1}
+              placeholder="No limit"
+              onCommit={(v) => setMain({ max_turns: v })}
+            />
+          </Field>
+          <Field label="Spend per conversation (USD)" hint="Leave empty for no cap.">
+            <OptionalNumber
+              value={main.max_budget_usd as number | null | undefined}
+              step="0.01"
+              min={0}
+              placeholder="No cap"
+              onCommit={(v) => setMain({ max_budget_usd: v })}
+            />
+          </Field>
+        </Pair>
+      </Group>
+    </Panel>
   );
 }
 
-/** The output node's one setting (task 1.12): whether answers carry
- *  numbered citations. It was stored on the node and ignored by the compiler,
- *  and the drawer said there was nothing to configure. */
+/** The output node's one setting: whether answers carry numbered citations.
+ *  It was stored on the node and ignored by the compiler, and the drawer
+ *  said there was nothing to configure. */
 export function OutputPanel({ data, onChange }: { data: Data; onChange: (patch: Data) => void }) {
   return (
-    <div className="flex flex-col gap-2">
+    <Panel>
       <Toggle
         label="Number the sources in answers"
         checked={data.citations !== false}
         onChange={(v) => onChange({ citations: v })}
+        hint="Only matters with a knowledge base wired in, and the knowledge base's own citation setting must be on too."
       />
-      <p className="text-muted-foreground text-xs">
-        Only matters with a knowledge base wired in. Both this and the knowledge base&apos;s own
-        setting must be on.
-      </p>
-    </div>
+    </Panel>
   );
 }
 
@@ -210,8 +362,8 @@ export function GuardrailsPanel({
 }) {
   const rules = (data.rules as string[]) ?? [];
   return (
-    <div className="flex flex-col gap-3">
-      <Field label="Rules" hint="One rule per line. Injected into the system prompt.">
+    <Panel>
+      <Field label="Rules" hint="One rule per line. They are added to the system prompt.">
         <Textarea
           key={rules.join("\n")}
           rows={5}
@@ -226,100 +378,96 @@ export function GuardrailsPanel({
           }
         />
       </Field>
-      <Toggle
-        label="Redact personal data"
-        checked={b(data.pii_redaction)}
-        onChange={(v) => onChange({ pii_redaction: v })}
-      />
-      <p className="text-muted-foreground -mt-1 text-xs">
-        Emails, phone numbers, card numbers and ID numbers are taken out of web searches and of
-        traces. Your own databases and allowlisted systems still get them: looking someone up is
-        their job.
-      </p>
-      <Toggle
-        label="Guard against prompt injection"
-        checked={b(data.injection_scan)}
-        onChange={(v) => onChange({ injection_scan: v })}
-      />
-      <p className="text-muted-foreground -mt-1 text-xs">
-        Messages that try to override or reveal the instructions are answered under the normal
-        rules. Tool results that read like instructions reach the model marked as data. Nothing
-        shaped like a credential is sent to another system. Each shows as a note in chat.
-      </p>
-      <Toggle
-        label="Tell the model retrieved content is untrusted data"
-        checked={b(data.untrusted_content_notice)}
-        onChange={(v) => onChange({ untrusted_content_notice: v })}
-      />
-      <Toggle
-        label="Refusal fallback"
-        checked={b(data.refusal_fallback)}
-        onChange={(v) => onChange({ refusal_fallback: v })}
-      />
-    </div>
+      <Group title="Safety checks">
+        <div className="flex flex-col gap-3">
+          <Toggle
+            label="Redact personal data"
+            checked={b(data.pii_redaction)}
+            onChange={(v) => onChange({ pii_redaction: v })}
+            hint="Takes emails, phone, card and ID numbers out of web searches and run details. Your own databases and allowed systems still get them, since looking people up is their job."
+          />
+          <Toggle
+            label="Guard against prompt injection"
+            checked={b(data.injection_scan)}
+            onChange={(v) => onChange({ injection_scan: v })}
+            hint="Messages that try to override or reveal the instructions are answered under the normal rules. Tool results that read like instructions reach the model marked as data, and nothing shaped like a credential is sent to another system. Each case shows as a note in chat."
+          />
+          <Toggle
+            label="Treat tool results as data, not instructions"
+            checked={b(data.untrusted_content_notice)}
+            onChange={(v) => onChange({ untrusted_content_notice: v })}
+            hint="Tells the model to ignore instructions that appear inside tool results or retrieved documents."
+          />
+          <Toggle
+            label="Switch models when one refuses"
+            checked={b(data.refusal_fallback)}
+            onChange={(v) => onChange({ refusal_fallback: v })}
+            hint="If the main model declines a request or can't be reached, a different model answers instead."
+          />
+        </div>
+      </Group>
+    </Panel>
   );
 }
 
-/** What the assistant remembers (task 5.2): each setting says what it does,
- *  now that all four are enforced. */
+/** What the assistant remembers: each setting says what it does, now that
+ *  all four are enforced. */
 export function MemoryPanel({ data, onChange }: { data: Data; onChange: (patch: Data) => void }) {
   const persist = data.persist_history !== false;
   return (
-    <div className="flex flex-col gap-3">
+    <Panel className="gap-3">
       <Toggle
         label="Remember earlier messages"
         checked={persist}
         onChange={(v) => onChange({ persist_history: v })}
+        hint={
+          persist
+            ? "Each message is answered with the conversation so far."
+            : "Each message is answered on its own. Earlier ones are still saved, but the model doesn't see them."
+        }
       />
-      <p className="text-muted-foreground -mt-1 text-xs">
-        {persist
-          ? "Each message is answered with the conversation so far."
-          : "Each message is answered on its own; earlier ones are not shown to the model. They are still saved."}
-      </p>
       {persist && (
-        <Field
-          label="Summarize after (tokens)"
-          hint="When a conversation grows past this, its older part is replaced by a summary and only recent messages are kept word for word. 8,000 to 900,000. Summaries are written by the background worker."
-        >
-          <Input
-            type="number"
-            min={8000}
-            max={900000}
-            step={1000}
-            defaultValue={s(data.summarize_after_tokens, "120000")}
-            onBlur={(e) => {
-              const n = Math.min(900000, Math.max(8000, Math.round(Number(e.target.value) || 0)));
-              e.target.value = String(n);
-              onChange({ summarize_after_tokens: n });
-            }}
-          />
-        </Field>
+        <Nested>
+          <Field
+            label="Summarize after (tokens)"
+            hint="Once a conversation grows past this, its older part is replaced by a summary and only recent messages are kept word for word. Between 8,000 and 900,000. Summaries are written in the background."
+          >
+            <Input
+              type="number"
+              inputMode="numeric"
+              className="num"
+              min={8000}
+              max={900000}
+              step={1000}
+              defaultValue={s(data.summarize_after_tokens, "120000")}
+              onBlur={(e) => {
+                const n = Math.min(900000, Math.max(8000, Math.round(Number(e.target.value) || 0)));
+                e.target.value = String(n);
+                onChange({ summarize_after_tokens: n });
+              }}
+            />
+          </Field>
+        </Nested>
       )}
       <Toggle
         label="Name conversations automatically"
         checked={b(data.auto_title)}
         onChange={(v) => onChange({ auto_title: v })}
+        hint="The first message names the conversation, unless someone renames it first."
       />
-      <p className="text-muted-foreground -mt-1 text-xs">
-        The first message names the conversation, unless someone renames it first.
-      </p>
       <Toggle
-        label="Memory tool"
+        label="Keep notes about each person"
         checked={b(data.memory_tool)}
         onChange={(v) => onChange({ memory_tool: v })}
+        hint="The assistant keeps notes between conversations: preferences, facts, where work stands. Notes are private to each person, who can see and clear them with /memory in chat."
       />
-      <p className="text-muted-foreground -mt-1 text-xs">
-        Lets the assistant keep notes about each person between conversations: their preferences,
-        facts, where work stands. Notes are private to that person, who can see and clear them with
-        /memory in chat.
-      </p>
-    </div>
+    </Panel>
   );
 }
 
-/** Built-in subagents (task 5.1): which are on, and each one's model.
- *  Mirrors `agent/subagents.py`: a role is only used when what it needs is
- *  there, so each says what it needs when it isn't. */
+/** Built-in subagents: which are on, and each one's model. Mirrors
+ *  `agent/subagents.py`: a role is only used when what it needs is there,
+ *  so each says what it needs when it isn't. */
 const SUBAGENT_ROLES = [
   {
     key: "retrieval",
@@ -336,7 +484,7 @@ const SUBAGENT_ROLES = [
   {
     key: "research",
     label: "Research",
-    does: "Searches the web (and the knowledge base, if any) and returns findings with their sources.",
+    does: "Searches the web, and the knowledge base if there is one, and returns findings with their sources.",
     defaultTurns: 8,
   },
 ] as const;
@@ -379,92 +527,99 @@ export function SubagentsPanel({
 
   const missing = (role: string): string | null => {
     if (role === "retrieval" && !ragOn)
-      return "Needs a knowledge base: wire one into the agent or into this subagent on the canvas, or this stays inactive.";
+      return "Needs a knowledge base. Wire one into the agent or into this subagent on the canvas, or it stays idle.";
     if (role === "sql" && !dbOn)
-      return "Needs a database: wire one into the agent or into this subagent, or this stays inactive.";
+      return "Needs a database. Wire one into the agent or into this subagent on the canvas, or it stays idle.";
     if (role === "research" && !webOn)
-      return "Needs web search: switch on the Web search tool, or this stays inactive.";
+      return "Needs web search. Switch on the Web search tool above, or it stays idle.";
     if (role === "research" && offline)
-      return "This instance runs in offline mode (RAG_OFFLINE=1), so web search, and with it this subagent, is off.";
+      return "This server runs offline, so web search is off, and this subagent with it.";
     return null;
   };
 
+  const sharedName = modelName(s(shared.model)) || "not set";
+
   return (
-    <div className="flex flex-col gap-4">
-      <p className="text-muted-foreground text-xs">
-        A subagent runs a multi-step job in its own context, usually on a cheaper model, and hands
-        back only its findings. The main agent never sees the dead ends.
-      </p>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Subagent model" hint="Used by every subagent without its own.">
-          <Select value={s(shared.model)} onChange={(e) => setShared({ model: e.target.value })}>
-            {models.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </Select>
-        </Field>
-        <Field label="Effort">
-          <Select
-            value={s(shared.effort, "high")}
-            onChange={(e) => setShared({ effort: e.target.value })}
-          >
-            {EFFORTS.map((x) => (
-              <option key={x}>{x}</option>
-            ))}
-          </Select>
-        </Field>
-      </div>
-      {SUBAGENT_ROLES.map((role) => {
-        const on = b(subagents[role.key]);
-        const mine = own[role.key];
-        const problem = missing(role.key);
-        return (
-          <div key={role.key} className="flex flex-col gap-2">
-            <Toggle label={role.label} checked={on} onChange={(v) => save({ [role.key]: v })} />
-            <p className={problem && on ? "text-warning text-xs" : "text-muted-foreground text-xs"}>
-              {problem ?? role.does}
-            </p>
-            {on && (
-              <div className="border-border ml-1 grid grid-cols-2 gap-3 border-l-2 pl-4">
-                <Field label="Model">
-                  <Select
-                    aria-label={`${role.label} subagent model`}
-                    value={selectedModel(mine, shared)}
-                    onChange={(e) => setOwn(role.key, pickModel(mine, shared, e.target.value))}
-                  >
-                    <option value="">Subagent model ({s(shared.model)})</option>
-                    {models.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-                <Field label="Max turns" hint={`Empty: ${role.defaultTurns}.`}>
-                  <OptionalNumber
-                    key={String(mine?.max_turns ?? "")}
-                    value={mine?.max_turns as number | null | undefined}
-                    min={1}
-                    placeholder={String(role.defaultTurns)}
-                    onCommit={(v) => {
-                      if (v === null && !mine) return;
-                      setOwn(role.key, setTurns(mine, shared, v));
-                    }}
-                  />
-                </Field>
+    <Panel>
+      <Group
+        title="Shared model"
+        description="Used by every subagent that has no model of its own."
+      >
+        <Pair>
+          <Field label="Subagent model">
+            <Select value={s(shared.model)} onChange={(e) => setShared({ model: e.target.value })}>
+              <ModelOptions models={models} />
+            </Select>
+          </Field>
+          <Field label="Effort">
+            <Select
+              value={s(shared.effort, "high")}
+              onChange={(e) => setShared({ effort: e.target.value })}
+            >
+              <EffortOptions />
+            </Select>
+          </Field>
+        </Pair>
+      </Group>
+      <Group title="Subagents to use">
+        <div className="flex flex-col gap-3">
+          {SUBAGENT_ROLES.map((role) => {
+            const on = b(subagents[role.key]);
+            const mine = own[role.key];
+            const problem = on ? missing(role.key) : null;
+            return (
+              <div key={role.key} className="flex flex-col gap-3">
+                <Toggle
+                  label={role.label}
+                  checked={on}
+                  onChange={(v) => save({ [role.key]: v })}
+                  hint={problem ?? role.does}
+                  tone={problem ? "warning" : undefined}
+                />
+                {on && (
+                  <Nested>
+                    <Pair>
+                      <Field label="Model">
+                        <Select
+                          aria-label={`${role.label} subagent model`}
+                          value={selectedModel(mine, shared)}
+                          onChange={(e) =>
+                            setOwn(role.key, pickModel(mine, shared, e.target.value))
+                          }
+                        >
+                          <option value="">Shared model ({sharedName})</option>
+                          <ModelOptions models={models} />
+                        </Select>
+                      </Field>
+                      <Field
+                        label="Model calls per job"
+                        hint={`Leave empty for the default, ${role.defaultTurns}.`}
+                      >
+                        <OptionalNumber
+                          key={String(mine?.max_turns ?? "")}
+                          value={mine?.max_turns as number | null | undefined}
+                          min={1}
+                          placeholder={String(role.defaultTurns)}
+                          onCommit={(v) => {
+                            if (v === null && !mine) return;
+                            setOwn(role.key, setTurns(mine, shared, v));
+                          }}
+                        />
+                      </Field>
+                    </Pair>
+                  </Nested>
+                )}
               </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
+            );
+          })}
+        </div>
+      </Group>
+    </Panel>
   );
 }
 
-/** A subagent node's drawer (task 5.10): what it does, its model (its own,
- *  or the shared subagent model) and turn limit, and what it can use. */
+/** A subagent node's drawer: what it does, its model (its own, or the
+ *  shared subagent model) and turn limit, and what it can use. */
 export function SubagentNodePanel({
   data,
   models,
@@ -483,71 +638,82 @@ export function SubagentNodePanel({
   const role = SUBAGENT_ROLES.find((r) => r.key === data.role);
   const own = (data.model as Data | null | undefined) ?? null;
   return (
-    <div className="flex flex-col gap-4">
+    <Panel>
       <p className="text-sm">
         <span className="font-medium">{role?.label ?? s(data.role)} subagent.</span>{" "}
         <span className="text-muted-foreground">{role?.does}</span>
       </p>
-      <Field label="Model">
-        <Select
-          aria-label="Subagent model"
-          value={s(own?.model)}
-          onChange={(e) =>
-            onChange({
-              model: e.target.value ? { ...(own ?? {}), model: e.target.value } : null,
-            })
-          }
-        >
-          <option value="">Subagent model ({sharedModel})</option>
-          {models.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </Select>
-      </Field>
-      {own && (
-        <Field label="Effort">
+      <div className="flex flex-col gap-4">
+        <Field label="Model">
           <Select
-            value={s(own.effort, "high")}
-            onChange={(e) => onChange({ model: { ...own, effort: e.target.value } })}
+            aria-label="Subagent model"
+            value={s(own?.model)}
+            onChange={(e) =>
+              onChange({
+                model: e.target.value ? { ...(own ?? {}), model: e.target.value } : null,
+              })
+            }
           >
-            {EFFORTS.map((x) => (
-              <option key={x}>{x}</option>
-            ))}
+            <option value="">Shared model ({modelName(sharedModel) || "not set"})</option>
+            <ModelOptions models={models} />
           </Select>
         </Field>
-      )}
-      <Field label="Max turns" hint={`Empty: ${role?.defaultTurns ?? "the default"}.`}>
-        <OptionalNumber
-          key={String(data.max_turns ?? "")}
-          value={data.max_turns as number | null | undefined}
-          min={1}
-          placeholder={String(role?.defaultTurns ?? "")}
-          onCommit={(v) => onChange({ max_turns: v })}
-        />
-      </Field>
-      <div className="flex flex-col gap-1">
-        <p className="text-xs font-medium">What it can use</p>
-        {wiredIn.length > 0 ? (
-          <ul className="list-disc pl-5 text-xs">
-            {wiredIn.map((w) => (
-              <li key={w}>{w} (its alone unless also wired to the agent)</li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-muted-foreground text-xs">Nothing wired into it directly.</p>
+        {own && (
+          <Field label="Effort">
+            <Select
+              value={s(own.effort, "high")}
+              onChange={(e) => onChange({ model: { ...own, effort: e.target.value } })}
+            >
+              <EffortOptions />
+            </Select>
+          </Field>
         )}
-        <p className="text-muted-foreground text-xs">
-          Plus, within its job, what is wired to the agent. Wire a capability into this node instead
-          of the agent to keep it away from the main agent.
-        </p>
+        <Field
+          label="Model calls per job"
+          hint={
+            role
+              ? `Leave empty for the default, ${role.defaultTurns}.`
+              : "Leave empty for the default."
+          }
+        >
+          <OptionalNumber
+            key={String(data.max_turns ?? "")}
+            value={data.max_turns as number | null | undefined}
+            min={1}
+            placeholder={String(role?.defaultTurns ?? "")}
+            onCommit={(v) => onChange({ max_turns: v })}
+          />
+        </Field>
       </div>
-    </div>
+      <Group
+        title="What it can use"
+        description="Also, within its job, whatever is wired to the agent. Wire a capability into this node instead of the agent to keep it away from the main agent."
+      >
+        {wiredIn.length > 0 ? (
+          <>
+            <ul className="border-border divide-border flex flex-col divide-y border-y text-sm">
+              {wiredIn.map((w) => (
+                <li key={w} className="py-2">
+                  {w}
+                </li>
+              ))}
+            </ul>
+            <p className="text-muted-foreground text-small">
+              Only this subagent can use these, unless they are also wired to the agent.
+            </p>
+          </>
+        ) : (
+          <p className="text-muted-foreground text-sm">Nothing is wired into it directly.</p>
+        )}
+      </Group>
+    </Panel>
   );
 }
 
-/** The router node's drawer (task 5.10). */
+const ROUTER_EXPLAINER =
+  "Before each message, the router sorts it as simple, normal or hard. Simple ones (a greeting, a thank-you) run at low effort, hard ones (several steps, comparing, planning, code) at high effort or more, and the rest at the agent's own. Only the effort changes. Run details show how each message was routed.";
+
+/** The router node's drawer. */
 export function RouterNodePanel({
   data,
   models,
@@ -559,37 +725,22 @@ export function RouterNodePanel({
 }) {
   const model = (data.model as Data | undefined) ?? {};
   return (
-    <div className="flex flex-col gap-4">
-      <RouterExplainer />
+    <Panel>
+      <p className="text-muted-foreground max-w-[60ch] text-sm">{ROUTER_EXPLAINER}</p>
       <Field label="Router model" hint="A small, fast model is enough to sort a message.">
         <Select
           value={s(model.model)}
           onChange={(e) => onChange({ model: { ...model, model: e.target.value } })}
         >
-          {models.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
+          <ModelOptions models={models} />
         </Select>
       </Field>
-    </div>
+    </Panel>
   );
 }
 
-function RouterExplainer() {
-  return (
-    <p className="text-muted-foreground text-xs">
-      Before each message, the router sorts it as simple, normal or hard. Simple ones (a greeting, a
-      thank-you) run at low effort; hard ones (several steps, comparing, planning, code) at high
-      effort or more; the rest at the agent&apos;s own. Only the effort changes. Run details show
-      how each message was routed.
-    </p>
-  );
-}
-
-/** The router in the Panels view: on or off, and its model (task 5.10).
- *  Switching it on places a router node before the agent. */
+/** The router in Settings: on or off, and its model. Switching it on places
+ *  a router node before the agent. */
 export function RouterPanel({
   config,
   models,
@@ -603,35 +754,33 @@ export function RouterPanel({
   const roles = (config.models ?? {}) as unknown as Data;
   const routerModel = (roles.router ?? {}) as Data;
   return (
-    <div className="flex flex-col gap-3">
+    <Panel className="gap-3">
       <Toggle
-        label="Route effort per message"
+        label="Pick the effort for each message"
         checked={on}
         onChange={(v) =>
           onChange({ ...config, router: { ...(config.router as Data), enabled: v } })
         }
+        hint={ROUTER_EXPLAINER}
       />
-      <RouterExplainer />
       {on && (
-        <Field label="Router model">
-          <Select
-            value={s(routerModel.model)}
-            onChange={(e) =>
-              onChange({
-                ...config,
-                models: { ...roles, router: { ...routerModel, model: e.target.value } },
-              } as unknown as AssistantConfig)
-            }
-          >
-            {models.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </Select>
-        </Field>
+        <Nested>
+          <Field label="Router model" hint="A small, fast model is enough to sort a message.">
+            <Select
+              value={s(routerModel.model)}
+              onChange={(e) =>
+                onChange({
+                  ...config,
+                  models: { ...roles, router: { ...routerModel, model: e.target.value } },
+                } as unknown as AssistantConfig)
+              }
+            >
+              <ModelOptions models={models} />
+            </Select>
+          </Field>
+        </Nested>
       )}
-    </div>
+    </Panel>
   );
 }
 
@@ -653,72 +802,73 @@ export function DatabasePanel({
   const current = s(data.connection_id);
   const conn = connections.find((c) => c.id === current);
   const known = Boolean(conn);
+  const readOnly = Boolean(conn && !conn.write);
+  const exposed = b(data.expose_write);
 
   return (
-    <div className="flex flex-col gap-3">
-      <Field label="Connection" hint="Add and configure databases in the Databases tab.">
+    <Panel className="gap-4">
+      <Field label="Connection" hint="Add and set up databases in the Databases tab.">
         <Select value={current} onChange={(e) => onChange({ connection_id: e.target.value })}>
-          {!known && <option value={current}>{current || "(none)"}</option>}
+          {!known && (
+            <option value={current} disabled={!current}>
+              {current ? "Removed connection" : "Choose a connection"}
+            </option>
+          )}
           {connections.map((c) => (
             <option key={c.id} value={c.id}>
-              {c.name} ({c.engine})
+              {c.name} ({ENGINE_LABEL[c.engine] ?? c.engine})
             </option>
           ))}
         </Select>
       </Field>
-      {!known && current && (
-        <p className="text-destructive text-xs">
-          This connection no longer exists. Pick another, or remove this node.
-        </p>
-      )}
+      {!known && current && <Alert>Connection removed. Pick another, or remove this node.</Alert>}
       {conn?.permissions && <PermissionSummary engine={conn.engine} p={conn.permissions} />}
 
-      <Toggle
-        label="Let the agent write SQL for it"
-        checked={data.nl2sql !== false}
-        onChange={(v) => onChange({ nl2sql: v })}
-      />
+      <div className="flex flex-col gap-3">
+        <Toggle
+          label="Let the agent write SQL for it"
+          checked={data.nl2sql !== false}
+          onChange={(v) => onChange({ nl2sql: v })}
+          hint="The agent writes and runs its own queries against this database."
+        />
 
-      {/* Two gates, not one: the connection's own permission says what the
-          CREDENTIAL may do; this says what THIS assistant may ask for. On a
-          read-only connection the toggle cannot be switched ON — enabling it
-          would be a promise the guard refuses to keep, and the server now
-          reports it as an error that blocks publishing. It can always be
-          switched OFF, since that is exactly what clears that error. (It used
-          to be merely dimmed, while this comment claimed it was disabled.) */}
-      <Toggle
-        label="Expose writes to this assistant"
-        checked={b(data.expose_write)}
-        onChange={(v) => onChange({ expose_write: v })}
-        disabled={Boolean(conn && !conn.write && !b(data.expose_write))}
-      />
-      <p
-        className={cn(
-          "text-xs",
-          conn && !conn.write && b(data.expose_write)
-            ? "text-destructive"
-            : "text-muted-foreground",
-        )}
-      >
-        {conn && !conn.write
-          ? b(data.expose_write)
-            ? "This connection is read-only, so exposed writes can never run — publishing is blocked until you turn this off or allow writes on the connection (Databases tab)."
-            : "This connection is read-only. Allow writes on the connection first, in the Databases tab."
-          : "Writes still require human approval in chat, with the exact statement shown."}
-      </p>
-    </div>
+        {/* Two gates, not one: the connection's own permission says what the
+            CREDENTIAL may do; this says what THIS assistant may ask for. On a
+            read-only connection the toggle cannot be switched ON: enabling it
+            would be a promise the guard refuses to keep, and the server
+            reports it as an error that blocks publishing. It can always be
+            switched OFF, since that is exactly what clears that error. */}
+        <Toggle
+          label="Let this assistant change data"
+          checked={exposed}
+          onChange={(v) => onChange({ expose_write: v })}
+          disabled={readOnly && !exposed}
+          tone={readOnly && exposed ? "destructive" : undefined}
+          hint={
+            readOnly
+              ? exposed
+                ? "This connection is read-only, so these changes can never run. Publishing is blocked until you switch this off, or allow writes on the connection in the Databases tab."
+                : "This connection is read-only. Allow writes on the connection in the Databases tab first."
+              : "Each change still needs a person's approval in chat, with the exact statement shown."
+          }
+        />
+      </div>
+    </Panel>
   );
 }
 
 export function JsonView({ value }: { value: unknown }) {
   return (
-    <pre className="bg-muted max-h-[70vh] overflow-auto rounded-md p-4 text-xs leading-relaxed">
+    <pre
+      tabIndex={0}
+      className="bg-muted text-code focus-visible:ring-ring max-h-[70vh] overflow-auto rounded-md p-4 font-mono focus-visible:ring-2 focus-visible:outline-none"
+    >
       {JSON.stringify(value, null, 2)}
     </pre>
   );
 }
 
-// ── Knowledge base / data source (task 2.13) ─────────────────
+// ── Knowledge base and data source ───────────────────────────
 
 const n = (v: unknown, d: number) => {
   const x = Number(v);
@@ -733,6 +883,34 @@ function nest(data: Data, key: string, patch: Data): Data {
   return { [key]: { ...current, ...patch } };
 }
 
+/** A number field that commits on blur, for the knowledge base settings. */
+function NumberInput({
+  value,
+  step,
+  onCommit,
+  id,
+  "aria-describedby": describedBy,
+}: {
+  value: string;
+  step?: string;
+  onCommit: (raw: string) => void;
+  id?: string;
+  "aria-describedby"?: string;
+}) {
+  return (
+    <Input
+      id={id}
+      aria-describedby={describedBy}
+      type="number"
+      inputMode="decimal"
+      className="num"
+      step={step}
+      defaultValue={value}
+      onBlur={(e) => onCommit(e.target.value)}
+    />
+  );
+}
+
 export function KnowledgeBasePanel({
   data,
   onChange,
@@ -744,124 +922,130 @@ export function KnowledgeBasePanel({
   const retrieval = (data.retrieval ?? {}) as Data;
 
   return (
-    <div className="flex flex-col gap-4">
-      <p className="text-muted-foreground text-xs">
-        Wiring this node into the agent is what turns retrieval on. Connect data sources into it to
-        limit the search; with none connected it searches every indexed source.
+    <Panel>
+      <p className="text-muted-foreground max-w-[60ch] text-sm">
+        Wiring this into the agent is what switches search on. Wire data sources into it to limit
+        what it searches; with none, it searches every indexed source.
       </p>
 
-      <section className="flex flex-col gap-3">
-        <h4 className="text-xs font-semibold tracking-wide uppercase">Models</h4>
+      <Group title="Models">
         <Field
-          label="Embedder"
-          hint="Recorded on the config. In v1 the model that actually runs is chosen by RAG_OFFLINE / whether a Voyage key is set, not by this field."
+          label="Embedding model"
+          hint="Saved with the assistant. For now the server picks the embedding model it runs, so changing this has no effect yet."
         >
           <Input
             defaultValue={s(data.embedder, "voyage-3-large")}
             onBlur={(e) => onChange({ embedder: e.target.value.trim() })}
           />
         </Field>
-        <Field label="Reranker">
+        <Field label="Reranking model">
           <Input
             defaultValue={s(data.reranker, "voyage-rerank-2.5")}
             onBlur={(e) => onChange({ reranker: e.target.value.trim() })}
           />
         </Field>
-      </section>
+      </Group>
 
-      <section className="flex flex-col gap-3">
-        <h4 className="text-xs font-semibold tracking-wide uppercase">Chunking</h4>
-        <p className="text-muted-foreground text-xs">
-          Applies to the next indexing run — reindex a source in the Sources tab to apply it to
-          content that is already indexed.
-        </p>
-        <Field label="Max tokens per chunk" hint="128–4000">
-          <Input
-            type="number"
-            defaultValue={s(chunking.max_tokens, "800")}
-            onBlur={(e) => onChange(nest(data, "chunking", { max_tokens: n(e.target.value, 800) }))}
-          />
-        </Field>
-        <Field label="Overlap" hint="0–0.5 — fraction of a chunk shared with the previous one">
-          <Input
-            type="number"
-            step="0.05"
-            defaultValue={s(chunking.overlap, "0.15")}
-            onBlur={(e) => onChange(nest(data, "chunking", { overlap: n(e.target.value, 0.15) }))}
-          />
-        </Field>
-      </section>
+      <Group
+        title="Chunking"
+        description="Applies the next time a source is indexed. Reindex a source in the Sources tab to apply it to what is already there."
+      >
+        <Pair>
+          <Field label="Tokens per chunk" hint="128 to 4,000.">
+            <NumberInput
+              value={s(chunking.max_tokens, "800")}
+              onCommit={(v) => onChange(nest(data, "chunking", { max_tokens: n(v, 800) }))}
+            />
+          </Field>
+          <Field
+            label="Overlap"
+            hint="0 to 0.5: the share of a chunk repeated from the one before."
+          >
+            <NumberInput
+              value={s(chunking.overlap, "0.15")}
+              step="0.05"
+              onCommit={(v) => onChange(nest(data, "chunking", { overlap: n(v, 0.15) }))}
+            />
+          </Field>
+        </Pair>
+      </Group>
 
-      <section className="flex flex-col gap-3">
-        <h4 className="text-xs font-semibold tracking-wide uppercase">Retrieval</h4>
+      <Group title="Retrieval">
         <Toggle
-          label="Hybrid search (dense + keyword)"
+          label="Hybrid search"
           checked={retrieval.hybrid !== false}
           onChange={(v) => onChange(nest(data, "retrieval", { hybrid: v }))}
+          hint="Searches by meaning and by keyword, then merges the two."
         />
-        <Field label="Dense candidates" hint="1–500">
-          <Input
-            type="number"
-            defaultValue={s(retrieval.top_k_dense, "40")}
-            onBlur={(e) =>
-              onChange(nest(data, "retrieval", { top_k_dense: n(e.target.value, 40) }))
-            }
-          />
-        </Field>
-        <Field label="Keyword candidates" hint="1–500">
-          <Input
-            type="number"
-            defaultValue={s(retrieval.top_k_sparse, "40")}
-            onBlur={(e) =>
-              onChange(nest(data, "retrieval", { top_k_sparse: n(e.target.value, 40) }))
-            }
-          />
-        </Field>
-        <Field
-          label="Results kept after reranking"
-          hint="Must not exceed the candidate pool above, or the config is rejected."
-        >
-          <Input
-            type="number"
-            defaultValue={s(retrieval.rerank_top_n, "8")}
-            onBlur={(e) =>
-              onChange(nest(data, "retrieval", { rerank_top_n: n(e.target.value, 8) }))
-            }
-          />
-        </Field>
-        <Field label="Minimum score" hint="0–1, applied to the reranker's score">
-          <Input
-            type="number"
-            step="0.05"
-            defaultValue={s(retrieval.min_score, "0.2")}
-            onBlur={(e) => onChange(nest(data, "retrieval", { min_score: n(e.target.value, 0.2) }))}
-          />
-        </Field>
-        <Field label="RRF k" hint="Fusion constant; higher flattens the rank weighting">
-          <Input
-            type="number"
-            defaultValue={s(retrieval.rrf_k, "60")}
-            onBlur={(e) => onChange(nest(data, "retrieval", { rrf_k: n(e.target.value, 60) }))}
-          />
-        </Field>
-      </section>
+        <Pair>
+          <Field label="Candidates by meaning" hint="1 to 500.">
+            <NumberInput
+              value={s(retrieval.top_k_dense, "40")}
+              onCommit={(v) => onChange(nest(data, "retrieval", { top_k_dense: n(v, 40) }))}
+            />
+          </Field>
+          <Field label="Candidates by keyword" hint="1 to 500.">
+            <NumberInput
+              value={s(retrieval.top_k_sparse, "40")}
+              onCommit={(v) => onChange(nest(data, "retrieval", { top_k_sparse: n(v, 40) }))}
+            />
+          </Field>
+          <Field
+            label="Results kept after reranking"
+            hint="No more than the candidates above, or the settings are rejected."
+          >
+            <NumberInput
+              value={s(retrieval.rerank_top_n, "8")}
+              onCommit={(v) => onChange(nest(data, "retrieval", { rerank_top_n: n(v, 8) }))}
+            />
+          </Field>
+          <Field
+            label="Minimum score"
+            hint="0 to 1. Results the reranker scores lower are dropped."
+          >
+            <NumberInput
+              value={s(retrieval.min_score, "0.2")}
+              step="0.05"
+              onCommit={(v) => onChange(nest(data, "retrieval", { min_score: n(v, 0.2) }))}
+            />
+          </Field>
+          <Field
+            label="Merge constant"
+            hint="How the two searches' rankings are merged. Higher values weigh ranks more evenly. Usually 60."
+          >
+            <NumberInput
+              value={s(retrieval.rrf_k, "60")}
+              onCommit={(v) => onChange(nest(data, "retrieval", { rrf_k: n(v, 60) }))}
+            />
+          </Field>
+        </Pair>
+      </Group>
 
-      <section className="flex flex-col gap-1">
-        <h4 className="text-xs font-semibold tracking-wide uppercase">Answers</h4>
-        <Toggle
-          label="Cite sources with [n] markers"
-          checked={data.citations !== false}
-          onChange={(v) => onChange({ citations: v })}
-        />
-        <Toggle
-          label="Contextual retrieval prefix"
-          checked={b(data.contextual_retrieval)}
-          onChange={(v) => onChange({ contextual_retrieval: v })}
-        />
-      </section>
-    </div>
+      <Group title="Answers">
+        <div className="flex flex-col gap-3">
+          <Toggle
+            label="Cite sources with numbered markers"
+            checked={data.citations !== false}
+            onChange={(v) => onChange({ citations: v })}
+            hint="Answers mark each claim with a number, like [1], that links to its source."
+          />
+          <Toggle
+            label="Add context to each chunk when indexing"
+            checked={b(data.contextual_retrieval)}
+            onChange={(v) => onChange({ contextual_retrieval: v })}
+            hint="A small model writes a line on where each chunk sits in its document, which helps search find it. Costs a little per chunk, and is skipped while the server runs offline."
+          />
+        </div>
+      </Group>
+    </Panel>
   );
 }
+
+const SOURCE_STATUS: Record<string, string> = {
+  pending: "waiting to index",
+  processing: "indexing",
+  error: "failed",
+};
 
 export function DataSourcePanel({
   data,
@@ -875,60 +1059,77 @@ export function DataSourcePanel({
   const current = s(data.data_source_id);
   const known = sources.some((src) => src.id === current);
   return (
-    <div className="flex flex-col gap-3">
-      <Field label="Source" hint="Add and index sources in the Sources tab.">
+    <Panel className="gap-4">
+      <Field
+        label="Source"
+        hint="Wire this into a knowledge base to include it in searches. Add and index sources in the Sources tab."
+      >
         <Select value={current} onChange={(e) => onChange({ data_source_id: e.target.value })}>
-          {!known && <option value={current}>{current || "(none)"}</option>}
+          {!known && (
+            <option value={current} disabled={!current}>
+              {current ? "Removed source" : "Choose a source"}
+            </option>
+          )}
           {sources.map((src) => (
             <option key={src.id} value={src.id}>
               {src.name}
-              {src.status !== "ready" ? ` (${src.status})` : ""}
+              {src.status !== "ready" ? ` (${SOURCE_STATUS[src.status] ?? src.status})` : ""}
             </option>
           ))}
         </Select>
       </Field>
       {!known && current && (
-        <p className="text-destructive text-xs">
-          This source no longer exists on the assistant. Pick another, or delete this node.
-        </p>
+        <Alert>
+          This source was removed from the assistant. Pick another, or remove this node.
+        </Alert>
       )}
-      <p className="text-muted-foreground text-xs">
-        Connect this node into a knowledge base to include it in searches.
-      </p>
-    </div>
+    </Panel>
   );
 }
 
+const ENGINE_LABEL: Record<string, string> = {
+  postgres: "PostgreSQL",
+  postgresql: "PostgreSQL",
+  mysql: "MySQL",
+  sqlite: "SQLite",
+  mongodb: "MongoDB",
+};
+
 /** The connection's permission profile, read-only, next to the node that
- *  uses it (task 3.11). It is edited in one place, the Databases tab, because
- *  one connection can be wired into several assistants and several nodes. */
+ *  uses it. It is edited in one place, the Databases tab, because one
+ *  connection can be wired into several assistants and several nodes. */
 function PermissionSummary({ engine, p }: { engine: string; p: DbPermissions }) {
   const noun = engine === "mongodb" ? "collections" : "tables";
-  const allowed = [p.read && "read", p.write && "write", p.ddl && "schema changes"].filter(Boolean);
+  const allowed = [p.read && "read", p.write && "write", p.ddl && "change the schema"].filter(
+    (x): x is string => Boolean(x),
+  );
+  const allows = allowed.length
+    ? allowed.join(", ").replace(/^./, (c) => c.toUpperCase())
+    : "Nothing";
   return (
-    <div className="border-border bg-muted/40 rounded-md border px-3 py-2 text-xs">
-      <div className="font-medium">What this connection&apos;s credential may do</div>
-      <dl className="text-muted-foreground mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
-        <dt>Allows</dt>
-        <dd className="text-foreground">{allowed.length ? allowed.join(", ") : "nothing"}</dd>
-        <dt>Row limit</dt>
-        <dd className="text-foreground">{p.row_limit}</dd>
-        <dt>Timeout</dt>
-        <dd className="text-foreground">{(p.statement_timeout_ms / 1000).toFixed(1)} s</dd>
+    <div className="border-border bg-card flex flex-col gap-2 rounded-lg border p-3">
+      <h4 className="text-h4 font-semibold">What this connection may do</h4>
+      <dl className="text-small grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1">
+        <dt className="text-muted-foreground">Allows</dt>
+        <dd>{allows}</dd>
+        <dt className="text-muted-foreground">Row limit</dt>
+        <dd className="num">{p.row_limit.toLocaleString()}</dd>
+        <dt className="text-muted-foreground">Timeout</dt>
+        <dd className="num">{(p.statement_timeout_ms / 1000).toFixed(1)} s</dd>
         {p.allow_tables.length > 0 && (
           <>
-            <dt>Only {noun}</dt>
-            <dd className="text-foreground">{p.allow_tables.join(", ")}</dd>
+            <dt className="text-muted-foreground">Only these {noun}</dt>
+            <dd className="break-words">{p.allow_tables.join(", ")}</dd>
           </>
         )}
         {p.deny_tables.length > 0 && (
           <>
-            <dt>Hidden {noun}</dt>
-            <dd className="text-foreground">{p.deny_tables.join(", ")}</dd>
+            <dt className="text-muted-foreground">Hidden {noun}</dt>
+            <dd className="break-words">{p.deny_tables.join(", ")}</dd>
           </>
         )}
       </dl>
-      <p className="text-muted-foreground mt-1">Change these in the Databases tab.</p>
+      <p className="text-muted-foreground text-small">Change these in the Databases tab.</p>
     </div>
   );
 }

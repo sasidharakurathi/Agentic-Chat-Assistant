@@ -4,12 +4,16 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Loading } from "@/components/ui/loading";
 import { ApiError } from "@/lib/api";
 import { safeNext, useAuth } from "@/lib/auth";
+
+import { AuthCard } from "../auth-card";
 
 /** `useSearchParams` reads the URL being rendered. Reading
  *  `window.location` instead gave the *previous* URL during a client-side
@@ -17,7 +21,7 @@ import { safeNext, useAuth } from "@/lib/auth";
  *  `?next=` on the way from an invite link. Next requires the Suspense. */
 export default function RegisterPage() {
   return (
-    <Suspense>
+    <Suspense fallback={<Loading what="the sign-up form" />}>
       <RegisterForm />
     </Suspense>
   );
@@ -40,22 +44,27 @@ function RegisterForm() {
     try {
       await register(email, password, name, next);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Something went wrong");
+      setError(registerError(err));
       setPending(false);
     }
   }
 
   return (
-    <Card>
+    <AuthCard>
       <CardHeader>
-        <CardTitle>Create your account</CardTitle>
+        <h1 className="font-condensed text-h1 font-semibold">Create your account</h1>
         <CardDescription>You&apos;ll get a personal workspace to start building.</CardDescription>
       </CardHeader>
       <CardContent>
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="name">Name</Label>
-            <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+            <Input
+              id="name"
+              autoComplete="name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="email">Email</Label>
@@ -76,22 +85,40 @@ function RegisterForm() {
               autoComplete="new-password"
               required
               minLength={8}
+              aria-describedby="password-hint"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
+            <p id="password-hint" className="text-small text-muted-foreground">
+              At least 8 characters.
+            </p>
           </div>
-          {error && <p className="text-destructive text-sm">{error}</p>}
+          {error && <Alert>{error}</Alert>}
           <Button type="submit" disabled={pending}>
             {pending ? "Creating…" : "Create account"}
           </Button>
-          <p className="text-muted-foreground text-center text-sm">
+          <p className="text-muted-foreground text-sm">
             Already have an account?{" "}
-            <Link href={withNext("/login")} className="text-primary hover:underline">
+            <Link
+              href={withNext("/login")}
+              className="text-foreground rounded-sm font-medium underline decoration-1 underline-offset-[3px] hover:decoration-2"
+            >
               Sign in
             </Link>
           </p>
         </form>
       </CardContent>
-    </Card>
+    </AuthCard>
   );
+}
+
+/** What went wrong, and what to do about it. */
+function registerError(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.code === "email_taken") {
+      return "An account with that email already exists. Sign in instead, or use another email.";
+    }
+    return err.message;
+  }
+  return "Couldn't reach the server. Check your connection, then try again.";
 }

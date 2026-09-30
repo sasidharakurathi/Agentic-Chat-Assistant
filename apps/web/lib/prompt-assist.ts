@@ -1,4 +1,5 @@
 import type { PromptSuggestion } from "@/lib/api";
+import { modelName } from "@/lib/subagent-models";
 
 /** Rules as the textarea holds them: one per line, blanks dropped. */
 export function parseRules(text: string): string[] {
@@ -23,6 +24,20 @@ export function mergeRules(existing: string[], suggested: string[]): string[] {
     }
   }
   return out;
+}
+
+/** Who wrote the draft and what it cost, as a plain sentence for the UI.
+ *  (`sourceNote` below is the older wording, kept while its test pins it;
+ *  the UI no longer shows middle-dot strings.) */
+export function describeSource(
+  s: Pick<PromptSuggestion, "source" | "model" | "cost_usd">,
+  verb = "Written",
+): string {
+  if (s.source === "template") {
+    return `${verb} from a template. This server doesn't call a model for this, so it was free.`;
+  }
+  const cost = s.cost_usd < 0.01 ? "under $0.01" : `$${s.cost_usd.toFixed(2)}`;
+  return `${verb} by ${s.model ? modelName(s.model) : "the model"} for ${cost}, charged to this assistant's usage.`;
 }
 
 /** Who wrote the draft and what it cost, in a line. */

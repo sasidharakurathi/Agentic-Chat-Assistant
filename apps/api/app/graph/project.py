@@ -47,6 +47,35 @@ _COL_SUB = 820.0
 _COL_AGENT = 1040.0
 _COL_OUTPUT = 1320.0
 
+#: Column per node type: the same as the canvas's Tidy up
+#: (apps/web/components/canvas/graph-sync.ts), so a new graph looks tidied.
+_COLUMN: dict[str, float] = {
+    "input": _COL_INPUT,
+    "guardrail": _COL_PRE,
+    "data_source": _COL_SRC,
+    "knowledge_base": _COL_CAP,
+    "database": _COL_CAP,
+    "tool": _COL_CAP,
+    "mcp_server": _COL_CAP,
+    "memory": _COL_CAP,
+    "subagent": _COL_SUB,
+    "router": _COL_SUB,
+    "agent": _COL_AGENT,
+    "output": _COL_OUTPUT,
+}
+#: Rows are 96px apart (four 24px grid cells): a 52px station plus room.
+_ROW_GAP = 96.0
+_MAIN_LINE = ("input", "guardrail", "router", "agent", "output")
+_BRANCH_ORDER = (
+    "knowledge_base",
+    "memory",
+    "database",
+    "tool",
+    "mcp_server",
+    "data_source",
+    "subagent",
+)
+
 
 def project_config(config: AssistantConfig, existing_graph: Graph | None = None) -> Graph:
     canonical = _project(config, existing_graph)
@@ -81,6 +110,8 @@ class _Projection:
         for n in existing_graph.nodes if existing_graph else []:
             self.existing.setdefault(_identity(n), n)
         self.pos = {n.id: n.position for n in existing_graph.nodes} if existing_graph else {}
+        #: Nodes that were not on the canvas yet: :func:`_layout` places them.
+        self.fresh: set[str] = set()
         self.nodes: list[AnyNode] = []
         self.edges: list[Edge] = []
         self.agent = self.ident(("agent",), "agent")
@@ -98,8 +129,14 @@ class _Projection:
         found = self.existing.get(identity)
         return found.id if found is not None else default
 
-    def at(self, node_id: str, x: float, y: float) -> Position:
-        return self.pos.get(node_id, Position(x=x, y=y))
+    def at(self, node_id: str) -> Position:
+        """The node's position on the user's canvas; a new node is placed by
+        :func:`_layout` once the whole graph is known."""
+        found = self.pos.get(node_id)
+        if found is None:
+            self.fresh.add(node_id)
+            return Position()
+        return found
 
     def wire(self, node_id: str, cap: Scoped) -> None:
         """A capability's edges: to the agent, and/or to its subagents."""
@@ -117,20 +154,20 @@ class _Projection:
         i_mem = self.ident(("memory",), "memory")
         i_out = self.ident(("output",), "output")
         self.nodes += [
-            InputNode(id=i_in, position=at(i_in, _COL_INPUT, 0)),
+            InputNode(id=i_in, position=at(i_in)),
             GuardrailNode(
                 id=i_guard,
-                position=at(i_guard, _COL_PRE, -120),
+                position=at(i_guard),
                 data=GuardrailNodeData(**config.guardrails.model_dump()),
             ),
             MemoryNode(
                 id=i_mem,
-                position=at(i_mem, _COL_CAP, 420),
+                position=at(i_mem),
                 data=MemoryNodeData(**config.memory.model_dump()),
             ),
             AgentNode(
                 id=self.agent,
-                position=at(self.agent, _COL_AGENT, 0),
+                position=at(self.agent),
                 data=AgentNodeData(
                     system_prompt=config.system_prompt,
                     models=config.models.model_copy(deep=True),
@@ -139,7 +176,7 @@ class _Projection:
             ),
             OutputNode(
                 id=i_out,
-                position=at(i_out, _COL_OUTPUT, 0),
+                position=at(i_out),
                 data=OutputNodeData(citations=config.rag.citations),
             ),
         ]
@@ -156,7 +193,7 @@ class _Projection:
         self.nodes.append(
             RouterNode(
                 id=i_router,
-                position=at(i_router, _COL_SRC, -120),
+                position=at(i_router),
                 data=RouterNodeData(model=config.models.router.model_copy(deep=True)),
             )
         )
@@ -167,13 +204,12 @@ class _Projection:
 
     def capabilities(self) -> None:
         config, at, ident = self.config, self.at, self.ident
-        y = 0.0
         if config.rag.enabled:
             i_kb = ident(("knowledge_base",), "kb")
             self.nodes.append(
                 KnowledgeBaseNode(
                     id=i_kb,
-                    position=at(i_kb, _COL_CAP, y),
+                    position=at(i_kb),
                     data=KnowledgeBaseNodeData(
                         embedder=config.rag.embedder,
                         reranker=config.rag.reranker,
@@ -185,13 +221,12 @@ class _Projection:
                 )
             )
             self.wire(i_kb, config.rag)
-            y += 140
-            for i, sid in enumerate(config.rag.source_ids):
+            for sid in config.rag.source_ids:
                 nid = ident(("data_source", sid), f"src:{sid}")
                 self.nodes.append(
                     DataSourceNode(
                         id=nid,
-                        position=at(nid, _COL_SRC, i * 90),
+                        position=at(nid),
                         data=DataSourceNodeData(data_source_id=sid),
                     )
                 )
@@ -202,7 +237,7 @@ class _Projection:
             self.nodes.append(
                 DatabaseNode(
                     id=nid,
-                    position=at(nid, _COL_CAP, y),
+                    position=at(nid),
                     data=DatabaseNodeData(
                         connection_id=db.connection_id,
                         nl2sql=db.nl2sql,
@@ -211,26 +246,24 @@ class _Projection:
                 )
             )
             self.wire(nid, db)
-            y += 120
 
         for key, cfg, approval in _enabled_tools(config):
             nid = ident(("tool", key), f"tool:{key}")
             self.nodes.append(
                 ToolNode(
                     id=nid,
-                    position=at(nid, _COL_CAP, y),
+                    position=at(nid),
                     data=ToolNodeData(key=key, config=cfg, approval=approval),
                 )
             )
             self.wire(nid, getattr(config.tools, key))
-            y += 110
 
         for ref in config.mcp_servers:
             nid = ident(("mcp_server", ref.id), f"mcp:{ref.id}")
             self.nodes.append(
                 McpServerNode(
                     id=nid,
-                    position=at(nid, _COL_CAP, y),
+                    position=at(nid),
                     data=McpServerNodeData(
                         mcp_server_id=ref.id,
                         tool_allowlist=list(ref.tools),
@@ -240,10 +273,8 @@ class _Projection:
                 )
             )
             self.wire(nid, ref)
-            y += 110
 
     def subagents(self) -> None:
-        sy = 0.0
         for role, nid in self.sub_ids.items():
             # The role's own model settings live on its node (task 5.1): the
             # model without its turn limit, and the limit as the node's own.
@@ -251,7 +282,7 @@ class _Projection:
             self.nodes.append(
                 SubagentNode(
                     id=nid,
-                    position=self.at(nid, _COL_SUB, sy),
+                    position=self.at(nid),
                     data=SubagentNodeData(
                         role=role,
                         model=own.model_copy(update={"max_turns": None}) if own else None,
@@ -260,7 +291,6 @@ class _Projection:
                 )
             )
             self.edges.append(Edge(source=nid, target=self.agent))
-            sy += 120
 
 
 def _project(config: AssistantConfig, existing_graph: Graph | None) -> Graph:
@@ -268,7 +298,111 @@ def _project(config: AssistantConfig, existing_graph: Graph | None) -> Graph:
     p.pipeline()
     p.capabilities()
     p.subagents()
+    placed = _layout(p.nodes)
+    for n in p.nodes:
+        if n.id in p.fresh:
+            n.position = placed[n.id]
+    if existing_graph is not None:
+        _settle(p.nodes, p.fresh)
     return Graph(nodes=p.nodes, edges=p.edges)
+
+
+#: Room a station needs when checking whether a spot is taken: wider than
+#: most plates, one row tall plus space for lines between rows. The same as
+#: the canvas's ``makeRoom`` (apps/web/components/canvas/graph-sync.ts).
+_CLEAR_X = 200.0
+_CLEAR_Y = 76.0
+
+
+def _overlaps(a: Position, b: Position) -> bool:
+    return abs(a.x - b.x) < _CLEAR_X and abs(a.y - b.y) < _CLEAR_Y
+
+
+def _settle(nodes: list[AnyNode], fresh: set[str]) -> None:
+    """New nodes land where a tidy canvas would put them, but the user's
+    canvas may not be tidy: older layouts had capabilities on the main row,
+    and the user may have moved things. So, on an existing canvas:
+
+    - a new main-line station (the router, say) goes on the agent's row, and
+      any capability already in its way moves to the nearest free row in its
+      own column;
+    - a new capability that would sit on another station moves to the
+      nearest free row in its column, never onto the main row.
+
+    Only positions change, and only where two stations would stack."""
+    agent = next((n for n in nodes if n.type == "agent"), None)
+    main_y = agent.position.y if agent is not None else 0.0
+
+    def free(n: AnyNode, spot: Position) -> bool:
+        return not any(o is not n and _overlaps(o.position, spot) for o in nodes)
+
+    def move_off_main(n: AnyNode) -> None:
+        # Rows above and below the main row, nearest to where it is first.
+        rows = sorted(
+            (main_y + k * sign * _ROW_GAP for k in range(1, len(nodes) + 2) for sign in (-1, 1)),
+            key=lambda y: (abs(y - n.position.y), y),
+        )
+        for y in rows:
+            spot = Position(x=n.position.x, y=y)
+            if free(n, spot):
+                n.position = spot
+                return
+
+    for n in nodes:
+        if n.id not in fresh:
+            continue
+        if n.type in _MAIN_LINE:
+            if agent is not None and agent.id not in fresh:
+                n.position = Position(x=n.position.x, y=main_y)
+            for o in nodes:
+                if o is not n and o.type not in _MAIN_LINE and _overlaps(o.position, n.position):
+                    move_off_main(o)
+        elif not free(n, n.position) or abs(n.position.y - main_y) < _CLEAR_Y:
+            move_off_main(n)
+
+
+def _layout(nodes: list[AnyNode]) -> dict[str, Position]:
+    """Where each node goes on a tidy canvas: the canvas's Tidy up, in
+    Python. Every node in its type's column; the main line (input,
+    guardrails, router, agent, output) on one row, y=0, so it runs straight;
+    a capability never on that row. Branch columns fill rows -1, +1, -2, +2
+    and so on, except that data sources stay on their knowledge base's side
+    and subagents start outside the capability rows."""
+    columns: dict[float, list[AnyNode]] = {}
+    for n in nodes:
+        columns.setdefault(_COLUMN.get(n.type, _COL_CAP), []).append(n)
+
+    def rank(t: str, order: tuple[str, ...]) -> int:
+        return order.index(t) if t in order else len(order)
+
+    row: dict[str, int] = {}
+    kb = next((n for n in nodes if n.type == "knowledge_base"), None)
+
+    def place(x: float) -> None:
+        ns = sorted(
+            columns.get(x, []),
+            key=lambda n: (rank(n.type, _MAIN_LINE), rank(n.type, _BRANCH_ORDER), n.id),
+        )
+        mains = [n for n in ns if n.type in _MAIN_LINE]
+        if mains:
+            row[mains[0].id] = 0
+        branches = mains[1:] + [n for n in ns if n.type not in _MAIN_LINE]
+        start, side = 1, 0
+        if x == _COL_SUB:
+            start = max([0, *(abs(row.get(n.id, 0)) for n in columns.get(_COL_CAP, []))]) + 1
+        if x == _COL_SRC and kb is not None:
+            kb_row = row.get(kb.id, 0)
+            side = (kb_row > 0) - (kb_row < 0)
+        for i, n in enumerate(branches):
+            row[n.id] = side * (start + i) if side else (1 if i % 2 else -1) * (start + i // 2)
+
+    for x in [_COL_CAP, *(x for x in columns if x != _COL_CAP)]:
+        if x in columns:
+            place(x)
+    return {
+        n.id: Position(x=_COLUMN.get(n.type, _COL_CAP), y=row.get(n.id, 0) * _ROW_GAP)
+        for n in nodes
+    }
 
 
 def _keep_user_wiring(config: AssistantConfig, canonical: Graph, existing: Graph) -> Graph:

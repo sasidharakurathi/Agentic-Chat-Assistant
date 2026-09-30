@@ -18,7 +18,7 @@ describe("progressLabel", () => {
   it("shows the stage and count while processing", () => {
     expect(
       progressLabel({ status: "processing", progress: { stage: "embedding", done: 3, total: 12 } }),
-    ).toBe("Embedding 3/12");
+    ).toBe("Embedding passages: 3 of 12");
     expect(
       progressLabel({
         status: "processing",
@@ -36,10 +36,19 @@ describe("progressLabel", () => {
 });
 
 describe("reportLabel", () => {
-  it("summarises reuse, context and cost", () => {
+  it("summarises reuse and cost in sentences", () => {
     expect(reportLabel({ status: "ready", ingest_report: report })).toBe(
-      "12 embedded, 40 reused · context for 52 · $0.0012",
+      "12 passages embedded, 40 reused. Cost $0.0012.",
     );
+  });
+
+  it("uses the right plural and mentions passages without context", () => {
+    expect(
+      reportLabel({
+        status: "ready",
+        ingest_report: { ...report, embedded: 1, reused_embeddings: 0, context_failed: 2 },
+      }),
+    ).toBe("1 passage embedded. 2 passages got no context. Cost $0.0012.");
   });
 
   it("says when a reindex cost nothing", () => {
@@ -48,7 +57,7 @@ describe("reportLabel", () => {
         status: "ready",
         ingest_report: { ...report, embedded: 0, reused_embeddings: 52, cost_usd: 0 },
       }),
-    ).toBe("0 embedded, 52 reused · context for 52 · no cost");
+    ).toBe("0 passages embedded, 52 reused. No cost.");
   });
 
   it("is null without a report or before the source is ready", () => {

@@ -1,20 +1,39 @@
 "use client";
 
+import { ChevronRight } from "lucide-react";
 import { useId, useState } from "react";
 
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { LineBullet } from "@/components/ui/line-bullet";
+import { SectionHeading } from "@/components/ui/section-heading";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError, type PipelineSuggestion } from "@/lib/api";
 import { useRealModel } from "@/lib/instance";
-import { sourceNote } from "@/lib/prompt-assist";
+import { describeSource } from "@/lib/prompt-assist";
 
 const MIN_DESCRIPTION = 10;
 
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/** The node type a suggested capability becomes, for its line bullet. Keys
+ *  come from the server: `knowledge_base`, `database:<id>`, `mcp:<id>`,
+ *  `subagent:<role>`, `memory_tool`, and the built-in tool names. */
+function capabilityType(key: string): string {
+  const kind = key.split(":")[0];
+  if (kind === "knowledge_base") return "knowledge_base";
+  if (kind === "database") return "database";
+  if (kind === "mcp") return "mcp_server";
+  if (kind === "subagent") return "subagent";
+  if (kind === "memory_tool") return "memory";
+  return "tool";
+}
+
 /** Describe the assistant, get a whole starter pipeline back, look it over,
- *  then apply it or not (task 5.6). Where it comes from and what applying
- *  does are the caller's: the build page saves it over the draft, the
- *  guided setup carries it into the next steps. */
+ *  then apply it or not. Where it comes from and what applying does are the
+ *  caller's: the build page saves it over the draft, the guided setup
+ *  carries it into the next steps. */
 export function PipelineRecommend({
   initialDescription = "",
   request,
@@ -41,7 +60,11 @@ export function PipelineRecommend({
     try {
       setSuggestion(await request(description.trim()));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not recommend a pipeline");
+      setError(
+        err instanceof ApiError
+          ? `${err.message} Change the description or try again.`
+          : "Couldn't suggest a pipeline. Check your connection, then try again.",
+      );
     } finally {
       setBusy(false);
     }
@@ -61,20 +84,25 @@ export function PipelineRecommend({
     const rules = suggestion.config.guardrails.rules;
     const issues = suggestion.validation.errors.length + suggestion.validation.warnings.length;
     return (
-      <div className="flex flex-col gap-4 text-sm">
-        <section className="flex flex-col gap-2" aria-label="Recommended pipeline">
-          <h3 className="text-xs font-semibold tracking-wide uppercase">It would use</h3>
+      <div className="flex flex-col gap-6 text-sm">
+        <section aria-label="Recommended pipeline" className="flex flex-col gap-3">
+          <SectionHeading level={4} title="What it would use" />
           {suggestion.capabilities.length === 0 ? (
-            <p className="text-muted-foreground">
-              Just conversation: nothing in the description calls for a knowledge base, a database
-              or tools. You can add any of them on the canvas.
+            <p className="text-muted-foreground max-w-[60ch]">
+              Only conversation: nothing in the description calls for a knowledge base, a database
+              or tools. You can add any of them on the canvas later.
             </p>
           ) : (
-            <ul className="flex flex-col gap-1.5">
+            <ul className="border-border divide-border flex flex-col divide-y border-y">
               {suggestion.capabilities.map((c) => (
-                <li key={c.key}>
-                  <span className="font-medium">{c.label}</span>
-                  {c.why && <span className="text-muted-foreground"> — {c.why}</span>}
+                <li key={c.key} className="flex items-start gap-3 py-2.5">
+                  <LineBullet type={capabilityType(c.key)} size={20} decorative />
+                  <div className="flex min-w-0 flex-col gap-0.5">
+                    <span className="font-medium break-words">{c.label}</span>
+                    {c.why && (
+                      <span className="text-muted-foreground text-small max-w-[60ch]">{c.why}</span>
+                    )}
+                  </div>
                 </li>
               ))}
             </ul>
@@ -82,9 +110,9 @@ export function PipelineRecommend({
         </section>
 
         {suggestion.changes.length > 0 && (
-          <section className="flex flex-col gap-1.5">
-            <h3 className="text-xs font-semibold tracking-wide uppercase">Applying it</h3>
-            <ul className="text-muted-foreground list-disc pl-5">
+          <section aria-labelledby={`${ids}-changes`} className="flex flex-col gap-2">
+            <SectionHeading level={4} id={`${ids}-changes`} title="What applying it changes" />
+            <ul className="text-muted-foreground flex max-w-[60ch] list-disc flex-col gap-1 pl-5">
               {suggestion.changes.map((c) => (
                 <li key={c}>{c}</li>
               ))}
@@ -92,29 +120,36 @@ export function PipelineRecommend({
           </section>
         )}
 
-        <details className="border-border rounded-md border px-3 py-2">
-          <summary className="cursor-pointer">System prompt and {rules.length} rule(s)</summary>
-          <p className="text-muted-foreground mt-2 whitespace-pre-wrap">
-            {suggestion.config.system_prompt}
-          </p>
-          {rules.length > 0 && (
-            <ul className="mt-2 list-disc pl-5">
-              {rules.map((r) => (
-                <li key={r}>{r}</li>
-              ))}
-            </ul>
-          )}
+        <details className="group border-border rounded-md border">
+          <summary className="focus-visible:ring-ring flex cursor-pointer list-none items-center gap-2 rounded-md px-3 py-2 font-medium focus-visible:ring-2 focus-visible:outline-none [&::-webkit-details-marker]:hidden">
+            <ChevronRight
+              aria-hidden
+              className="text-muted-foreground size-4 shrink-0 transition-transform duration-120 group-open:rotate-90"
+            />
+            System prompt and {plural(rules.length, "rule", "rules")}
+          </summary>
+          <div className="border-border flex flex-col gap-3 border-t px-3 py-3">
+            <p className="max-w-[68ch] whitespace-pre-wrap">{suggestion.config.system_prompt}</p>
+            {rules.length > 0 && (
+              <ul className="flex max-w-[68ch] list-disc flex-col gap-1 pl-5">
+                {rules.map((r) => (
+                  <li key={r}>{r}</li>
+                ))}
+              </ul>
+            )}
+          </div>
         </details>
 
         {issues > 0 && (
-          <p className="text-muted-foreground text-xs">
-            The canvas will show {issues} thing(s) to finish, such as a data source to add.
+          <p className="text-muted-foreground text-small max-w-[60ch]">
+            The canvas will show {plural(issues, "thing", "things")} to finish, such as a data
+            source to add.
           </p>
         )}
-        <p className="text-muted-foreground text-xs" data-testid="pipeline-source">
-          {sourceNote(suggestion, "Recommended")}
+        <p className="text-muted-foreground text-small" data-testid="pipeline-source">
+          {describeSource(suggestion, "Suggested")}
         </p>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button type="button" size="sm" disabled={busy} onClick={apply}>
             {applyLabel}
           </Button>
@@ -139,37 +174,35 @@ export function PipelineRecommend({
 
   const tooShort = description.trim().length < MIN_DESCRIPTION;
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1.5">
         <Label htmlFor={`${ids}-description`}>What is this assistant for?</Label>
         <Textarea
           id={`${ids}-description`}
+          aria-describedby={`${ids}-description-hint`}
           rows={4}
           maxLength={4000}
-          placeholder="e.g. Answers customers' questions about orders and returns from our help-centre articles and the orders database. Friendly and brief."
+          placeholder="For example: Answers customers' questions about orders and returns from our help-centre articles and the orders database. Friendly and brief."
           value={description}
           onChange={(e) => setDescription(e.target.value)}
         />
-        <p className="text-muted-foreground text-xs">
+        <p id={`${ids}-description-hint`} className="text-muted-foreground text-small max-w-[60ch]">
           Who it serves, what it answers from, and what it should be able to do. You get a pipeline
           to look over before anything changes.
+          {tooShort && " Write at least 10 characters."}
         </p>
       </div>
       {realModel !== null && (
-        <p className="text-muted-foreground text-xs">
+        <p className="text-muted-foreground text-small max-w-[60ch]">
           {realModel
-            ? "Uses the assistant's main model; the cost (usually a few cents) goes on its usage."
-            : "Free on this instance: chosen from the words in the description."}
+            ? "Uses the assistant's main model. The cost, usually a few cents, goes on its usage."
+            : "Free on this server: it is chosen from the words in the description."}
         </p>
       )}
-      {error && (
-        <p className="text-destructive text-xs" role="alert">
-          {error}
-        </p>
-      )}
-      <div className="flex gap-2">
+      {error && <Alert>{error}</Alert>}
+      <div className="flex flex-wrap gap-2">
         <Button type="button" size="sm" disabled={busy || tooShort} onClick={ask}>
-          {busy ? "Thinking…" : "Recommend a pipeline"}
+          {busy ? "Suggesting…" : "Suggest a pipeline"}
         </Button>
         {onCancel && (
           <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onCancel}>

@@ -25,7 +25,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   },
   { name: "archive", description: "Archive this conversation" },
   { name: "retry", description: "Send your last message again" },
-  { name: "stop", description: "Stop the turn that is running" },
+  { name: "stop", description: "Stop the answer that is running" },
   { name: "cost", description: "Show what this conversation has cost" },
   { name: "export", description: "Download this conversation as Markdown" },
   { name: "memory", description: "See what this assistant remembers about you, or forget it" },

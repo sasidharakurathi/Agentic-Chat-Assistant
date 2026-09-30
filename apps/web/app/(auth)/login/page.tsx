@@ -4,12 +4,16 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Loading } from "@/components/ui/loading";
 import { ApiError } from "@/lib/api";
 import { safeNext, useAuth } from "@/lib/auth";
+
+import { AuthCard } from "../auth-card";
 
 /** `useSearchParams` reads the URL being rendered. Reading
  *  `window.location` instead gave the *previous* URL during a client-side
@@ -17,7 +21,7 @@ import { safeNext, useAuth } from "@/lib/auth";
  *  `?next=` on the way from an invite link. Next requires the Suspense. */
 export default function LoginPage() {
   return (
-    <Suspense>
+    <Suspense fallback={<Loading what="the sign-in form" />}>
       <LoginForm />
     </Suspense>
   );
@@ -39,16 +43,16 @@ function LoginForm() {
     try {
       await login(email, password, next);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Something went wrong");
+      setError(signInError(err));
       setPending(false);
     }
   }
 
   return (
-    <Card>
+    <AuthCard>
       <CardHeader>
-        <CardTitle>Sign in</CardTitle>
-        <CardDescription>Welcome back to Assistant Studio.</CardDescription>
+        <h1 className="font-condensed text-h1 font-semibold">Sign in</h1>
+        <CardDescription>Welcome back. Sign in with your email and password.</CardDescription>
       </CardHeader>
       <CardContent>
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
@@ -74,18 +78,32 @@ function LoginForm() {
               onChange={(e) => setPassword(e.target.value)}
             />
           </div>
-          {error && <p className="text-destructive text-sm">{error}</p>}
+          {error && <Alert>{error}</Alert>}
           <Button type="submit" disabled={pending}>
             {pending ? "Signing in…" : "Sign in"}
           </Button>
-          <p className="text-muted-foreground text-center text-sm">
+          <p className="text-muted-foreground text-sm">
             No account?{" "}
-            <Link href={withNext("/register")} className="text-primary hover:underline">
+            <Link
+              href={withNext("/register")}
+              className="text-foreground rounded-sm font-medium underline decoration-1 underline-offset-[3px] hover:decoration-2"
+            >
               Create one
             </Link>
           </p>
         </form>
       </CardContent>
-    </Card>
+    </AuthCard>
   );
+}
+
+/** What went wrong, and what to do about it. */
+function signInError(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.code === "invalid_credentials") {
+      return "That email and password don't match an account. Check both, then try again.";
+    }
+    return err.message;
+  }
+  return "Couldn't reach the server. Check your connection, then try again.";
 }

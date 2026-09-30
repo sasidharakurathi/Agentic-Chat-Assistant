@@ -4,10 +4,17 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { use, useEffect, useState } from "react";
 
+import { Alert } from "@/components/ui/alert";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
+import { Loading } from "@/components/ui/loading";
 import { ApiError, invites, type InvitePreview } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+
+import { AuthCard } from "../../auth-card";
+
+const LINK =
+  "text-foreground rounded-sm font-medium underline decoration-1 underline-offset-[3px] hover:decoration-2";
 
 /** The page an invite link opens (`{APP_BASE_URL}/invites/{token}`).
  *
@@ -31,7 +38,7 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
         setProblem(
           err instanceof ApiError && err.status === 404
             ? "This invite link isn't valid. Ask for a new one."
-            : "Could not load this invite.",
+            : "Couldn't load this invite. Check your connection, then reload the page.",
         ),
       );
   }, [token]);
@@ -45,7 +52,11 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
       setActiveOrg(joined.org_id);
       router.push("/assistants");
     } catch (err) {
-      setProblem(err instanceof ApiError ? err.message : "Could not accept the invite.");
+      setProblem(
+        err instanceof ApiError
+          ? err.message
+          : "Couldn't accept the invite. Check your connection, then try again.",
+      );
       setAccepting(false);
     }
   }
@@ -56,33 +67,31 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
   );
 
   return (
-    <Card>
+    <AuthCard>
       <CardHeader>
-        <CardTitle>{invite ? `Join ${invite.org_name}` : "Invitation"}</CardTitle>
+        <h1 className="font-condensed text-h1 font-semibold break-words">
+          {invite ? `Join ${invite.org_name}` : "Invitation"}
+        </h1>
         {invite && (
           <CardDescription>
-            You have been invited as <strong>{invite.role}</strong>, for{" "}
-            <strong>{invite.email}</strong>.
+            You&apos;ve been invited as <strong>{roleWords(invite.role)}</strong>. The invite is for{" "}
+            <strong className="break-all">{invite.email}</strong>.
           </CardDescription>
         )}
       </CardHeader>
       <CardContent className="flex flex-col gap-3 text-sm">
-        {!invite && !problem && <p className="text-muted-foreground">Loading…</p>}
-        {problem && (
-          <p className="text-destructive" role="alert">
-            {problem}
-          </p>
-        )}
+        {!invite && !problem && <Loading what="the invitation" />}
+        {problem && <Alert role="alert">{problem}</Alert>}
 
         {invite?.status === "accepted" && (
           <p className="text-muted-foreground">
             This invite has already been used.{" "}
             {user ? (
-              <Link href="/assistants" className="text-primary hover:underline">
+              <Link href="/assistants" className={LINK}>
                 Go to your assistants
               </Link>
             ) : (
-              <Link href="/login" className="text-primary hover:underline">
+              <Link href="/login" className={LINK}>
                 Sign in
               </Link>
             )}
@@ -93,6 +102,8 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
             This invite has expired. Ask whoever sent it for a new one.
           </p>
         )}
+
+        {invite?.status === "pending" && !ready && <Loading what="your account" />}
 
         {invite?.status === "pending" && ready && !user && (
           <div className="flex flex-col gap-2">
@@ -128,6 +139,16 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
           </Button>
         )}
       </CardContent>
-    </Card>
+    </AuthCard>
   );
+}
+
+/** "admin" → "an admin": roles in words, never the raw value. */
+function roleWords(role: string): string {
+  const words: Record<string, string> = {
+    owner: "an owner",
+    admin: "an admin",
+    member: "a member",
+  };
+  return words[role] ?? role;
 }

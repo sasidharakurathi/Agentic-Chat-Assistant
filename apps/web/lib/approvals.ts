@@ -23,3 +23,22 @@ export function inputAddsDetail(rationale: string, input: Record<string, unknown
     values.length <= 2 && values.every((v) => typeof v === "string" && rationale.includes(v))
   );
 }
+
+/** The approval card's question: what is being asked, in plain words. A
+ *  database write says so; other tools are named the way people read them. */
+export function approvalQuestion(tool: string): string {
+  const m = /^mcp__([^_]+(?:-[^_]+)*)__(.+)$/.exec(tool);
+  if (!m) return tool === "WebSearch" ? "Approve this web search?" : `Approve ${tool}?`;
+  const [, server, name] = m;
+  if (server !== "caps") return `Approve ${name} on ${server}?`;
+  if (/^(sql|mongo)_/.test(name)) return "Approve this database change?";
+  if (name === "http_request") return "Approve this web request?";
+  if (name === "memory") return "Approve this change to its memory?";
+  return `Approve ${name}?`;
+}
+
+/** "Low risk", "Medium risk", "High risk". */
+export function riskLabel(risk: string): string {
+  const word = risk ? risk[0].toUpperCase() + risk.slice(1) : "Unknown";
+  return `${word} risk`;
+}

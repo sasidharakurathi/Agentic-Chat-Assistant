@@ -12,6 +12,9 @@ export type ToolCallView = {
   /** How it was permitted (task 4.7): auto, approved, declined, expired,
    *  interrupted or refused. Absent for calls that never ask. */
   permission?: string | null;
+  /** How long the call took, when known: saved calls carry it, live ones
+   *  are timed in the browser from call to result. */
+  duration_ms?: number | null;
 };
 
 const PERMISSION_TEXT: Record<string, string> = {

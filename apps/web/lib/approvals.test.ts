@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { formatCountdown, inputAddsDetail, titleWithPending } from "./approvals";
+import {
+  approvalQuestion,
+  formatCountdown,
+  inputAddsDetail,
+  riskLabel,
+  titleWithPending,
+} from "./approvals";
 
 describe("formatCountdown", () => {
   it("reads as minutes and seconds", () => {
@@ -26,5 +32,23 @@ describe("inputAddsDetail", () => {
     expect(inputAddsDetail(sql, { sql })).toBe(false);
     expect(inputAddsDetail("create_ticket", { title: "Broken lamp", priority: 2 })).toBe(true);
     expect(inputAddsDetail("x", {})).toBe(false);
+  });
+});
+
+describe("approvalQuestion", () => {
+  it("asks about the change in plain words", () => {
+    expect(approvalQuestion("mcp__caps__sql_query")).toBe("Approve this database change?");
+    expect(approvalQuestion("mcp__caps__http_request")).toBe("Approve this web request?");
+    expect(approvalQuestion("mcp__tickets__create_ticket")).toBe(
+      "Approve create_ticket on tickets?",
+    );
+    expect(approvalQuestion("Bash")).toBe("Approve Bash?");
+  });
+});
+
+describe("riskLabel", () => {
+  it("reads in sentence case", () => {
+    expect(riskLabel("high")).toBe("High risk");
+    expect(riskLabel("low")).toBe("Low risk");
   });
 });

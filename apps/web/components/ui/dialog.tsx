@@ -14,6 +14,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
 
 /** A modal on the native `<dialog>` element (task 0.4).
  *
@@ -30,6 +31,7 @@ export function Dialog({
   children,
   footer,
   wide = false,
+  dismissOnBackdrop = true,
 }: {
   open: boolean;
   onClose: () => void;
@@ -39,6 +41,9 @@ export function Dialog({
   footer?: ReactNode;
   /** Room for a longer body (a preview), which scrolls within the screen. */
   wide?: boolean;
+  /** Close on a click outside the dialog. Off for anything holding typed
+   *  input, which a stray click would otherwise throw away. */
+  dismissOnBackdrop?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -60,17 +65,15 @@ export function Dialog({
       onClose={onClose}
       onClick={(e) => {
         // A click on the backdrop lands on the <dialog> itself.
-        if (e.target === e.currentTarget) onClose();
+        if (dismissOnBackdrop && e.target === e.currentTarget) onClose();
       }}
-      className={
-        "bg-background text-foreground border-border m-auto rounded-lg border p-0 shadow-lg backdrop:bg-black/40 " +
-        (wide
-          ? "max-h-[85vh] w-[min(40rem,calc(100vw-2rem))] overflow-auto"
-          : "w-[min(28rem,calc(100vw-2rem))]")
-      }
+      className={cn(
+        "bg-card text-foreground border-border shadow-float backdrop:bg-scrim open:animate-dialog-in m-auto max-h-[calc(100dvh-2rem)] overflow-auto rounded-xl border p-0",
+        wide ? "w-[min(40rem,calc(100vw-2rem))]" : "w-[min(28rem,calc(100vw-2rem))]",
+      )}
     >
-      <div className="space-y-3 p-5">
-        <h2 id={titleId} className="text-base font-semibold">
+      <div className="space-y-3 p-6">
+        <h2 id={titleId} className="text-h3 font-semibold">
           {title}
         </h2>
         {description && (
@@ -80,9 +83,7 @@ export function Dialog({
         )}
         {children}
       </div>
-      {footer && (
-        <div className="border-border flex justify-end gap-2 border-t px-5 py-3">{footer}</div>
-      )}
+      {footer && <div className="flex flex-wrap justify-end gap-2 px-6 pb-6">{footer}</div>}
     </dialog>
   );
 }
@@ -146,11 +147,12 @@ export function DialogProvider({ children }: { children: ReactNode }) {
       <Dialog
         open={pending !== null}
         onClose={() => settle(false)}
+        dismissOnBackdrop={pending?.kind !== "prompt"}
         title={pending?.title ?? ""}
         description={pending?.description}
         footer={
           <>
-            <Button variant="ghost" onClick={() => settle(false)}>
+            <Button variant="outline" onClick={() => settle(false)}>
               Cancel
             </Button>
             <Button
@@ -164,7 +166,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
               // Cancel, so Enter on a destructive confirm does not destroy.
               onClick={pending?.kind === "confirm" ? () => settle(true) : undefined}
             >
-              {pending?.confirmLabel ?? "OK"}
+              {pending?.confirmLabel || "Confirm"}
             </Button>
           </>
         }

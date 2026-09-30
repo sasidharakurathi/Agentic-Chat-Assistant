@@ -1,20 +1,32 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { ApprovalCard, type PendingApproval } from "@/components/chat/ApprovalCard";
-import { RunDetails } from "@/components/chat/RunDetails";
-import { Markdown } from "@/components/chat/Markdown";
-import { SourcesPanel } from "@/components/chat/SourcesPanel";
-import { RunningBadge, TypingDots } from "@/components/chat/TypingDots";
-import { ToolCallCard, type ToolCallView } from "@/components/chat/ToolCallCard";
+import { asSentence, failureText } from "@/components/chat/error-text";
 import { GuardrailNotes } from "@/components/chat/GuardrailNotes";
+import { Markdown } from "@/components/chat/Markdown";
+import { RunDetails } from "@/components/chat/RunDetails";
+import { SourcesPanel } from "@/components/chat/SourcesPanel";
+import { ToolSteps, type ToolCallView } from "@/components/chat/ToolCallCard";
+import { RunningBadge, TypingDots } from "@/components/chat/TypingDots";
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ui/dialog";
+import { fieldClasses } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { splitBlocks } from "@/lib/message-blocks";
 import {
+  ApiError,
   approvals as approvalsApi,
   conversations,
   streamMessage,
@@ -35,7 +47,7 @@ import {
   type SlashCommand,
   type SlashCommandName,
 } from "@/lib/slash-commands";
-import { appendSubagentText, nestCalls } from "@/lib/tool-tree";
+import { appendSubagentText } from "@/lib/tool-tree";
 import { cn } from "@/lib/utils";
 
 type Live = {
@@ -44,13 +56,20 @@ type Live = {
   citations: Citation[];
   guardrails: GuardrailFinding[];
 };
-/** What the conversation has cost so far (task 1.8). */
+/** What the conversation has cost so far. */
 type Spend = { cost: number; tokensIn: number; tokensOut: number };
 
+/** One conversation (docs/DESIGN.md section 7, Chat): a header with the
+ *  title and what it has cost, the turns in a centred column (your messages
+ *  as muted plates on the right, answers as unboxed reading text with their
+ *  tool steps, sources and run details), and the composer, which carries
+ *  the running lamp and Stop while an answer is being written. */
 export function ChatThread({
   conversationId,
   assistantId,
+  assistantName,
   title = "Conversation",
+  headerLeading,
   onNewChat,
   onRename,
   onArchive,
@@ -58,8 +77,12 @@ export function ChatThread({
 }: {
   conversationId: string;
   assistantId: string;
+  /** For the composer's label and placeholder, "Message Shop Helper". */
+  assistantName?: string;
   title?: string;
-  /** The first turn named the conversation (task 5.2). */
+  /** A control before the title, e.g. the conversation list button on phones. */
+  headerLeading?: ReactNode;
+  /** The first turn named the conversation. */
   onTitle?: (title: string) => void;
   /** For the slash commands that act on the conversation list. */
   onNewChat?: () => void;
@@ -71,9 +94,9 @@ export function ChatThread({
   const [pendingUser, setPendingUser] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** The typed failure behind `error`, when the turn reported one (5.4). */
+  /** The typed failure behind `error`, when the turn reported one. */
   const [failure, setFailure] = useState<{ code: string; retryable: boolean } | null>(null);
-  /** Budget warnings from the last turn (task 5.7). */
+  /** Budget warnings from the last turn. */
   const [budgetNotes, setBudgetNotes] = useState<string[]>([]);
   const [input, setInput] = useState("");
   // Approvals are kept outside `live` on purpose: a pending one must survive
@@ -82,10 +105,24 @@ export function ChatThread({
   const [pending, setPending] = useState<PendingApproval[]>([]);
   const toast = useToast();
   const [stopping, setStopping] = useState(false);
+  /** Said once in the composer's status line when a turn ends well, so a
+   *  screen reader hears that the answer is there. */
+  const [finished, setFinished] = useState<string | null>(null);
+  useEffect(() => {
+    if (!finished) return;
+    const t = setTimeout(() => setFinished(null), 5000);
+    return () => clearTimeout(t);
+  }, [finished]);
   const scrollRef = useRef<HTMLDivElement>(null);
   // The in-flight stream, so leaving the conversation mid-turn drops it
   // rather than leaving it running in the background.
   const abortRef = useRef<AbortController | null>(null);
+  // When each live tool call started, so its step can show how long it took
+  // before the saved message (which carries the server's timing) arrives.
+  const startedAt = useRef(new Map<string, number>());
+  // Whether the reader is at the newest message. New content keeps the view
+  // pinned there, but never drags someone who scrolled up to read.
+  const nearBottom = useRef(true);
 
   // Cursor for history older than what is shown; null when it is all here.
   // The conversation detail only carries the latest page of messages.
@@ -156,7 +193,7 @@ export function ChatThread({
   }, [loadMessages, loadPending]);
 
   // While approvals wait, the tab says so: the assistant is stuck on a
-  // person, who may be looking at another tab (task 5.9).
+  // person, who may be looking at another tab.
   useEffect(() => {
     document.title = titleWithPending(document.title, pending.length);
   }, [pending.length]);
@@ -185,31 +222,38 @@ export function ChatThread({
       keepFromBottom.current = null;
       return;
     }
-    el.scrollTo({ top: el.scrollHeight });
+    if (nearBottom.current) el.scrollTo({ top: el.scrollHeight });
   }, [messages, live, pending]);
 
   const sendText = useCallback(
     async (text: string) => {
       if (!text || sending) return;
+      setFinished(null);
       setError(null);
       setFailure(null);
       setBudgetNotes([]);
+      nearBottom.current = true;
+      startedAt.current.clear();
       setPendingUser(text);
       setLive({ text: "", tools: [], citations: [], guardrails: [] });
       setSending(true);
       const controller = new AbortController();
       abortRef.current = controller;
+      let failed = false;
       try {
         await streamMessage(
           conversationId,
           text,
           (e) => {
+            if (e.type === "tool_call") startedAt.current.set(e.id, performance.now());
+            const began = e.type === "tool_result" ? startedAt.current.get(e.id) : undefined;
+            const took = began !== undefined ? Math.round(performance.now() - began) : null;
             setLive((prev) => {
               if (!prev) return prev;
               switch (e.type) {
                 case "token":
-                  // A subagent's notes go on its delegation card, not into the
-                  // answer (task 2.10).
+                  // A subagent's notes go on its delegation step, not into the
+                  // answer.
                   return e.parent_id
                     ? { ...prev, tools: appendSubagentText(prev.tools, e.parent_id, e.text) }
                     : { ...prev, text: prev.text + e.text };
@@ -226,7 +270,13 @@ export function ChatThread({
                     ...prev,
                     tools: prev.tools.map((t) =>
                       t.id === e.id
-                        ? { ...t, status: e.status, output: e.output, permission: e.permission }
+                        ? {
+                            ...t,
+                            status: e.status,
+                            output: e.output,
+                            permission: e.permission,
+                            duration_ms: took,
+                          }
                         : t,
                     ),
                   };
@@ -254,7 +304,8 @@ export function ChatThread({
               }
             });
             if (e.type === "error") {
-              setError(e.message);
+              failed = true;
+              setError(asSentence(e.message));
               setFailure({ code: e.code, retryable: Boolean(e.retryable) });
             }
             if (e.type === "title") onTitle?.(e.title);
@@ -279,7 +330,12 @@ export function ChatThread({
       } catch (err) {
         // Our own abort (leaving the conversation) is not an error to show.
         if (!controller.signal.aborted) {
-          setError(err instanceof Error ? err.message : "stream failed");
+          failed = true;
+          setError(
+            err instanceof ApiError
+              ? `${asSentence(err.message)} Try sending it again.`
+              : "The answer stopped partway. Check your connection, then try again.",
+          );
         }
       } finally {
         if (abortRef.current === controller) abortRef.current = null;
@@ -291,7 +347,11 @@ export function ChatThread({
         // raised: stopped ones are expired by the server. Re-read what is really
         // still pending, or a stale card sits there answering "already expired"
         // next to the new turn's card.
-        if (!controller.signal.aborted) void loadPending();
+        if (!controller.signal.aborted) {
+          void loadPending();
+          // An error announces itself (role="alert"); a good ending doesn't.
+          if (!failed) setFinished("Answer ready");
+        }
       }
     },
     [conversationId, sending, loadMessages, loadPending, onTitle],
@@ -309,12 +369,15 @@ export function ChatThread({
     let files: MemoryFile[];
     try {
       files = await memoriesApi.list(assistantId);
-    } catch {
-      toast("Couldn't load what this assistant remembers.");
+    } catch (err) {
+      toast(
+        failureText("Couldn't load what this assistant remembers.", err, "Try /memory again."),
+        "error",
+      );
       return;
     }
     if (files.length === 0) {
-      toast("This assistant remembers nothing about you.");
+      toast("This assistant doesn't remember anything about you yet.");
       return;
     }
     const forget = await confirm({
@@ -323,8 +386,8 @@ export function ChatThread({
         <div className="flex max-h-80 flex-col gap-3 overflow-auto">
           {files.map((f) => (
             <div key={f.path}>
-              <p className="font-mono text-xs font-medium">{f.path}</p>
-              <pre className="bg-muted mt-1 rounded p-2 text-xs whitespace-pre-wrap">
+              <p className="text-code text-foreground font-mono font-medium break-all">{f.path}</p>
+              <pre className="bg-muted border-border text-code text-foreground mt-1 rounded-md border p-3 font-mono break-words whitespace-pre-wrap">
                 {f.content}
               </pre>
             </div>
@@ -335,15 +398,19 @@ export function ChatThread({
       destructive: true,
     });
     if (!forget) return;
-    const { deleted } = await memoriesApi.clear(assistantId);
-    toast(`Forgotten (${deleted} ${deleted === 1 ? "file" : "files"}).`);
+    try {
+      const { deleted } = await memoriesApi.clear(assistantId);
+      toast(`Forgot everything: ${deleted} memory ${deleted === 1 ? "file" : "files"} deleted.`);
+    } catch (err) {
+      toast(failureText("Couldn't forget what it remembers.", err, "Try /memory again."), "error");
+    }
   }, [assistantId, confirm, toast]);
 
   const runCommand = useCallback(
     (name: SlashCommandName, arg: string) => {
       const busyOnly = new Set<SlashCommandName>(["help", "stop", "cost", "export"]);
       if (sending && !busyOnly.has(name)) {
-        toast(`Wait for this turn to finish, or /stop it first.`);
+        toast("Wait for the answer to finish, or type /stop to end it.");
         return;
       }
       switch (name) {
@@ -356,7 +423,7 @@ export function ChatThread({
           return;
         case "rename":
           if (!arg) {
-            toast("Add a title: /rename <title>");
+            toast("Add the new title after the command, like /rename Refund question.");
             return;
           }
           onRename?.(arg);
@@ -377,8 +444,8 @@ export function ChatThread({
         case "cost":
           toast(
             spend
-              ? `This conversation has cost ${formatUsd(spend.cost)} · ${formatCount(spend.tokensIn + spend.tokensOut)} tokens`
-              : "No spend recorded yet.",
+              ? `This conversation has cost ${formatUsd(spend.cost)} so far, across ${formatCount(spend.tokensIn + spend.tokensOut)} tokens.`
+              : "Nothing has been spent in this conversation yet.",
           );
           return;
         case "memory":
@@ -438,225 +505,334 @@ export function ChatThread({
     runCommand(cmd.name, "");
   };
 
+  // ── composer ─────────────────────────────────────────────────
+  const composerId = useId();
+  const hintId = `${composerId}-hint`;
+  const listId = `${composerId}-commands`;
+  const helpTitleId = `${composerId}-help`;
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const who = assistantName?.trim() || "the assistant";
+  const selected = suggestions.length
+    ? suggestions[Math.min(menuIndex, suggestions.length - 1)]
+    : null;
+
+  // The message box grows with what is typed, up to about eight lines.
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 192)}px`;
+  }, [input]);
+
+  const turns = messages.map((m) =>
+    m.role === "user" ? (
+      <UserTurn key={m.id} text={m.content} />
+    ) : m.role === "assistant" ? (
+      <AssistantTurn
+        key={m.id}
+        name={who}
+        text={m.content}
+        blocks={m.blocks}
+        assistantId={assistantId}
+        run={{ conversationId, messageId: m.id }}
+      />
+    ) : (
+      // A system or tool message: shown exactly as stored, never as Markdown.
+      <p key={m.id} className="text-muted-foreground max-w-[68ch] break-words whitespace-pre-wrap">
+        {m.content}
+      </p>
+    ),
+  );
+
   return (
-    <div className="flex h-full flex-col">
-      {spend && (
-        <div
-          className="border-border text-muted-foreground flex justify-end border-b px-6 py-1.5 text-xs"
-          aria-label="Conversation spend"
-          title={`${spend.tokensIn.toLocaleString()} tokens in, ${spend.tokensOut.toLocaleString()} out`}
-        >
-          <span className="text-foreground font-medium tabular-nums">{formatUsd(spend.cost)}</span>
-          <span className="mx-1.5">·</span>
-          <span className="tabular-nums">
-            {formatCount(spend.tokensIn + spend.tokensOut)} tokens
-          </span>
-          {sending && <RunningBadge />}
-        </div>
-      )}
-      <div ref={scrollRef} className="flex-1 space-y-4 overflow-auto p-6">
-        {older && (
-          <div className="flex justify-center">
-            <button
-              className="text-muted-foreground hover:text-foreground text-xs"
-              disabled={loadingOlder}
-              onClick={() => void loadOlder()}
-            >
-              {loadingOlder ? "Loading…" : "Load earlier messages"}
-            </button>
-          </div>
+    <div className="flex h-full min-h-0 flex-col">
+      <header className="border-border flex min-h-14 shrink-0 items-center gap-2 border-b px-4 py-2 md:px-6">
+        {headerLeading}
+        <h1 className="text-h3 min-w-0 flex-1 truncate font-semibold" title={title}>
+          {title}
+        </h1>
+        {spend && (
+          <dl
+            className="text-small flex shrink-0 items-baseline gap-4"
+            aria-label="Conversation spend"
+            title={`${spend.tokensIn.toLocaleString()} tokens in, ${spend.tokensOut.toLocaleString()} out`}
+          >
+            <div className="flex items-baseline gap-1.5">
+              <dt className="text-muted-foreground">Cost</dt>
+              <dd className="num text-foreground font-medium">{formatUsd(spend.cost)}</dd>
+            </div>
+            <div className="hidden items-baseline gap-1.5 sm:flex">
+              <dt className="text-muted-foreground">Tokens</dt>
+              <dd className="num text-foreground font-medium">
+                {formatCount(spend.tokensIn + spend.tokensOut)}
+              </dd>
+            </div>
+          </dl>
         )}
-        {messages.map((m) => (
-          <Bubble
-            key={m.id}
-            role={m.role}
-            text={m.content}
-            blocks={m.blocks}
-            assistantId={assistantId}
-            run={m.role === "assistant" ? { conversationId, messageId: m.id } : undefined}
-          />
-        ))}
-        {pendingUser && <Bubble role="user" text={pendingUser} assistantId={assistantId} />}
-        {live && (
-          <div className="space-y-2">
-            <ToolCalls calls={live.tools} />
-            <Bubble
-              role="assistant"
+      </header>
+
+      <div
+        ref={scrollRef}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
+        }}
+        className="relative min-h-0 flex-1 overflow-y-auto"
+      >
+        <div className="mx-auto flex w-full max-w-[72ch] flex-col gap-8 px-4 py-6 md:px-6">
+          {older && (
+            <div className="flex justify-center">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground hover:text-foreground"
+                disabled={loadingOlder}
+                onClick={() => void loadOlder()}
+              >
+                {loadingOlder ? "Loading earlier messages…" : "Load earlier messages"}
+              </Button>
+            </div>
+          )}
+          {turns}
+          {pendingUser && <UserTurn text={pendingUser} />}
+          {live && (
+            <AssistantTurn
+              name={who}
               text={live.text}
+              tools={live.tools}
               working
               citations={live.citations}
               guardrails={live.guardrails}
               assistantId={assistantId}
             />
-          </div>
-        )}
-        {pending.map((a) => (
-          <ApprovalCard
-            key={a.approval_id}
-            approval={a}
-            onDecided={() => setPending((p) => p.filter((x) => x.approval_id !== a.approval_id))}
-            onGone={(reason) => {
-              setPending((p) => p.filter((x) => x.approval_id !== a.approval_id));
-              toast(`That request is closed: ${reason}`);
-            }}
-          />
-        ))}
-        {budgetNotes.map((note) => (
-          // A budget 80% or more used (task 5.7): said, not blocking.
-          <p
-            key={note}
-            role="status"
-            className="border-warning bg-warning/10 rounded-md border px-3 py-2 text-xs"
-          >
-            {note}
-          </p>
-        ))}
-        {error && (
-          <TurnError
-            message={error}
-            failure={failure}
-            onRetry={
-              failure?.retryable && !sending
-                ? () => {
-                    const last = [...messages].reverse().find((m) => m.role === "user");
-                    if (last) void sendText(last.content);
-                  }
-                : undefined
-            }
-          />
-        )}
+          )}
+          {pending.map((a) => (
+            <ApprovalCard
+              key={a.approval_id}
+              approval={a}
+              onDecided={() => setPending((p) => p.filter((x) => x.approval_id !== a.approval_id))}
+              onGone={(reason) => {
+                setPending((p) => p.filter((x) => x.approval_id !== a.approval_id));
+                toast(`This approval is already closed. ${asSentence(reason)}`);
+              }}
+            />
+          ))}
+          {budgetNotes.map((note) => (
+            // A budget 80% or more used: said, not blocking.
+            <Alert key={note} tone="warning" role="status" className="max-w-[68ch]">
+              {note}
+            </Alert>
+          ))}
+          {error && (
+            <TurnError
+              message={error}
+              failure={failure}
+              onRetry={
+                failure?.retryable && !sending
+                  ? () => {
+                      const last = [...messages].reverse().find((m) => m.role === "user");
+                      if (last) void sendText(last.content);
+                    }
+                  : undefined
+              }
+            />
+          )}
+        </div>
       </div>
-      <div className="border-border relative border-t p-4">
-        {suggestions.length > 0 && (
-          <ul
-            role="listbox"
-            aria-label="Commands"
-            className="bg-background border-border absolute right-4 bottom-full left-4 mb-2 overflow-hidden rounded-md border shadow-lg"
-          >
-            {suggestions.map((c, i) => (
-              <li
-                key={c.name}
-                role="option"
-                aria-selected={i === Math.min(menuIndex, suggestions.length - 1)}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  pick(c);
-                }}
-                className={cn(
-                  "flex cursor-pointer items-baseline gap-2 px-3 py-1.5 text-sm",
-                  i === Math.min(menuIndex, suggestions.length - 1) && "bg-muted",
-                )}
-              >
-                <span className="font-mono">/{c.name}</span>
-                {c.args && (
-                  <span className="text-muted-foreground font-mono text-xs">{c.args}</span>
-                )}
-                <span className="text-muted-foreground ml-auto text-xs">{c.description}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-        {showHelp && (
-          <div className="bg-background border-border absolute right-4 bottom-full left-4 mb-2 rounded-md border p-3 text-sm shadow-lg">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="font-medium">Commands</span>
-              <button
-                className="text-muted-foreground hover:text-foreground text-xs"
-                onClick={() => setShowHelp(false)}
-              >
-                Close
-              </button>
-            </div>
-            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
-              {SLASH_COMMANDS.map((c) => (
-                <Fragment key={c.name}>
-                  <dt className="font-mono">
-                    /{c.name}
-                    {c.args ? ` ${c.args}` : ""}
-                  </dt>
-                  <dd className="text-muted-foreground">{c.description}</dd>
-                </Fragment>
+
+      <div className="border-border bg-background shrink-0 border-t px-4 pt-3 pb-3 md:px-6">
+        <div className="relative mx-auto w-full max-w-[72ch]">
+          {suggestions.length > 0 && (
+            <ul
+              id={listId}
+              role="listbox"
+              aria-label="Commands"
+              className="bg-card border-border shadow-float animate-float-in absolute inset-x-0 bottom-full z-20 mb-2 max-h-[50vh] overflow-y-auto rounded-lg border p-1"
+            >
+              {suggestions.map((c) => (
+                <li
+                  key={c.name}
+                  id={`${listId}-${c.name}`}
+                  role="option"
+                  aria-selected={c === selected}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    pick(c);
+                  }}
+                  className={cn(
+                    "flex min-h-9 cursor-pointer flex-wrap items-baseline gap-x-2 gap-y-0.5 rounded-md px-2.5 py-1.5",
+                    c === selected ? "bg-muted" : "hover:bg-muted",
+                  )}
+                >
+                  <span className="text-code font-mono">/{c.name}</span>
+                  {c.args && (
+                    <span className="text-code text-muted-foreground font-mono">{c.args}</span>
+                  )}
+                  <span className="text-small text-muted-foreground sm:ml-auto">
+                    {c.description}
+                  </span>
+                </li>
               ))}
-            </dl>
-            <p className="text-muted-foreground mt-2 text-xs">
-              Start a message with // to send text that begins with a slash.
-            </p>
-          </div>
-        )}
-        <div className="flex gap-2">
-          <Textarea
-            rows={2}
-            placeholder="Message the assistant…  (Enter to send, / for commands)"
-            value={input}
-            onChange={(e) => {
-              setInput(e.target.value);
-              setMenuIndex(0);
-              setMenuDismissed(false);
-              setShowHelp(false);
-            }}
-            onKeyDown={(e) => {
-              if (suggestions.length > 0) {
-                const current = suggestions[Math.min(menuIndex, suggestions.length - 1)];
-                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                  e.preventDefault();
-                  const step = e.key === "ArrowDown" ? 1 : -1;
-                  setMenuIndex((i) => (i + step + suggestions.length) % suggestions.length);
-                  return;
+            </ul>
+          )}
+          {showHelp && (
+            <section
+              aria-labelledby={helpTitleId}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  setShowHelp(false);
+                  textareaRef.current?.focus();
                 }
-                if (e.key === "Tab") {
-                  e.preventDefault();
-                  setInput(`/${current.name}${current.needsArg ? " " : ""}`);
-                  return;
+              }}
+              className="bg-card border-border shadow-float animate-float-in absolute inset-x-0 bottom-full z-20 mb-2 max-h-[60vh] overflow-y-auto rounded-lg border p-4"
+            >
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <h2 id={helpTitleId} className="text-h4 font-semibold">
+                  Commands
+                </h2>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setShowHelp(false);
+                    textareaRef.current?.focus();
+                  }}
+                >
+                  Close
+                </Button>
+              </div>
+              <dl className="grid gap-x-4 gap-y-1.5 sm:grid-cols-[auto_1fr]">
+                {SLASH_COMMANDS.map((c) => (
+                  <Fragment key={c.name}>
+                    <dt className="text-code font-mono">
+                      /{c.name}
+                      {c.args ? ` ${c.args}` : ""}
+                    </dt>
+                    <dd className="text-muted-foreground mb-1.5 sm:mb-0">{c.description}</dd>
+                  </Fragment>
+                ))}
+              </dl>
+              <p className="text-small text-muted-foreground mt-3">
+                Start a message with // to send text that begins with a slash.
+              </p>
+            </section>
+          )}
+
+          <label htmlFor={composerId} className="sr-only">
+            Message {who}
+          </label>
+          <div className="flex items-end gap-2">
+            <textarea
+              ref={textareaRef}
+              id={composerId}
+              rows={1}
+              placeholder={`Message ${who}`}
+              aria-describedby={hintId}
+              // A text box with a command list: announced as a combobox, so
+              // the open list and the highlighted command are read out.
+              role="combobox"
+              aria-expanded={suggestions.length > 0}
+              aria-autocomplete="list"
+              aria-controls={suggestions.length > 0 ? listId : undefined}
+              aria-activedescendant={selected ? `${listId}-${selected.name}` : undefined}
+              className={cn(
+                fieldClasses,
+                "block max-h-48 min-h-11 resize-none px-3 py-[11px] leading-[20px]",
+              )}
+              value={input}
+              onChange={(e) => {
+                setInput(e.target.value);
+                setMenuIndex(0);
+                setMenuDismissed(false);
+                setShowHelp(false);
+              }}
+              onKeyDown={(e) => {
+                if (suggestions.length > 0 && selected) {
+                  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                    e.preventDefault();
+                    const step = e.key === "ArrowDown" ? 1 : -1;
+                    setMenuIndex((i) => (i + step + suggestions.length) % suggestions.length);
+                    return;
+                  }
+                  if (e.key === "Tab") {
+                    e.preventDefault();
+                    setInput(`/${selected.name}${selected.needsArg ? " " : ""}`);
+                    return;
+                  }
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    pick(selected);
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    setMenuDismissed(true);
+                    return;
+                  }
                 }
+                if (e.key === "Escape") setShowHelp(false);
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  pick(current);
-                  return;
+                  submit();
                 }
-                if (e.key === "Escape") {
-                  setMenuDismissed(true);
-                  return;
-                }
-              }
-              if (e.key === "Escape") setShowHelp(false);
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                submit();
-              }
-            }}
-          />
-          {sending ? (
-            // A stop *request*: the turn ends on its own stream, which then
-            // closes normally, so the partial answer stays on screen.
-            <Button variant="outline" onClick={() => void stop()} disabled={stopping}>
-              {stopping ? "Stopping…" : "Stop"}
-            </Button>
-          ) : (
-            <Button onClick={() => submit()} disabled={!input.trim()}>
-              Send
-            </Button>
-          )}
+              }}
+            />
+            {sending ? (
+              // A stop *request*: the turn ends on its own stream, which then
+              // closes normally, so the partial answer stays on screen.
+              <Button
+                variant="outline"
+                size="lg"
+                className="px-4"
+                onClick={() => void stop()}
+                disabled={stopping}
+              >
+                {stopping ? "Stopping…" : "Stop"}
+              </Button>
+            ) : (
+              <Button size="lg" className="px-5" onClick={() => submit()} disabled={!input.trim()}>
+                Send
+              </Button>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+            {/* One live region, always in the page: a region inserted along
+                with its text is often not read out. */}
+            <p role="status">
+              {sending ? (
+                <RunningBadge label={stopping ? "Stopping…" : "Answering…"} />
+              ) : finished ? (
+                <span className="sr-only">{finished}</span>
+              ) : null}
+            </p>
+            <p id={hintId} className="text-small text-muted-foreground">
+              Enter sends. Shift+Enter adds a line. Type / for commands.
+            </p>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-/** Tool cards, with each subagent's calls nested under its delegation call. */
-function ToolCalls({ calls }: { calls: ToolCallView[] }) {
-  const { top, children } = nestCalls(calls);
+/** Your own message, exactly as typed (never rendered as Markdown), on a
+ *  muted plate at the right. */
+function UserTurn({ text }: { text: string }) {
   return (
-    <>
-      {top.map((t, i) => (
-        <ToolCallCard key={t.id ?? i} call={t} nested={children.get(t.id)} />
-      ))}
-    </>
+    <article className="flex flex-col items-end">
+      <h2 className="sr-only">You</h2>
+      <div className="bg-muted text-foreground max-w-[85%] rounded-lg px-4 py-2.5 break-words whitespace-pre-wrap">
+        {text}
+      </div>
+    </article>
   );
 }
 
-function Bubble({
-  role,
+/** An answer: its tool steps, what the guardrails did, the answer itself as
+ *  reading text, the sources it cites and, once saved, Run details. */
+function AssistantTurn({
+  name,
   text,
+  tools,
   blocks,
   citations,
   guardrails,
@@ -664,9 +840,11 @@ function Bubble({
   run,
   working = false,
 }: {
-  role: string;
+  name: string;
   text: string;
-  /** A live turn that has not streamed any text yet. */
+  /** A live turn's calls; saved ones come from `blocks`. */
+  tools?: ToolCallView[];
+  /** A live turn, still streaming. */
   working?: boolean;
   blocks?: MessageBlock[];
   citations?: Citation[];
@@ -681,44 +859,35 @@ function Bubble({
   // the message has been re-fetched); persisted ones carry them in blocks.
   const cites = citations ?? split.cites;
   const guards = guardrails ?? split.guards;
-  const isAssistant = role === "assistant";
+  const calls = tools ?? split.tools;
 
   return (
-    <div className={cn("flex", role === "user" ? "justify-end" : "justify-start")}>
-      <div
-        className={cn(
-          "max-w-[80%] space-y-2 rounded-lg px-3 py-2 text-sm",
-          role === "user" ? "bg-primary text-primary-foreground" : "bg-muted",
-        )}
-      >
-        {isAssistant && <ToolCalls calls={split.tools} />}
-        {isAssistant && <GuardrailNotes items={guards} />}
-        {isAssistant && working && !text ? (
-          <TypingDots />
-        ) : isAssistant ? (
-          // Answers are Markdown (headings, lists, tables, code); a user's own
-          // message is shown exactly as typed.
-          <Markdown text={text} citations={cites} activeMarker={active} onFocus={setActive} />
-        ) : (
-          <div className="whitespace-pre-wrap">{text}</div>
-        )}
-        {isAssistant && cites.length > 0 && (
-          <SourcesPanel
-            citations={cites}
-            assistantId={assistantId}
-            activeMarker={active}
-            onFocus={setActive}
-          />
-        )}
-        {run && <RunDetails conversationId={run.conversationId} messageId={run.messageId} />}
-      </div>
-    </div>
+    <article className="flex min-w-0 flex-col gap-4">
+      <h2 className="sr-only">{name}</h2>
+      {calls.length > 0 && <ToolSteps calls={calls} live={working} />}
+      <GuardrailNotes items={guards} />
+      {working && !text ? (
+        <TypingDots />
+      ) : (
+        // Answers are Markdown (headings, lists, tables, code).
+        <Markdown text={text} citations={cites} activeMarker={active} onFocus={setActive} />
+      )}
+      {cites.length > 0 && (
+        <SourcesPanel
+          citations={cites}
+          assistantId={assistantId}
+          activeMarker={active}
+          onFocus={setActive}
+        />
+      )}
+      {run && <RunDetails conversationId={run.conversationId} messageId={run.messageId} />}
+    </article>
   );
 }
 
-/** How a turn that didn't finish normally is shown (task 5.4): a refusal is
- *  the model declining, not an error, and a failure that may pass on its own
- *  offers to send the message again. */
+/** How a turn that didn't finish normally is shown: a refusal is the model
+ *  declining, not an error, and a failure that may pass on its own offers
+ *  to send the message again. */
 function TurnError({
   message,
   failure,
@@ -730,18 +899,15 @@ function TurnError({
 }) {
   const refused = failure?.code === "refused";
   return (
-    <div
-      className={cn(
-        "flex items-center gap-3 text-sm",
-        refused ? "text-muted-foreground" : "text-destructive",
-      )}
-    >
-      <p>{message}</p>
-      {onRetry && (
-        <Button size="sm" variant="outline" onClick={onRetry}>
-          Try again
-        </Button>
-      )}
-    </div>
+    <Alert tone={refused ? "neutral" : "destructive"} className="max-w-[68ch]">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <p className="min-w-0 flex-1">{message}</p>
+        {onRetry && (
+          <Button size="sm" variant="outline" onClick={onRetry}>
+            Try again
+          </Button>
+        )}
+      </div>
+    </Alert>
   );
 }

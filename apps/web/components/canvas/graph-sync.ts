@@ -1,5 +1,12 @@
 import type { Edge, Node } from "@xyflow/react";
 
+import {
+  canChangeData,
+  problemSummary,
+  stationName,
+  switchedOffByData,
+} from "@/components/canvas/station";
+import { nodeFamily, type LineFamily } from "@/components/ui/line-bullet";
 import type { Graph, GraphNode, ValidationResult } from "@/lib/api";
 
 export type StudioNodeData = { node: GraphNode; selected?: boolean };
@@ -70,30 +77,129 @@ export function mergeFlowNodes<T extends Node>(
   });
 }
 
+/** Main-line station types, in route order. Every other type is a
+ *  capability joining the Agent (or a subagent) on a branch line. */
+export const MAIN_LINE_TYPES: ReadonlySet<string> = new Set([
+  "input",
+  "guardrail",
+  "router",
+  "agent",
+  "output",
+]);
+const MAIN_ORDER = ["input", "guardrail", "router", "agent", "output"];
+
+/** Stop numbers for the stations wired onto the main line, from the real
+ *  wiring: Input 1, then each main-line station its edges lead to, in
+ *  order. Numbers close up when a stop is missing; a station the line
+ *  doesn't reach gets none. */
+export function mainLineStops(graph: Graph): Map<string, number> {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const stops = new Map<string, number>();
+  let current = graph.nodes.find((n) => n.type === "input");
+  while (current && !stops.has(current.id)) {
+    stops.set(current.id, stops.size + 1);
+    if (current.type === "output") break;
+    const from: GraphNode = current;
+    current = graph.edges
+      .filter((e) => e.source === from.id)
+      .map((e) => byId.get(e.target))
+      .filter((n): n is GraphNode => Boolean(n) && MAIN_LINE_TYPES.has(n!.type))
+      .filter((n) => n.type !== "input" && !stops.has(n.id))
+      .sort((a, b) => MAIN_ORDER.indexOf(a.type) - MAIN_ORDER.indexOf(b.type))[0];
+  }
+  return stops;
+}
+
+/** The Agent's three inputs: `left` for the main line, `top` / `bottom` for
+ *  capability lines from above or below its row, so they never paint over
+ *  the main line. Render-time only: never written to the graph. */
+export type AgentHandle = "left" | "top" | "bottom";
+
+export function agentTargetHandle(
+  source: Pick<GraphNode, "type" | "position">,
+  agent: Pick<GraphNode, "position">,
+): AgentHandle {
+  if (MAIN_LINE_TYPES.has(source.type)) return "left";
+  return source.position.y < agent.position.y ? "top" : "bottom";
+}
+
+/** What a station draws with, on top of the graph node itself. */
+export type StationData = StudioNodeData & {
+  issues?: NodeIssues;
+  sourceLabel?: string;
+  /** Lit or unlit while a run is shown; undefined otherwise. */
+  trace?: "lit" | "dim";
+  /** Stop number, for main-line stations the line reaches. */
+  stop?: number;
+  /** Switched off: hollow bullet, muted name. */
+  off?: boolean;
+  /** Time the shown run spent here, in ms, when the trace has it. */
+  time?: number;
+};
+
+/** What a line draws with (`RouteEdge`). */
+export type RouteEdgeData = {
+  /** `main` when both ends are main-line stations. */
+  line: "main" | "capability";
+  /** The source station's type: a capability line takes its colour. */
+  sourceType: string;
+  family: LineFamily;
+  /** The first validation message on this edge: drawn dashed, "won't run". */
+  problem?: string;
+  /** The source can change data (a database with writes exposed). */
+  writes?: boolean;
+  trace?: "lit" | "dim";
+  /** Changes when a run opens, so the lit route draws itself once. */
+  drawKey?: string | null;
+};
+
+export type FlowOptions = {
+  /** Node ids that are switched off (an MCP server turned off). */
+  switchedOff?: ReadonlySet<string>;
+  /** Node id -> time the shown run spent there, in ms. */
+  times?: ReadonlyMap<string, number>;
+  /** An id for the run being shown; the lit route draws once per id. */
+  drawKey?: string | null;
+};
+
 export function toFlow(
   graph: Graph,
   issues: GraphIssues = { nodes: new Map(), edges: new Map() },
   sourceLabels: Record<string, string> = {},
-  /** The nodes a run touched (task 5.9): lit, and everything else dimmed.
+  /** The nodes a run touched (task 5.9): lit, and everything else unlit.
    *  Null when no run is being shown. */
   highlight: Set<string> | null = null,
+  options: FlowOptions = {},
 ) {
   const trace = (id: string) => (highlight ? (highlight.has(id) ? "lit" : "dim") : undefined);
-  const nodes: Node<
-    StudioNodeData & { issues?: NodeIssues; sourceLabel?: string; trace?: "lit" | "dim" }
-  >[] = graph.nodes.map((n) => ({
+  const stops = mainLineStops(graph);
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const off = (n: GraphNode) => Boolean(options.switchedOff?.has(n.id)) || switchedOffByData(n);
+  const nodes: Node<StationData>[] = graph.nodes.map((n) => ({
     id: n.id,
     type: "studio",
     position: n.position,
     deletable: !STRUCTURAL_NODE_TYPES.has(n.type),
+    // What a screen reader hears on reaching the station: its name, its
+    // kind, where it sits on the pipeline and what is wrong with it.
+    ariaLabel: nodeAriaLabel(n, {
+      label: stationLabel(n, sourceLabels),
+      stop: stops.get(n.id),
+      issues: issues.nodes.get(n.id),
+      off: off(n),
+      dim: trace(n.id) === "dim",
+    }),
     data: {
       node: n,
       issues: issues.nodes.get(n.id),
       trace: trace(n.id),
-      // Both kinds carry only an id in the graph; the label comes from the
-      // assistant's live sources/connections. Resolving `data_source` but
-      // not `database` is how a correctly configured database node ends up
-      // reading "unknown connection" on the canvas.
+      stop: stops.get(n.id),
+      off: off(n),
+      time: highlight?.has(n.id) ? options.times?.get(n.id) : undefined,
+      // These kinds carry only an id in the graph; the label comes from the
+      // assistant's live sources, connections and servers. Resolving
+      // `data_source` but not `database` is how a correctly configured
+      // database node once read as a removed connection.
       sourceLabel:
         n.type === "data_source"
           ? sourceLabels[String(n.data.data_source_id ?? "")]
@@ -104,26 +210,92 @@ export function toFlow(
               : undefined,
     },
   }));
-  const edges: Edge[] = graph.edges.map((e, i) => {
+  const edges: Edge<RouteEdgeData>[] = graph.edges.map((e, i) => {
     // Edge-scoped errors (an illegal connection) used to be dropped on the
     // floor: the web type did not even have the field.
     const problems = issues.edges.get(edgeKey(e.source, e.target));
+    const source = byId.get(e.source);
+    const target = byId.get(e.target);
+    const sourceType = source?.type ?? "";
+    const main = MAIN_LINE_TYPES.has(sourceType) && MAIN_LINE_TYPES.has(target?.type ?? "");
+    const lit = highlight ? highlight.has(e.source) && highlight.has(e.target) : undefined;
+    const writes = source ? canChangeData(source) : false;
     return {
       id: e.id ?? `e-${e.source}-${e.target}-${i}`,
+      type: "route",
       source: e.source,
       target: e.target,
-      // The run's path: both ends touched.
-      animated: Boolean(highlight?.has(e.source) && highlight?.has(e.target)),
-      ...(highlight &&
-        !(highlight.has(e.source) && highlight.has(e.target)) && { style: { opacity: 0.25 } }),
-      ...(problems && {
-        style: { stroke: "var(--destructive)", strokeWidth: 2 },
-        label: problems[0],
-        labelStyle: { fill: "var(--destructive)", fontSize: 11 },
-      }),
+      // Named by what it joins, never by raw ids.
+      ariaLabel: [
+        `Connection from ${source ? stationLabel(source, sourceLabels) : "a removed node"} to ${
+          target ? stationLabel(target, sourceLabels) : "a removed node"
+        }`,
+        writes && !problems ? "can change data" : null,
+        problems ? `won't run: ${problems[0]}` : null,
+      ]
+        .filter(Boolean)
+        .join(", "),
+      // Render-time only (never persisted): which of the Agent's three
+      // inputs this line joins, from where its source sits.
+      ...(source && target?.type === "agent"
+        ? { targetHandle: agentTargetHandle(source, target) }
+        : {}),
+      interactionWidth: 16,
+      ...(problems && { label: problems[0] }),
+      data: {
+        line: main ? "main" : "capability",
+        sourceType,
+        family: main ? "main" : nodeFamily(sourceType),
+        problem: problems?.[0],
+        writes,
+        trace: lit === undefined ? undefined : lit ? "lit" : "dim",
+        drawKey: options.drawKey ?? null,
+      },
     };
   });
   return { nodes, edges };
+}
+
+/** A station's name for people: what it points at ("Shop PG") where it
+ *  points at something, else its own name ("Calculator", "Agent"). */
+export function stationLabel(
+  node: Pick<GraphNode, "type" | "data">,
+  sourceLabels: Record<string, string> = {},
+): string {
+  const ref = String(
+    node.data.data_source_id ?? node.data.connection_id ?? node.data.mcp_server_id ?? "",
+  );
+  return (ref && sourceLabels[ref]) || stationName(node);
+}
+
+/** The accessible name of a station on the canvas: "Shop PG, Database, 1
+ *  problem: …" or "Agent, step 4 of the pipeline" (the kind is left out
+ *  when it is the name). */
+export function nodeAriaLabel(
+  node: Pick<GraphNode, "type">,
+  {
+    label,
+    stop,
+    issues,
+    off = false,
+    dim = false,
+  }: { label: string; stop?: number; issues?: NodeIssues; off?: boolean; dim?: boolean },
+): string {
+  const kind = NODE_LABEL[node.type] ?? node.type;
+  const errors = issues?.errors.length ?? 0;
+  const warnings = issues?.warnings.length ?? 0;
+  return [
+    label,
+    kind !== label ? kind : null,
+    stop !== undefined ? `step ${stop} of the pipeline` : null,
+    off ? "switched off" : null,
+    dim ? "not used in this run" : null,
+    errors + warnings > 0
+      ? `${problemSummary(errors, warnings)}: ${issues!.errors[0] ?? issues!.warnings[0]}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
 }
 
 /** Replace one node's `data` (immutably). */
@@ -209,13 +381,9 @@ export function removeEdges(graph: Graph, pairs: { source: string; target: strin
   return { ...graph, edges: graph.edges.filter((e) => !gone.has(`${e.source}>${e.target}`)) };
 }
 
-/** Roughly below-left of the agent, so a freshly added capability node lands
- *  somewhere sensible instead of on top of whatever is at the origin. */
-export function placeNear(graph: Graph, anchorType: string, index: number) {
-  const anchor = graph.nodes.find((n) => n.type === anchorType);
-  const base = anchor?.position ?? { x: 0, y: 0 };
-  return { x: base.x - 260, y: base.y + 140 + index * 90 };
-}
+/** The snap grid: 24px, the same as the canvas dots. */
+export const GRID = 24;
+const snap = (v: number) => Math.round(v / GRID) * GRID;
 
 // Column per node type: the same left-to-right reading order as the
 // backend's projection (app/graph/project.py), so a tidied graph looks like a
@@ -234,22 +402,118 @@ const COLUMN: Record<string, number> = {
   agent: 1040,
   output: 1320,
 };
-const ROW_GAP = 110;
+/** Four grid cells: a 52px station plus room for lines between rows. */
+const ROW_GAP = 96;
+/** The order of branch stations within a column. */
+const BRANCH_ORDER = [
+  "knowledge_base",
+  "memory",
+  "database",
+  "tool",
+  "mcp_server",
+  "data_source",
+  "subagent",
+];
+const rank = (t: string, order: string[]) => {
+  const i = order.indexOf(t);
+  return i === -1 ? order.length : i;
+};
+/** Rows -start, +start, -(start+1), +(start+1) ...: balanced within one. */
+const alternate = (i: number, start: number) =>
+  (i % 2 === 0 ? -1 : 1) * (start + Math.floor(i / 2));
 
-/** Auto-layout (task 1.14): every node to its type's column, stacked and
- *  centred on the agent's row. Deterministic, so pressing it twice is a
- *  no-op, and it never touches wiring or data, only positions. */
+/** Room a station needs: wider than most plates, one row tall plus space
+ *  for lines between rows. */
+const CLEAR_X = 200;
+const CLEAR_Y = 76;
+const overlaps = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+  Math.abs(a.x - b.x) < CLEAR_X && Math.abs(a.y - b.y) < CLEAR_Y;
+
+/** Clears a spot for a main-line station about to land there (the router,
+ *  on the Agent's row). Graphs laid out before the main line had a row of
+ *  its own put capabilities on it, so a new station would stack on top of
+ *  one. Any capability station in the way moves to the nearest free row in
+ *  its own column (above first, then below), on the grid. Main-line
+ *  stations never move; nothing else about the graph changes. */
+export function makeRoom(graph: Graph, at: { x: number; y: number }): Graph {
+  let nodes = graph.nodes;
+  for (const n of graph.nodes) {
+    if (MAIN_LINE_TYPES.has(n.type) || !overlaps(n.position, at)) continue;
+    for (let i = 0; ; i++) {
+      const spot = { x: n.position.x, y: snap(at.y + alternate(i, 1) * ROW_GAP) };
+      if (nodes.some((o) => o.id !== n.id && overlaps(o.position, spot))) continue;
+      nodes = nodes.map((o) => (o.id === n.id ? { ...o, position: spot } : o));
+      break;
+    }
+  }
+  return nodes === graph.nodes ? graph : { ...graph, nodes };
+}
+
+/** Roughly below-left of the agent, so a freshly added capability node lands
+ *  somewhere sensible instead of on top of whatever is at the origin. Below
+ *  the anchor's row, never on it, and on the grid. */
+export function placeNear(graph: Graph, anchorType: string, index: number) {
+  const anchor = graph.nodes.find((n) => n.type === anchorType);
+  const base = anchor?.position ?? { x: 0, y: 0 };
+  return { x: snap(base.x - 264), y: snap(base.y + 144 + index * ROW_GAP) };
+}
+
+/** Auto-layout (task 1.14; docs/DESIGN.md section 6). Every node goes to its
+ *  type's column. The main line (Input, Guardrails, Router, Agent, Output)
+ *  sits on one row, row 0, so it runs straight, and a capability station
+ *  never lands on it. Branch columns fill rows -1, +1, -2, +2 and so on,
+ *  except that data sources stay on their knowledge base's side (so their
+ *  lines don't cross the main line) and subagents start outside the
+ *  capability rows (so capability lines into the Agent don't run through
+ *  them). Rows are 96px apart, on the 24px grid. Deterministic, so pressing
+ *  it twice is a no-op, and it never touches wiring or data, only
+ *  positions. */
 export function tidyLayout(graph: Graph): Graph {
   const columns = new Map<number, GraphNode[]>();
   for (const n of graph.nodes) {
-    const x = COLUMN[n.type] ?? 640;
+    const x = COLUMN[n.type] ?? COLUMN.knowledge_base;
     columns.set(x, [...(columns.get(x) ?? []), n]);
   }
+  const row = new Map<string, number>();
+  const place = (x: number) => {
+    const ns = [...(columns.get(x) ?? [])].sort(
+      (a, b) =>
+        rank(a.type, MAIN_ORDER) - rank(b.type, MAIN_ORDER) ||
+        rank(a.type, BRANCH_ORDER) - rank(b.type, BRANCH_ORDER) ||
+        a.id.localeCompare(b.id),
+    );
+    const mains = ns.filter((n) => MAIN_LINE_TYPES.has(n.type));
+    if (mains.length > 0) row.set(mains[0].id, 0);
+    // A second main-line station in one column (an invalid graph) branches
+    // off like anything else rather than piling onto row 0.
+    const branches = [...mains.slice(1), ...ns.filter((n) => !MAIN_LINE_TYPES.has(n.type))];
+    let start = 1;
+    let side = 0;
+    if (x === COLUMN.subagent) {
+      const caps = (columns.get(COLUMN.knowledge_base) ?? []).map((n) =>
+        Math.abs(row.get(n.id) ?? 0),
+      );
+      start = Math.max(0, ...caps) + 1;
+    }
+    if (x === COLUMN.data_source) {
+      const kb = graph.nodes.find((n) => n.type === "knowledge_base");
+      side = Math.sign(kb ? (row.get(kb.id) ?? 0) : 0);
+    }
+    branches.forEach((n, i) =>
+      row.set(n.id, side !== 0 ? side * (start + i) : alternate(i, start)),
+    );
+  };
+  // The capability column first: data sources follow the knowledge base's
+  // side, and subagents start outside its deepest row.
+  const order = [
+    COLUMN.knowledge_base,
+    ...[...columns.keys()].filter((x) => x !== COLUMN.knowledge_base),
+  ];
+  for (const x of order) if (columns.has(x)) place(x);
+
   const pos = new Map<string, { x: number; y: number }>();
   for (const [x, ns] of columns) {
-    const sorted = [...ns].sort((a, b) => a.type.localeCompare(b.type) || a.id.localeCompare(b.id));
-    const top = -((sorted.length - 1) * ROW_GAP) / 2;
-    sorted.forEach((n, i) => pos.set(n.id, { x, y: top + i * ROW_GAP }));
+    for (const n of ns) pos.set(n.id, { x, y: (row.get(n.id) ?? 0) * ROW_GAP });
   }
   return { ...graph, nodes: graph.nodes.map((n) => ({ ...n, position: pos.get(n.id)! })) };
 }

@@ -1,12 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 
+import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/dialog";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Lamp } from "@/components/ui/lamp";
+import { Loading } from "@/components/ui/loading";
+import { SectionHeading } from "@/components/ui/section-heading";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
@@ -19,6 +24,7 @@ import {
   type McpServer,
   type McpTool,
 } from "@/lib/api";
+import { failureMessage, formatRelative } from "@/lib/format";
 import {
   describeLimits,
   missingSecrets,
@@ -27,36 +33,49 @@ import {
   parsePairs,
   type Limits,
 } from "@/lib/mcp-forms";
+import { cn } from "@/lib/utils";
+
+import { ServerStatus, ToolAccess, TRANSPORT_LABEL } from "./mcp-status";
 
 type Transport = "stdio" | "http" | "sse";
 
 const TRANSPORTS: { value: Transport; label: string; hint: string }[] = [
   {
     value: "http",
-    label: "HTTP (streamable)",
-    hint: "A remote server at an https:// URL. The current standard transport.",
+    label: "Remote, HTTP (streamable)",
+    hint: "A remote server at an https:// URL. The current standard.",
   },
   {
     value: "sse",
-    label: "SSE (legacy)",
-    hint: "A remote server using the older server-sent events transport.",
+    label: "Remote, SSE (older)",
+    hint: "A remote server that uses the older server-sent events connection.",
   },
   {
     value: "stdio",
-    label: "Local command (stdio)",
+    label: "Local command",
     hint: "A program this platform starts itself, such as an npx or uvx package.",
   },
 ];
 
-function message(err: unknown): string {
-  if (err instanceof ApiError) return err.message;
-  return err instanceof Error ? err.message : "Something went wrong";
+/** Classes for a Fira Code block: commands, headers, tool names. */
+const CODE_BLOCK = "bg-muted text-code block rounded-md px-3 py-2 font-mono break-all";
+
+/** The server's own message, or null when it could not be reached. */
+function reasonOf(err: unknown): string | null {
+  return err instanceof ApiError ? err.message : null;
 }
 
-/** The MCP servers tab: register, edit and remove servers (task 4.3), and
- *  see and set how local-command servers are contained (4.4), and check a
- *  server and see the tools it offers (4.5). Choosing which of them an
- *  assistant uses happens on its canvas node, so it is versioned. */
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+type Failure = { what: string; todo: string };
+type RunAction = (fn: () => Promise<unknown>, failure: Failure) => Promise<boolean>;
+
+/** The MCP servers tab: register, edit and remove servers, see and set how
+ *  local-command servers are contained, and check a server and see the
+ *  tools it offers. Choosing which of them an assistant uses happens on its
+ *  canvas node, so it is versioned. */
 export function McpServersManager({ assistantId }: { assistantId: string }) {
   const [rows, setRows] = useState<McpServer[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -65,6 +84,8 @@ export function McpServersManager({ assistantId }: { assistantId: string }) {
   const [runner, setRunner] = useState<McpRunnerStatus | null>(null);
   const [presets, setPresets] = useState<McpPreset[]>([]);
   const [preset, setPreset] = useState<McpPreset | null>(null);
+  const ids = useId();
+  const formId = `${ids}-form`;
 
   useEffect(() => {
     mcpServers
@@ -84,7 +105,13 @@ export function McpServersManager({ assistantId }: { assistantId: string }) {
     try {
       setRows(await mcpServers.list(assistantId));
     } catch (err) {
-      setError(message(err));
+      setError(
+        failureMessage(
+          "Couldn't load the MCP servers.",
+          reasonOf(err),
+          "Reload the page to try again.",
+        ),
+      );
     }
   }, [assistantId]);
 
@@ -92,8 +119,8 @@ export function McpServersManager({ assistantId }: { assistantId: string }) {
     void load();
   }, [load]);
 
-  const run = useCallback(
-    async (fn: () => Promise<unknown>): Promise<boolean> => {
+  const run = useCallback<RunAction>(
+    async (fn, failure) => {
       setBusy(true);
       setError(null);
       try {
@@ -101,7 +128,7 @@ export function McpServersManager({ assistantId }: { assistantId: string }) {
         await load();
         return true;
       } catch (err) {
-        setError(message(err));
+        setError(failureMessage(failure.what, reasonOf(err), failure.todo));
         return false;
       } finally {
         setBusy(false);
@@ -111,39 +138,84 @@ export function McpServersManager({ assistantId }: { assistantId: string }) {
   );
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 overflow-auto p-6">
-      <section className="border-border rounded-lg border">
-        <div className="border-border flex items-center justify-between border-b px-4 py-3">
-          <h2 className="text-sm font-semibold">MCP servers</h2>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              setPreset(null);
-              setAdding((v) => !v);
-            }}
-          >
-            {adding ? "Cancel" : "Add server"}
-          </Button>
-        </div>
-        {adding ? (
+    <div className="min-h-0 flex-1 overflow-auto px-4 py-6 md:px-6 lg:px-8">
+      <div className="mx-auto flex w-full max-w-[40rem] flex-col gap-6">
+        <SectionHeading
+          level={2}
+          title="MCP servers"
+          description="An MCP server gives the assistant extra tools, such as a ticket system or a code host. Header and environment values are encrypted when saved; afterwards you see only their names."
+          actions={
+            <Button
+              variant={adding ? "outline" : "default"}
+              aria-expanded={adding}
+              aria-controls={adding ? formId : undefined}
+              onClick={() => {
+                setPreset(null);
+                setAdding((v) => !v);
+              }}
+            >
+              {adding ? "Cancel" : "Add server"}
+            </Button>
+          }
+        />
+
+        {adding && (
           <ServerForm
             key={preset?.key ?? "blank"}
+            id={formId}
             preset={preset}
             busy={busy}
             onSubmit={(body) =>
-              run(async () => {
-                await mcpServers.create(assistantId, body);
-                setAdding(false);
-              })
+              run(
+                async () => {
+                  await mcpServers.create(assistantId, body);
+                  setAdding(false);
+                },
+                {
+                  what: "Couldn't add the server.",
+                  todo: "Check the details, then add it again.",
+                },
+              )
             }
           />
-        ) : (
-          <p className="text-muted-foreground px-4 py-3 text-xs">
-            An MCP server gives the assistant extra tools, like a ticket system or a code host.
-            Header and environment values are encrypted and never shown again; only their names are.
-          </p>
         )}
+
+        {runner && <RunnerBanner status={runner} />}
+
+        {error && <Alert>{error}</Alert>}
+
+        <section aria-labelledby={`${ids}-list`} className="flex flex-col gap-3">
+          <h3 id={`${ids}-list`} className="text-h3 font-semibold">
+            Servers
+          </h3>
+          {rows === null && !error && <Loading what="MCP servers" rows={2} rowHeight={120} />}
+          {rows?.length === 0 && (
+            <EmptyState
+              title="Add your first MCP server"
+              description="Add a server, then switch it on for this assistant on the canvas and choose which of its tools it may use."
+              action={
+                adding ? undefined : (
+                  <Button
+                    onClick={() => {
+                      setPreset(null);
+                      setAdding(true);
+                    }}
+                  >
+                    Add server
+                  </Button>
+                )
+              }
+            />
+          )}
+          {rows && rows.length > 0 && (
+            <ul className="border-border flex flex-col border-t">
+              {rows.map((row) => (
+                <ServerRow key={row.id} assistantId={assistantId} row={row} busy={busy} run={run} />
+              ))}
+            </ul>
+          )}
+        </section>
+
         {presets.length > 0 && (
           <Catalog
             presets={presets}
@@ -154,30 +226,7 @@ export function McpServersManager({ assistantId }: { assistantId: string }) {
             }}
           />
         )}
-      </section>
-
-      {runner && <RunnerBanner status={runner} />}
-
-      {error && (
-        <p className="text-destructive text-sm" role="alert">
-          {error}
-        </p>
-      )}
-
-      <section className="flex flex-col gap-2">
-        <h2 className="text-sm font-semibold">Servers{rows ? ` (${rows.length})` : ""}</h2>
-        {rows === null && <p className="text-muted-foreground text-sm">Loading…</p>}
-        {rows?.length === 0 && (
-          <p className="text-muted-foreground border-border rounded-md border border-dashed px-4 py-8 text-center text-sm">
-            No MCP servers yet. Add one above.
-          </p>
-        )}
-        <ul className="flex flex-col gap-2">
-          {(rows ?? []).map((row) => (
-            <ServerRow key={row.id} assistantId={assistantId} row={row} busy={busy} run={run} />
-          ))}
-        </ul>
-      </section>
+      </div>
     </div>
   );
 }
@@ -185,10 +234,12 @@ export function McpServersManager({ assistantId }: { assistantId: string }) {
 // ── add ──────────────────────────────────────────────────────
 
 function ServerForm({
+  id,
   busy,
   onSubmit,
   preset = null,
 }: {
+  id: string;
   busy: boolean;
   onSubmit: (body: Record<string, unknown>) => Promise<boolean>;
   /** Fill the form from the catalog. Secrets get their names only. */
@@ -208,6 +259,13 @@ function ServerForm({
   );
   const needed = preset ? (preset.transport === "stdio" ? preset.env : preset.headers) : [];
   const [problem, setProblem] = useState<string | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+
+  // Picking from the catalog (which sits below the list) opens this form at
+  // the top: bring it into view and start at its first field.
+  useEffect(() => {
+    if (preset) formRef.current?.querySelector<HTMLInputElement>("#mcp-name")?.focus();
+  }, [preset]);
 
   const stdio = transport === "stdio";
   const hint = TRANSPORTS.find((t) => t.value === transport)?.hint;
@@ -238,24 +296,69 @@ function ServerForm({
 
   return (
     <form
-      className="flex flex-col gap-3 p-4"
+      ref={formRef}
+      id={id}
+      aria-labelledby={`${id}-title`}
+      className="border-border bg-card flex flex-col gap-4 rounded-lg border p-4 sm:p-6"
       onSubmit={(e) => {
         e.preventDefault();
         submit();
       }}
     >
-      <div className="grid gap-3 sm:grid-cols-2">
+      <h3 id={`${id}-title`} className="text-h3 font-semibold">
+        {preset ? `Add ${preset.title}` : "New server"}
+      </h3>
+
+      {preset && (
+        <div className="bg-muted flex flex-col gap-2 rounded-md px-3 py-2.5 text-sm">
+          <p>
+            From the catalog.{" "}
+            <a
+              href={preset.docs_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={buttonVariants({ variant: "link", size: "sm" })}
+            >
+              Read its documentation
+              <span className="sr-only"> (opens in a new tab)</span>
+            </a>{" "}
+            before you add it.
+          </p>
+          {needed.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <p className="text-h4 font-semibold">It needs</p>
+              <ul className="ml-4 flex list-disc flex-col gap-1">
+                {needed.map((f) => (
+                  <li key={f.name}>
+                    <code className="text-code font-mono">{f.name}</code>: {f.hint}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {preset.needs_network && preset.transport === "stdio" && (
+            <p className="text-muted-foreground">
+              It downloads its package the first time it runs, so the runner needs internet access.
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="grid gap-4 sm:grid-cols-2">
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="mcp-name">Name</Label>
           <Input
             id="mcp-name"
             value={name}
             placeholder="github"
+            autoComplete="off"
+            spellCheck={false}
+            aria-describedby="mcp-name-hint"
             onChange={(e) => setName(e.target.value.toLowerCase())}
           />
-          <p className="text-muted-foreground text-xs">
-            Lowercase letters, digits and hyphens. Tools appear as{" "}
-            <code>mcp__{name || "name"}__tool</code>.
+          <p id="mcp-name-hint" className="text-small text-muted-foreground">
+            Lowercase letters, digits and hyphens, starting with a letter. It becomes part of each
+            tool&apos;s name.
           </p>
         </div>
         <div className="flex flex-col gap-1.5">
@@ -263,6 +366,7 @@ function ServerForm({
           <Select
             id="mcp-transport"
             value={transport}
+            aria-describedby="mcp-transport-hint"
             onChange={(e) => setTransport(e.target.value as Transport)}
           >
             {TRANSPORTS.map((t) => (
@@ -271,7 +375,11 @@ function ServerForm({
               </option>
             ))}
           </Select>
-          {hint && <p className="text-muted-foreground text-xs">{hint}</p>}
+          {hint && (
+            <p id="mcp-transport-hint" className="text-small text-muted-foreground">
+              {hint}
+            </p>
+          )}
         </div>
       </div>
 
@@ -283,6 +391,9 @@ function ServerForm({
               id="mcp-command"
               value={command}
               placeholder="npx"
+              autoComplete="off"
+              spellCheck={false}
+              className="text-code font-mono"
               onChange={(e) => setCommand(e.target.value)}
             />
           </div>
@@ -292,11 +403,14 @@ function ServerForm({
               id="mcp-args"
               rows={3}
               value={args}
+              spellCheck={false}
+              className="text-code font-mono"
+              aria-describedby="mcp-args-hint"
               placeholder={"-y\n@modelcontextprotocol/server-github"}
               onChange={(e) => setArgs(e.target.value)}
             />
-            <p className="text-muted-foreground text-xs">
-              Shown in plain text. Put tokens and keys in the environment below instead.
+            <p id="mcp-args-hint" className="text-small text-muted-foreground">
+              Saved as plain text. Put tokens and keys in the environment variables below instead.
             </p>
           </div>
         </>
@@ -305,6 +419,8 @@ function ServerForm({
           <Label htmlFor="mcp-url">URL</Label>
           <Input
             id="mcp-url"
+            type="url"
+            inputMode="url"
             value={url}
             placeholder="https://mcp.example.com/mcp"
             onChange={(e) => setUrl(e.target.value)}
@@ -320,51 +436,21 @@ function ServerForm({
           id="mcp-pairs"
           rows={3}
           value={pairs}
-          className="font-mono text-xs"
+          className="text-code font-mono"
+          aria-describedby="mcp-pairs-hint"
           placeholder={stdio ? "GITHUB_TOKEN=ghp_…" : "Authorization: Bearer …"}
           onChange={(e) => setPairs(e.target.value)}
           autoComplete="off"
           spellCheck={false}
         />
-        <p className="text-muted-foreground text-xs">
-          Encrypted when saved. You will see the names afterwards, never the values.
+        <p id="mcp-pairs-hint" className="text-small text-muted-foreground">
+          Encrypted when saved. Afterwards you see the names, never the values.
         </p>
       </div>
 
-      {preset && (
-        <div className="bg-muted/50 rounded-md px-3 py-2 text-xs">
-          <p>
-            From the catalog: <strong>{preset.title}</strong>.{" "}
-            <a
-              href={preset.docs_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-primary underline underline-offset-2"
-            >
-              Its documentation
-            </a>
-            . Review it before adding.
-          </p>
-          {needed.length > 0 && (
-            <ul className="mt-1 ml-4 list-disc">
-              {needed.map((f) => (
-                <li key={f.name}>
-                  <code>{f.name}</code>: {f.hint}
-                </li>
-              ))}
-            </ul>
-          )}
-          {preset.needs_network && preset.transport === "stdio" && (
-            <p className="text-muted-foreground mt-1">
-              It downloads its package on first use, so the runner needs internet access (see the
-              runner note below).
-            </p>
-          )}
-        </div>
-      )}
-      {problem && <p className="text-destructive text-xs">{problem}</p>}
-      <div className="flex justify-end">
-        <Button type="submit" size="sm" disabled={busy}>
+      {problem && <Alert>{problem}</Alert>}
+      <div>
+        <Button type="submit" disabled={busy}>
           Add server
         </Button>
       </div>
@@ -383,7 +469,7 @@ function ServerRow({
   assistantId: string;
   row: McpServer;
   busy: boolean;
-  run: (fn: () => Promise<unknown>) => Promise<boolean>;
+  run: RunAction;
 }) {
   const [editing, setEditing] = useState(false);
   const [limitsOpen, setLimitsOpen] = useState(false);
@@ -393,155 +479,220 @@ function ServerRow({
   );
   const [working, setWorking] = useState<"check" | "discover" | null>(null);
   const confirm = useConfirm();
+  const base = `mcp-${row.id}`;
 
   const act = (kind: "check" | "discover") =>
     void (async () => {
       setWorking(kind);
       setResult(null);
       try {
-        await run(async () => {
-          const r =
-            kind === "check"
-              ? await mcpServers.health(assistantId, row.id)
-              : await mcpServers.discover(assistantId, row.id);
-          setResult({ kind, r });
-          if (kind === "discover" && r.ok) setToolsOpen(true);
-        });
+        await run(
+          async () => {
+            const r =
+              kind === "check"
+                ? await mcpServers.health(assistantId, row.id)
+                : await mcpServers.discover(assistantId, row.id);
+            setResult({ kind, r });
+            if (kind === "discover" && r.ok) setToolsOpen(true);
+          },
+          {
+            what:
+              kind === "check"
+                ? `Couldn't check ${row.name}.`
+                : `Couldn't list the tools of ${row.name}.`,
+            todo: "Try again in a moment.",
+          },
+        );
       } finally {
         setWorking(null);
       }
     })();
   const stdio = row.transport === "stdio";
   const secretNames = stdio ? row.env_keys : row.header_names;
+  const secretWord = stdio ? "Environment variables" : "Headers";
 
   return (
-    <li className="border-border rounded-md border px-4 py-3">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0 flex-1">
+    <li className="border-border flex flex-col gap-3 border-b py-4">
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="truncate text-sm font-medium">{row.name}</span>
-            <Badge variant="muted">{row.transport}</Badge>
-            <Badge
-              variant={
-                row.status === "ok" ? "success" : row.status === "error" ? "destructive" : "muted"
-              }
+            <span
+              id={`${base}-name`}
+              className={cn(
+                "min-w-0 truncate font-medium",
+                !row.enabled && "text-muted-foreground",
+              )}
             >
-              {row.status === "unknown" ? "not checked" : row.status}
-            </Badge>
-            {!row.enabled && <Badge variant="warning">off</Badge>}
+              {row.name}
+            </span>
+            <ServerStatus server={row} working={working !== null} />
           </div>
-          <p className="text-muted-foreground mt-1 font-mono text-xs break-all">
-            {stdio ? [row.command, ...row.args].join(" ") : row.url}
-          </p>
-          <p className="text-muted-foreground mt-1 text-xs">
-            {secretNames.length > 0
-              ? `${stdio ? "Environment" : "Headers"}: ${secretNames.join(", ")} (values hidden)`
-              : `No ${stdio ? "environment variables" : "headers"}`}
-            {" · "}
-            {row.tools.length > 0 ? (
-              <button
-                type="button"
-                className="text-primary underline-offset-2 hover:underline"
-                onClick={() => setToolsOpen((v) => !v)}
-              >
-                {row.tools.length} tool{row.tools.length === 1 ? "" : "s"}
-                {toolsOpen ? " (hide)" : ""}
-              </button>
-            ) : (
-              "tools not discovered yet"
-            )}
-            {row.last_checked_at && (
-              <> · checked {new Date(row.last_checked_at).toLocaleString()}</>
-            )}
-          </p>
-          {stdio && (
-            <p className="text-muted-foreground mt-1 text-xs">
-              Limits: {describeLimits(row.sandbox as Limits)}
-            </p>
-          )}
-          {row.error && <p className="text-destructive mt-1 text-xs">{row.error}</p>}
+          <p className="text-small text-muted-foreground">{TRANSPORT_LABEL[row.transport]}</p>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <label className="text-muted-foreground flex items-center gap-2 text-xs">
-            On
-            <Switch
-              checked={row.enabled}
-              disabled={busy}
-              onCheckedChange={(v) =>
-                void run(() => mcpServers.update(assistantId, row.id, { enabled: v }))
-              }
-            />
-          </label>
-          <Button
-            size="sm"
-            variant="outline"
+        <label className="text-label flex cursor-pointer items-center gap-2 font-medium">
+          <span id={`${base}-on`}>On</span>
+          <Switch
+            checked={row.enabled}
             disabled={busy}
-            title="Connect and complete the MCP handshake"
-            onClick={() => act("check")}
-          >
-            {working === "check" ? "Checking…" : "Check"}
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            title="Connect and list the tools this server offers"
-            onClick={() => act("discover")}
-          >
-            {working === "discover" ? "Discovering…" : "Discover tools"}
-          </Button>
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => setEditing((v) => !v)}>
-            {editing ? "Close" : "Edit"}
-          </Button>
-          {stdio && (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={() => setLimitsOpen((v) => !v)}
-            >
-              Limits
-            </Button>
+            aria-labelledby={`${base}-on ${base}-name`}
+            onCheckedChange={(v) =>
+              void run(() => mcpServers.update(assistantId, row.id, { enabled: v }), {
+                what: v ? `Couldn't switch ${row.name} on.` : `Couldn't switch ${row.name} off.`,
+                todo: "Try again.",
+              })
+            }
+          />
+        </label>
+      </div>
+
+      <code className={CODE_BLOCK}>
+        {stdio ? [row.command, ...row.args].filter(Boolean).join(" ") : row.url}
+      </code>
+
+      <dl className="text-small grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+        <dt className="text-muted-foreground">{secretWord}</dt>
+        <dd className="min-w-0 break-words">
+          {secretNames.length > 0 ? (
+            <>
+              <span className="text-code font-mono">{secretNames.join(", ")}</span>
+              <span className="text-muted-foreground"> (values hidden)</span>
+            </>
+          ) : (
+            "None"
           )}
+        </dd>
+        <dt className="text-muted-foreground">Tools</dt>
+        <dd className="min-w-0">
+          {row.tools.length > 0 ? (
+            <Button
+              variant="link"
+              size="sm"
+              aria-expanded={toolsOpen}
+              aria-controls={toolsOpen ? `${base}-tools` : undefined}
+              onClick={() => setToolsOpen((v) => !v)}
+            >
+              {toolsOpen ? "Hide" : "Show"} {plural(row.tools.length, "tool", "tools")}
+            </Button>
+          ) : (
+            "Not discovered yet. Use Discover tools to list them."
+          )}
+        </dd>
+        {row.last_checked_at && (
+          <>
+            <dt className="text-muted-foreground">Last checked</dt>
+            <dd title={new Date(row.last_checked_at).toLocaleString()}>
+              {formatRelative(row.last_checked_at)}
+            </dd>
+          </>
+        )}
+        {stdio && (
+          <>
+            <dt className="text-muted-foreground">Limits</dt>
+            <dd className="num min-w-0">{describeLimits(row.sandbox as Limits)}</dd>
+          </>
+        )}
+      </dl>
+
+      {row.error && (
+        <p className="text-small text-destructive break-words">
+          The last check failed: {row.error.trim().replace(/[.!?]+$/, "")}.{" "}
+          {stdio
+            ? "Check the command, arguments and environment variables, then check again."
+            : "Check the URL and headers, then check again."}
+        </p>
+      )}
+
+      <div className="-ml-3 flex flex-wrap items-center gap-1">
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={busy}
+          title="Connect and complete the MCP handshake"
+          onClick={() => act("check")}
+        >
+          {working === "check" ? "Checking…" : "Check"}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={busy}
+          title="Connect and list the tools this server offers"
+          onClick={() => act("discover")}
+        >
+          {working === "discover" ? "Discovering…" : "Discover tools"}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-expanded={editing}
+          aria-controls={editing ? `${base}-edit` : undefined}
+          onClick={() => setEditing((v) => !v)}
+        >
+          {editing ? "Close" : "Edit"}
+        </Button>
+        {stdio && (
           <Button
             size="sm"
             variant="ghost"
-            disabled={busy}
-            onClick={() =>
-              void (async () => {
-                const sure = await confirm({
-                  title: `Remove "${row.name}"?`,
-                  description:
-                    "Its stored headers or environment are deleted too. Canvas nodes that use it will show an error until removed.",
-                  confirmLabel: "Remove",
-                  destructive: true,
-                });
-                if (sure) void run(() => mcpServers.remove(assistantId, row.id));
-              })()
-            }
+            aria-expanded={limitsOpen}
+            aria-controls={limitsOpen ? `${base}-limits` : undefined}
+            onClick={() => setLimitsOpen((v) => !v)}
           >
-            Remove
+            Limits
           </Button>
-        </div>
+        )}
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={busy}
+          className="hover:text-destructive focus-visible:text-destructive"
+          onClick={() =>
+            void (async () => {
+              const sure = await confirm({
+                title: `Remove "${row.name}"?`,
+                description:
+                  "Its saved headers or environment variables are deleted too. MCP server stations on the canvas that use it will show a problem until you remove them.",
+                confirmLabel: "Remove server",
+                destructive: true,
+              });
+              if (sure)
+                void run(() => mcpServers.remove(assistantId, row.id), {
+                  what: `Couldn't remove ${row.name}.`,
+                  todo: "Try again.",
+                });
+            })()
+          }
+        >
+          Remove
+        </Button>
       </div>
-      {result && <CheckOutcome kind={result.kind} result={result.r} />}
-      {toolsOpen && row.tools.length > 0 && <ToolList tools={row.tools} />}
+
+      {result && <CheckOutcome kind={result.kind} result={result.r} stdio={stdio} />}
+      {toolsOpen && row.tools.length > 0 && <ToolList id={`${base}-tools`} tools={row.tools} />}
       {limitsOpen && (
         <LimitsForm
+          id={`${base}-limits`}
           limits={row.sandbox as Limits}
           busy={busy}
           onSave={async (sandbox) => {
-            const ok = await run(() => mcpServers.update(assistantId, row.id, { sandbox }));
+            const ok = await run(() => mcpServers.update(assistantId, row.id, { sandbox }), {
+              what: `Couldn't save the limits for ${row.name}.`,
+              todo: "Check the values are in range, then save again.",
+            });
             if (ok) setLimitsOpen(false);
           }}
         />
       )}
       {editing && (
         <EditForm
+          id={`${base}-edit`}
           row={row}
           busy={busy}
           onSave={async (body) => {
-            const ok = await run(() => mcpServers.update(assistantId, row.id, body));
+            const ok = await run(() => mcpServers.update(assistantId, row.id, body), {
+              what: `Couldn't save the changes to ${row.name}.`,
+              todo: "Check the details, then save again.",
+            });
             if (ok) setEditing(false);
           }}
         />
@@ -550,11 +701,16 @@ function ServerRow({
   );
 }
 
+/** A plate that opens under a row: edit, limits. */
+const ROW_PLATE = "border-border bg-card flex flex-col gap-4 rounded-lg border p-4 sm:p-6";
+
 function EditForm({
+  id,
   row,
   busy,
   onSave,
 }: {
+  id: string;
   row: McpServer;
   busy: boolean;
   onSave: (body: Record<string, unknown>) => Promise<void>;
@@ -568,6 +724,7 @@ function EditForm({
   const [clear, setClear] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const kind = stdio ? "env" : "headers";
+  const secretWord = stdio ? "environment variables" : "headers";
 
   const save = () => {
     const bad = nameProblem(name.trim());
@@ -589,17 +746,31 @@ function EditForm({
       body[kind] = parsed.value;
     }
     setProblem(null);
-    if (Object.keys(body).length === 0) return setProblem("Nothing has changed.");
+    if (Object.keys(body).length === 0)
+      return setProblem("Nothing has changed. Edit a field, then save.");
     void onSave(body);
   };
 
   return (
-    <div className="border-border mt-3 flex flex-col gap-3 border-t pt-3 text-xs">
+    <form
+      id={id}
+      aria-labelledby={`${id}-title`}
+      className={ROW_PLATE}
+      onSubmit={(e) => {
+        e.preventDefault();
+        save();
+      }}
+    >
+      <h4 id={`${id}-title`} className="text-h4 font-semibold">
+        Edit {row.name}
+      </h4>
       <div className="flex flex-col gap-1.5">
         <Label htmlFor={`name-${row.id}`}>Name</Label>
         <Input
           id={`name-${row.id}`}
           value={name}
+          autoComplete="off"
+          spellCheck={false}
           onChange={(e) => setName(e.target.value.toLowerCase())}
         />
       </div>
@@ -610,6 +781,9 @@ function EditForm({
             <Input
               id={`cmd-${row.id}`}
               value={command}
+              autoComplete="off"
+              spellCheck={false}
+              className="text-code font-mono"
               onChange={(e) => setCommand(e.target.value)}
             />
           </div>
@@ -619,6 +793,8 @@ function EditForm({
               id={`args-${row.id}`}
               rows={3}
               value={args}
+              spellCheck={false}
+              className="text-code font-mono"
               onChange={(e) => setArgs(e.target.value)}
             />
           </div>
@@ -626,19 +802,24 @@ function EditForm({
       ) : (
         <div className="flex flex-col gap-1.5">
           <Label htmlFor={`url-${row.id}`}>URL</Label>
-          <Input id={`url-${row.id}`} value={url} onChange={(e) => setUrl(e.target.value)} />
+          <Input
+            id={`url-${row.id}`}
+            type="url"
+            inputMode="url"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+          />
         </div>
       )}
       <div className="flex flex-col gap-1.5">
-        <Label htmlFor={`pairs-${row.id}`}>
-          Replace {stdio ? "environment variables" : "headers"}
-        </Label>
+        <Label htmlFor={`pairs-${row.id}`}>Replace {secretWord}</Label>
         <Textarea
           id={`pairs-${row.id}`}
           rows={3}
           value={pairs}
           disabled={clear}
-          className="font-mono text-xs"
+          className="text-code font-mono"
+          aria-describedby={`pairs-${row.id}-hint`}
           placeholder={
             (stdio ? row.env_keys : row.header_names).length
               ? "Leave empty to keep the current values"
@@ -650,24 +831,26 @@ function EditForm({
           autoComplete="off"
           spellCheck={false}
         />
-        <p className="text-muted-foreground">
-          Values can&apos;t be shown, so enter the full set to replace them.
+        <p id={`pairs-${row.id}-hint`} className="text-small text-muted-foreground">
+          Saved values can&apos;t be shown, so enter the full set to replace them.
         </p>
-        <label className="flex items-center gap-2">
-          <Switch checked={clear} onCheckedChange={setClear} />
-          Remove all {stdio ? "environment variables" : "headers"}
-        </label>
       </div>
-      <p className="text-muted-foreground">
+      <label className="flex cursor-pointer items-center justify-between gap-4">
+        <span id={`${id}-clear`} className="text-sm">
+          Remove all {secretWord}
+        </span>
+        <Switch checked={clear} onCheckedChange={setClear} aria-labelledby={`${id}-clear`} />
+      </label>
+      <p className="text-small text-muted-foreground">
         Changing the {stdio ? "command or arguments" : "URL"} clears the list of discovered tools.
       </p>
-      {problem && <p className="text-destructive">{problem}</p>}
-      <div className="flex justify-end">
-        <Button size="sm" disabled={busy} onClick={save}>
-          Save
+      {problem && <Alert>{problem}</Alert>}
+      <div>
+        <Button type="submit" disabled={busy}>
+          Save changes
         </Button>
       </div>
-    </div>
+    </form>
   );
 }
 
@@ -676,32 +859,30 @@ function EditForm({
 function RunnerBanner({ status }: { status: McpRunnerStatus }) {
   if (!status.reachable) {
     return (
-      <p className="border-warning bg-warning/10 rounded-md border px-3 py-2 text-xs">
-        <strong>Local-command servers can&apos;t run right now.</strong> {status.error} Remote (HTTP
-        and SSE) servers are not affected.
-      </p>
+      <Alert tone="warning" title="Local-command servers can't run right now.">
+        {status.error ? `${status.error.trim().replace(/[.!?]+$/, "")}. ` : ""}
+        Remote servers (HTTP and SSE) still work. Reload this page once the runner is running.
+      </Alert>
     );
   }
   const offline = status.network === "none";
   return (
-    <p
-      className={
-        status.full_sandbox
-          ? "border-border text-muted-foreground rounded-md border px-3 py-2 text-xs"
-          : "border-warning bg-warning/10 rounded-md border px-3 py-2 text-xs"
-      }
+    <Alert
+      tone={status.full_sandbox ? "neutral" : "warning"}
+      title="How local-command servers are contained"
     >
-      <strong>Local-command servers</strong> run in the MCP runner, apart from the rest of the
-      platform{offline ? ", with no internet access" : ""}. Protected by:{" "}
-      {status.applied.join(", ")}.
+      They run in the MCP runner, apart from the rest of the platform
+      {offline ? ", with no internet access" : ""}.
+      {status.applied.length > 0 && <> Protected by: {status.applied.join(", ")}.</>}
       {!status.full_sandbox && (
         <>
           {" "}
-          Memory, CPU and process limits are not enforced on this machine ({status.platform}); they
-          need the Linux runner container.
+          Memory, CPU and process limits are not enforced on this server
+          {status.platform ? ` (${status.platform})` : ""}. They are enforced only when the runner
+          runs in its Linux container.
         </>
       )}
-    </p>
+    </Alert>
   );
 }
 
@@ -721,10 +902,12 @@ const LIMIT_FIELDS: { key: keyof Limits; label: string; unit: string; hint: stri
 ];
 
 function LimitsForm({
+  id,
   limits,
   busy,
   onSave,
 }: {
+  id: string;
   limits: Limits;
   busy: boolean;
   onSave: (changed: Partial<Limits>) => Promise<void>;
@@ -738,21 +921,33 @@ function LimitsForm({
     const changed: Partial<Limits> = {};
     for (const f of LIMIT_FIELDS) {
       const n = Number(values[f.key]);
-      if (!Number.isInteger(n)) return setProblem(`${f.label} must be a whole number.`);
+      if (!Number.isInteger(n))
+        return setProblem(`${f.label} must be a whole number. Enter one, then save.`);
       if (n !== limits[f.key]) changed[f.key] = n;
     }
-    if (Object.keys(changed).length === 0) return setProblem("Nothing has changed.");
+    if (Object.keys(changed).length === 0)
+      return setProblem("Nothing has changed. Edit a limit, then save.");
     setProblem(null);
     void onSave(changed);
   };
 
   return (
-    <div className="border-border mt-3 flex flex-col gap-3 border-t pt-3 text-xs">
-      <p className="text-muted-foreground">
-        What this server may use. A session that reaches its length or sits idle is stopped, and
-        started again the next time it is needed.
-      </p>
-      <div className="grid gap-3 sm:grid-cols-2">
+    <form
+      id={id}
+      aria-labelledby={`${id}-title`}
+      className={ROW_PLATE}
+      onSubmit={(e) => {
+        e.preventDefault();
+        save();
+      }}
+    >
+      <SectionHeading
+        level={4}
+        id={`${id}-title`}
+        title="Limits"
+        description="What this server may use. A session that reaches its length or sits idle is stopped, and started again the next time it is needed."
+      />
+      <div className="grid gap-4 sm:grid-cols-2">
         {LIMIT_FIELDS.map((f) => (
           <div key={f.key} className="flex flex-col gap-1.5">
             <Label htmlFor={`lim-${f.key}`}>
@@ -762,44 +957,63 @@ function LimitsForm({
             <Input
               id={`lim-${f.key}`}
               type="number"
+              className="num"
+              aria-describedby={`lim-${f.key}-hint`}
               value={values[f.key]}
               onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
             />
-            <p className="text-muted-foreground">{f.hint}</p>
+            <p id={`lim-${f.key}-hint`} className="text-small text-muted-foreground num">
+              {f.hint}
+            </p>
           </div>
         ))}
       </div>
-      {problem && <p className="text-destructive">{problem}</p>}
-      <div className="flex justify-end">
-        <Button size="sm" disabled={busy} onClick={save}>
+      {problem && <Alert>{problem}</Alert>}
+      <div>
+        <Button type="submit" disabled={busy}>
           Save limits
         </Button>
       </div>
-    </div>
+    </form>
   );
 }
 
 // ── checking and discovering ─────────────────────────────────
 
-function CheckOutcome({ kind, result }: { kind: "check" | "discover"; result: McpCheckResult }) {
+function CheckOutcome({
+  kind,
+  result,
+  stdio,
+}: {
+  kind: "check" | "discover";
+  result: McpCheckResult;
+  stdio: boolean;
+}) {
   const skipped = result.skipped ?? [];
   if (!result.ok) {
+    const why = result.error?.trim().replace(/[.!?]+$/, "");
     return (
-      <p className="text-destructive mt-2 text-xs" role="alert">
-        {kind === "check" ? "Check failed" : "Discovery failed"}: {result.error}
-      </p>
+      <Alert title={kind === "check" ? "Check failed." : "Couldn't list the tools."}>
+        {why ? `${why}. ` : ""}
+        {stdio
+          ? "Check the command, arguments and environment variables, then try again."
+          : "Check the URL and headers, then try again."}
+      </Alert>
     );
   }
   return (
-    <div className="mt-2 text-xs">
-      <p className="text-success">
-        {kind === "check"
-          ? `Connected in ${result.elapsed_ms} ms.`
-          : `Found ${result.tool_count} tool${result.tool_count === 1 ? "" : "s"} in ${result.elapsed_ms} ms.`}
+    <div className="text-small flex flex-col gap-1" role="status">
+      <p className="flex items-center gap-2">
+        <Lamp tone="success" />
+        <span className="num">
+          {kind === "check"
+            ? `Connected in ${result.elapsed_ms} ms.`
+            : `Found ${plural(result.tool_count ?? 0, "tool", "tools")} in ${result.elapsed_ms} ms.`}
+        </span>
       </p>
       {skipped.length > 0 && (
-        <div className="text-muted-foreground mt-1">
-          Left out:
+        <div className="text-muted-foreground pl-4">
+          <p>Left out:</p>
           <ul className="ml-4 list-disc">
             {skipped.map((reason) => (
               <li key={reason}>{reason}</li>
@@ -811,44 +1025,53 @@ function CheckOutcome({ kind, result }: { kind: "check" | "discover"; result: Mc
   );
 }
 
-function ToolList({ tools }: { tools: McpTool[] }) {
+function ToolList({ id, tools }: { id: string; tools: McpTool[] }) {
   return (
-    <div className="border-border mt-3 border-t pt-3 text-xs">
-      <p className="text-muted-foreground mb-2">
-        What this server offers. Descriptions come from the server and are read by the model, so
-        read them before allowing a tool. Choose which tools an assistant may use on its canvas
-        node.
-      </p>
-      <ul className="flex flex-col gap-2">
+    <section id={id} aria-labelledby={`${id}-title`} className="flex flex-col gap-2">
+      <SectionHeading
+        level={4}
+        id={`${id}-title`}
+        title="Tools this server offers"
+        description="Descriptions come from the server and are read by the model, so read them before allowing a tool. Choose which tools an assistant may use on its canvas station."
+      />
+      <ul className="border-border flex flex-col border-t">
         {tools.map((tool) => {
           const params = Object.keys(
             (tool.input_schema as { properties?: Record<string, unknown> }).properties ?? {},
           );
           return (
-            <li key={tool.name} className="border-border rounded border px-3 py-2">
+            <li
+              key={tool.name}
+              className="border-border flex flex-col gap-1.5 border-b py-3 last:border-b-0 last:pb-0"
+            >
               <div className="flex flex-wrap items-center gap-2">
-                <code className="font-medium">{tool.name}</code>
-                {tool.read_only === true && <Badge variant="success">read-only</Badge>}
-                {tool.read_only === false && <Badge variant="warning">changes things</Badge>}
-                {tool.read_only == null && <Badge variant="muted">not stated</Badge>}
+                <code className="text-code min-w-0 font-mono font-medium break-all">
+                  {tool.name}
+                </code>
+                <ToolAccess readOnly={tool.read_only} />
               </div>
               {tool.description && (
-                <p className="text-muted-foreground mt-1 whitespace-pre-wrap">{tool.description}</p>
+                <p className="text-small text-muted-foreground max-w-[68ch] whitespace-pre-wrap">
+                  {tool.description}
+                </p>
               )}
               {params.length > 0 && (
-                <p className="text-muted-foreground mt-1">
-                  Inputs: <code>{params.join(", ")}</code>
+                <p className="text-small text-muted-foreground">
+                  Inputs:{" "}
+                  <code className="text-code text-foreground font-mono break-all">
+                    {params.join(", ")}
+                  </code>
                 </p>
               )}
             </li>
           );
         })}
       </ul>
-    </div>
+    </section>
   );
 }
 
-// ── the catalog (task 4.8) ───────────────────────────────────
+// ── the catalog ──────────────────────────────────────────────
 
 function Catalog({
   presets,
@@ -860,9 +1083,15 @@ function Catalog({
   taken: Set<string>;
   onPick: (preset: McpPreset) => void;
 }) {
+  const id = useId();
   return (
-    <div className="border-border border-t px-4 py-3">
-      <p className="mb-2 text-xs font-medium">Or start from a well-known server</p>
+    <section aria-labelledby={id} className="flex flex-col gap-3">
+      <SectionHeading
+        level={3}
+        id={id}
+        title="Start from a well-known server"
+        description="Fills in the form for you. You still add your own keys."
+      />
       <ul className="grid gap-2 sm:grid-cols-2">
         {presets.map((p) => {
           const added = taken.has(p.name);
@@ -872,19 +1101,21 @@ function Catalog({
                 type="button"
                 disabled={added}
                 onClick={() => onPick(p)}
-                className="border-border hover:bg-muted flex h-full w-full flex-col items-start gap-1 rounded-md border px-3 py-2 text-left text-xs disabled:cursor-default disabled:opacity-60"
+                className="border-field-border bg-card hover:bg-muted focus-visible:ring-ring focus-visible:ring-offset-background disabled:hover:bg-card flex h-full w-full flex-col items-start gap-1 rounded-md border px-3 py-2.5 text-left transition-colors duration-120 ease-out focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-default disabled:opacity-60"
               >
-                <span className="flex w-full items-center gap-2">
+                <span className="flex w-full flex-wrap items-center gap-2">
                   <span className="font-medium">{p.title}</span>
-                  <Badge variant="muted">{p.transport === "stdio" ? "local" : p.transport}</Badge>
-                  {added && <span className="text-muted-foreground ml-auto">added</span>}
+                  <Badge variant="muted">{TRANSPORT_LABEL[p.transport]}</Badge>
+                  {added && (
+                    <span className="text-small text-muted-foreground ml-auto">Already added</span>
+                  )}
                 </span>
-                <span className="text-muted-foreground">{p.description}</span>
+                <span className="text-small text-muted-foreground">{p.description}</span>
               </button>
             </li>
           );
         })}
       </ul>
-    </div>
+    </section>
   );
 }

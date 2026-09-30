@@ -1,14 +1,17 @@
 "use client";
 
+import type { ReactNode } from "react";
+
 import { Field, Toggle } from "@/components/config/panels";
+import { Alert } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import type { AssistantConfig } from "@/lib/api";
 import { useOfflineMode } from "@/lib/instance";
 
-/** Per-tool settings (task 4.2): the same editors in the Panels tab and in a
- *  canvas tool node's drawer, so the two can never disagree about what a
- *  setting means. */
+/** Per-tool settings: the same editors in the Settings tab and in a canvas
+ *  tool node's drawer, so the two can never disagree about what a setting
+ *  means. */
 
 type Data = Record<string, unknown>;
 export type ApprovalMode = "auto" | "require" | "deny";
@@ -20,12 +23,12 @@ const APPROVAL_LABEL: Record<ApprovalMode, string> = {
 };
 
 /** Actions that change something always ask a person unless forbidden: the
- *  server lets `auto` skip the human for low-risk calls only (plan §4.4),
- *  and a write is never low risk. Offering "run without asking" for them
- *  would promise something the server will not do. */
+ *  server lets `auto` skip the human for low-risk calls only, and a write is
+ *  never low risk. Offering "run without asking" for them would promise
+ *  something the server will not do. */
 const ASK_OR_FORBID = ["require", "deny"] as const;
 /** For MCP tools, `auto` is real, but only for tools the server declares
- *  read-only (plan §7.2). */
+ *  read-only. */
 const MCP_MODES = ["require", "auto", "deny"] as const;
 const STRICTNESS: Record<ApprovalMode, number> = { auto: 0, require: 1, deny: 2 };
 
@@ -66,7 +69,7 @@ function DomainsField({
 }) {
   const text = value.join(", ");
   return (
-    <Field label="Allowed domains" hint={hint}>
+    <Field label="Allowed sites" hint={hint}>
       <Input
         // Re-mount when the saved value changes, so the box shows what the
         // server normalized it to.
@@ -110,6 +113,11 @@ function ApprovalSelect({
   );
 }
 
+/** Settings that only apply while the tool's toggle is on. */
+function Nested({ children }: { children: ReactNode }) {
+  return <div className="border-border mb-2 ml-1 border-l-2 pl-4">{children}</div>;
+}
+
 // ── the two tools with settings ──────────────────────────────
 
 export function WebSearchSettings({
@@ -123,17 +131,19 @@ export function WebSearchSettings({
 }) {
   const offline = useOfflineMode();
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-4">
       {offline && (
-        <p className="border-warning bg-warning/10 rounded-md border px-3 py-2 text-xs">
-          This instance runs in offline mode (<code>RAG_OFFLINE=1</code>), so web search is off for
-          every assistant here. These settings are kept and apply again once offline mode is off.
-        </p>
+        <Alert tone="warning">
+          This server runs offline, so web search is off for every assistant here. These settings
+          are kept and apply again once it is back online.
+        </Alert>
       )}
-      <Field label="Searches per turn" hint="1–50. Further searches in the same turn are refused.">
+      <Field label="Searches per message" hint="1 to 50. Any more in the same message are refused.">
         <Input
           key={maxUses}
           type="number"
+          inputMode="numeric"
+          className="num"
           min={1}
           max={50}
           defaultValue={String(maxUses)}
@@ -146,7 +156,7 @@ export function WebSearchSettings({
       <DomainsField
         value={domains}
         onCommit={(d) => onChange({ allowed_domains: d })}
-        hint="Comma-separated. Searches only return results from these sites and their subdomains."
+        hint="Separate sites with commas. Searches only return results from these sites and their subdomains."
       />
     </div>
   );
@@ -166,36 +176,45 @@ export function HttpRequestSettings({
 }) {
   const effective = stricter(approval, policy);
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-4">
       <DomainsField
         value={domains}
         onCommit={(d) => onChange({ allowed_domains: d })}
-        hint="Comma-separated. Leave empty to allow any public site. Private and internal addresses are always blocked."
+        hint="Separate sites with commas. Leave empty to allow any public site. Private and internal addresses are always blocked."
       />
       <ApprovalSelect
-        label="Requests that change something (POST, PUT, PATCH, DELETE)"
+        label="Requests that change something"
         value={approval}
         onChange={(m) => onChange({ approval: m })}
-        hint="GET and HEAD requests only read, and always run. Anything else asks a person, unless you forbid it."
+        hint="POST, PUT, PATCH and DELETE. GET and HEAD requests only read, and always run."
       />
       {effective !== approval && (
-        <p className="border-warning bg-warning/10 rounded-md border px-3 py-2 text-xs">
-          The assistant&apos;s approval policy is stricter, so these requests will{" "}
-          {effective === "deny" ? "never be allowed" : "still ask a person"}. Change it under{" "}
-          <strong>Approvals</strong> in the Panels tab.
-        </p>
+        <Alert tone="warning">
+          The assistant&apos;s approval rules are stricter, so these requests will{" "}
+          {effective === "deny" ? "never be allowed" : "still ask a person"}. Change that under
+          Approvals in the Settings tab.
+        </Alert>
       )}
     </div>
   );
 }
 
-// ── Panels tab ───────────────────────────────────────────────
+// ── Settings tab ─────────────────────────────────────────────
+
+export const BUILTIN_TOOLS = ["calculator", "datetime", "web_search", "http_request"] as const;
 
 const TOOL_LABEL: Record<string, string> = {
   calculator: "Calculator",
-  datetime: "Date / time",
+  datetime: "Date and time",
   web_search: "Web search",
   http_request: "HTTP requests",
+};
+
+const TOOL_HINT: Record<(typeof BUILTIN_TOOLS)[number], string> = {
+  calculator: "Does exact arithmetic instead of estimating.",
+  datetime: "Knows today's date and the time in any time zone.",
+  web_search: "Searches the web and cites what it finds.",
+  http_request: "Calls web APIs on the sites you allow.",
 };
 
 export function ToolsPanel({
@@ -216,35 +235,33 @@ export function ToolsPanel({
   const web = tools.web_search ?? {};
   const http = tools.http_request ?? {};
   return (
-    <div className="flex flex-col gap-2">
-      <p className="text-muted-foreground text-xs">
-        Enabling a tool adds a wired node to the canvas.
-      </p>
-      {(["calculator", "datetime", "web_search", "http_request"] as const).map((key) => (
+    <div className="flex flex-col gap-3">
+      {BUILTIN_TOOLS.map((key) => (
         <div key={key} className="flex flex-col gap-3">
           <Toggle
             label={TOOL_LABEL[key]}
             checked={tools[key]?.enabled === true}
             onChange={(v) => patch(key, { enabled: v })}
+            hint={TOOL_HINT[key]}
           />
           {key === "web_search" && web.enabled === true && (
-            <div className="border-border mb-2 ml-1 border-l-2 pl-4">
+            <Nested>
               <WebSearchSettings
                 maxUses={Number(web.max_uses ?? 5)}
                 domains={(web.allowed_domains as string[] | undefined) ?? []}
                 onChange={(p) => patch("web_search", p)}
               />
-            </div>
+            </Nested>
           )}
           {key === "http_request" && http.enabled === true && (
-            <div className="border-border mb-2 ml-1 border-l-2 pl-4">
+            <Nested>
               <HttpRequestSettings
                 domains={(http.allowed_domains as string[] | undefined) ?? []}
                 approval={mode(http.approval)}
                 policy={policy}
                 onChange={(p) => patch("http_request", p)}
               />
-            </div>
+            </Nested>
           )}
         </div>
       ))}
@@ -271,12 +288,12 @@ const POLICY_FIELDS: {
   {
     key: "http_non_get",
     label: "HTTP requests that change something",
-    hint: "The stricter of this and the HTTP tool's own setting applies.",
+    hint: "The stricter of this and the HTTP requests tool's own setting applies.",
   },
   {
     key: "mcp_default",
     label: "MCP server tools",
-    hint: "Tools a server does not declare read-only always ask, whichever you choose.",
+    hint: "Tools a server doesn't mark as read-only always ask first, whatever you choose here.",
     modes: MCP_MODES,
   },
 ];
@@ -290,11 +307,7 @@ export function ApprovalPolicyPanel({
 }) {
   const policy = (config.approval_policy ?? {}) as unknown as Data;
   return (
-    <div className="flex flex-col gap-3">
-      <p className="text-muted-foreground text-xs">
-        What happens when the assistant wants to take an action that changes something. Reads never
-        ask. Changes always ask a person unless you forbid them.
-      </p>
+    <div className="flex flex-col gap-4">
       {POLICY_FIELDS.map((f) => (
         <ApprovalSelect
           key={f.key}
@@ -352,12 +365,11 @@ export function ToolNodePanel({
     );
   }
   return (
-    <p className="text-muted-foreground text-sm">
-      {TOOL_LABEL[key] ?? key} only reads, so it has nothing to configure. Remove the node to turn
-      it off.
+    <p className="text-muted-foreground max-w-[60ch] text-sm">
+      {TOOL_LABEL[key] ?? key} only reads, so there is nothing to set. Remove the node to switch it
+      off.
     </p>
   );
 }
 
-export const BUILTIN_TOOLS = ["calculator", "datetime", "web_search", "http_request"] as const;
 export { TOOL_LABEL };

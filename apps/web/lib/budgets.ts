@@ -9,7 +9,7 @@ export function parseLimit(text: string): number | null | undefined {
   return Number.isFinite(n) && n >= 0.01 ? Math.round(n * 100) / 100 : undefined;
 }
 
-/** The bar's colour: calm, amber from 80%, red at 100%. */
+/** The meter's fill: green, ochre from 80%, red at 100%. */
 export function budgetTone(state: BudgetStatus["state"]): string {
   return state === "exceeded"
     ? "bg-destructive"
@@ -24,11 +24,13 @@ export function budgetPercent(b: Pick<BudgetStatus, "ratio">): number {
   return Math.max(0, Math.min(100, Math.floor(b.ratio * 100)));
 }
 
+/** Whose limit and for how long: "Daily limit for the organization",
+ *  "Monthly limit for Helper". */
 export function budgetTitle(b: Pick<BudgetStatus, "scope" | "period" | "assistant_name">): string {
   const when = b.period === "day" ? "Daily" : "Monthly";
   return b.scope === "org"
-    ? `${when}: whole organisation`
-    : `${when}: ${b.assistant_name ?? "assistant"}`;
+    ? `${when} limit for the organization`
+    : `${when} limit for ${b.assistant_name ?? "this assistant"}`;
 }
 
 /** "Resets at midnight UTC" or "Resets 1 Nov (UTC)". */

@@ -1,18 +1,18 @@
+import Link from "next/link";
 import type { ReactNode } from "react";
+
+import { BrandLockup } from "@/components/brand-mark";
 
 export default function AuthLayout({ children }: { children: ReactNode }) {
   return (
-    <div
-      className="flex min-h-screen items-center justify-center px-6 py-12"
-      style={{
-        backgroundImage:
-          "radial-gradient(ellipse 80% 60% at 50% -10%, color-mix(in oklch, var(--primary) 12%, transparent), transparent)",
-      }}
-    >
-      <div className="w-full max-w-sm">
-        <div className="mb-8 text-center">
-          <span className="font-serif text-xl font-semibold tracking-tight">Assistant Studio</span>
-        </div>
+    <div className="flex min-h-dvh flex-col items-center px-4 pt-[12vh] pb-12 sm:px-6 sm:pt-[22vh]">
+      <div className="w-full max-w-[400px]">
+        <Link
+          href="/"
+          className="focus-visible:ring-ring mb-6 inline-flex rounded-md focus-visible:ring-2 focus-visible:outline-none"
+        >
+          <BrandLockup size="lg" />
+        </Link>
         {children}
       </div>
     </div>

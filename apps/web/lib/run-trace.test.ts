@@ -4,9 +4,12 @@ import {
   approvalLine,
   canvasHref,
   formatMs,
+  mainStops,
   nestSteps,
   parseRunParam,
+  runStatus,
   stepTitle,
+  stopReasonText,
 } from "./run-trace";
 
 describe("stepTitle", () => {
@@ -92,5 +95,90 @@ describe("the canvas link", () => {
     });
     expect(parseRunParam("nonsense")).toBeNull();
     expect(parseRunParam(null)).toBeNull();
+  });
+});
+
+describe("runStatus", () => {
+  it("says how a run ended in words", () => {
+    expect(runStatus("ok")).toEqual({ label: "Finished", tone: "success" });
+    expect(runStatus("error").tone).toBe("destructive");
+    expect(runStatus("aborted").label).toBe("Stopped");
+  });
+});
+
+describe("stopReasonText", () => {
+  it("is silent for a normal end", () => {
+    expect(stopReasonText("end_turn")).toBeNull();
+    expect(stopReasonText(null)).toBeNull();
+    expect(stopReasonText("max_tokens")).toBe("It reached the answer length limit.");
+    expect(stopReasonText("odd_reason")).toBe("It stopped early (odd reason).");
+  });
+});
+
+describe("mainStops", () => {
+  const graphTypes = new Map([
+    ["i", "input"],
+    ["g", "guardrail"],
+    ["r", "router"],
+    ["a", "agent"],
+    ["o", "output"],
+    ["kb", "knowledge_base"],
+  ]);
+
+  it("numbers the stops the graph has, in route order", () => {
+    const stops = mainStops({
+      graphTypes,
+      touched: ["i", "g", "a", "o", "kb"],
+      routed: false,
+      guardrailSteps: false,
+    });
+    expect(stops.map((s) => [s.type, s.number, s.lit])).toEqual([
+      ["input", 1, true],
+      ["guardrail", 2, true],
+      ["router", 3, false],
+      ["agent", 4, true],
+      ["output", 5, true],
+    ]);
+  });
+
+  it("closes up the numbers when a stop is missing", () => {
+    const noRouter = new Map([...graphTypes].filter(([, t]) => t !== "router"));
+    const stops = mainStops({
+      graphTypes: noRouter,
+      touched: ["i", "a", "o"],
+      routed: false,
+      guardrailSteps: false,
+    });
+    expect(stops.map((s) => s.number)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("takes the canvas's numbers from the wiring when it has them", () => {
+    // The router is on the graph but not wired onto the line: the canvas
+    // gives it no number, and neither does the strip.
+    const stops = mainStops({
+      graphTypes,
+      stopNumbers: new Map([
+        ["input", 1],
+        ["guardrail", 2],
+        ["agent", 3],
+        ["output", 4],
+      ]),
+      touched: ["i", "a", "o"],
+      routed: false,
+      guardrailSteps: false,
+    });
+    expect(stops.map((s) => [s.type, s.number])).toEqual([
+      ["input", 1],
+      ["guardrail", 2],
+      ["router", undefined],
+      ["agent", 3],
+      ["output", 4],
+    ]);
+  });
+
+  it("shows only what the run proves without a graph", () => {
+    const stops = mainStops({ graphTypes: null, touched: [], routed: true, guardrailSteps: false });
+    expect(stops.map((s) => s.type)).toEqual(["input", "router", "agent", "output"]);
+    expect(stops.every((s) => s.number === undefined && s.lit)).toBe(true);
   });
 });

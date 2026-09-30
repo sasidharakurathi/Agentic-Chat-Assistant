@@ -1,114 +1,265 @@
 @import "tailwindcss";
+/* The root .gitignore lists build/, which Tailwind's source detection
+   honours, so the builder page has to be named here or its classes are
+   never generated. */
+@source "./(app)/assistants/[id]/build";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* "Line diagram" (docs/DESIGN.md section 2). Values are final: they were
+   checked for WCAG contrast and for distance between every line colour and
+   every lamp colour. Change them there first. */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.2 0.004 0);
-  --muted: oklch(0.96 0.003 0);
-  --muted-foreground: oklch(0.47 0.006 0);
-  --border: oklch(0.9 0.004 0);
-  --card: oklch(1 0 0);
-  --primary: oklch(0.63 0.19 29);
-  --primary-foreground: oklch(0.99 0 0);
-  --destructive: oklch(0.55 0.2 15);
-  --success: oklch(0.55 0.13 155);
-  --warning: oklch(0.65 0.15 75);
-  --ring: oklch(0.63 0.19 29);
-  --radius: 0.75rem;
-  --shadow-color: oklch(0.2 0.01 0 / 0.08);
+  /* Enamel paper and ink. */
+  --background: oklch(0.972 0.004 160);
+  --card: oklch(0.995 0.002 160);
+  --foreground: oklch(0.24 0.018 165);
+  --muted: oklch(0.94 0.006 160);
+  --muted-foreground: oklch(0.47 0.015 165);
+  --border: oklch(0.885 0.007 160);
+  --primary: oklch(0.26 0.02 165);
+  --primary-foreground: oklch(0.99 0.003 160);
+  --ring: var(--primary);
 
-  /* Form fields sit on a faint fill with a soft edge, rather than being a
-     hard grey outline on the page; the edge firms up on hover, and focus
-     is the primary colour with a soft halo. */
-  --field: oklch(0.985 0.002 0);
-  --field-border: oklch(0.885 0.004 0);
-  --field-border-hover: oklch(0.8 0.006 0);
-  /* Thin, low-contrast scrollbars: present when needed, never the loudest
-     thing on screen. */
-  --scrollbar-thumb: oklch(0.2 0.004 0 / 0.2);
+  /* "You are here": selected station band, active nav bar. Never alone. */
+  --marker: oklch(0.85 0.16 92);
+  --marker-foreground: var(--foreground);
 
-  /* Categorical accent scale for canvas node types — one family, 8 hues
-     evenly rotated 45° apart from the primary (tomato, 29°) around the
-     wheel, all held at matched lightness/chroma so they read as a
-     deliberate set rather than assorted named colors. */
-  --node-agent: var(--primary);
-  --node-guardrail: oklch(0.72 0.15 80);
-  --node-router: oklch(0.68 0.14 110);
-  --node-kb: oklch(0.65 0.14 140);
-  /* Sits between kb (140) and tool (190) on purpose: a data source feeds the
-     knowledge base, so reading as its close relative is the right signal. */
-  --node-datasource: oklch(0.65 0.13 165);
-  --node-tool: oklch(0.65 0.12 190);
-  --node-database: oklch(0.6 0.14 240);
-  --node-memory: oklch(0.6 0.15 275);
-  --node-subagent: oklch(0.6 0.16 305);
-  --node-mcp: oklch(0.62 0.17 345);
+  /* Lamps: red, ochre and green are states, never lines. */
+  --destructive: oklch(0.53 0.19 27);
+  --destructive-foreground: oklch(0.99 0.003 160);
+  --success: oklch(0.5 0.12 148);
+  --success-foreground: oklch(0.99 0.003 160);
+  --warning: oklch(0.53 0.11 70);
+  --warning-foreground: oklch(0.99 0.003 160);
+
+  /* Form fields: a card fill with an edge that reads as a control. */
+  --field: var(--card);
+  --field-border: oklch(0.62 0.012 165);
+  --field-border-hover: oklch(0.5 0.015 165);
+
+  /* The builder canvas, a step below the paper so plates read as signs. */
+  --canvas: oklch(0.945 0.006 160);
+  --canvas-grid: oklch(0.8 0.008 160);
+  --station-border: oklch(0.6 0.012 165);
+  --line-unlit: oklch(0.83 0.006 160);
+
+  /* Hover and pressed fills for filled buttons: the fill mixed into paper. */
+  --primary-hover: color-mix(in oklch, var(--primary) 88%, var(--background));
+  --primary-active: color-mix(in oklch, var(--primary) 80%, var(--background));
+  --destructive-hover: color-mix(in oklch, var(--destructive) 88%, var(--background));
+  --destructive-active: color-mix(in oklch, var(--destructive) 80%, var(--background));
+
+  --shadow-color: oklch(0.24 0.018 165 / 0.12);
+  --float-shadow:
+    0 1px 2px oklch(0.24 0.018 165 / 0.06), 0 8px 24px -4px oklch(0.24 0.018 165 / 0.14);
+  --scrim: oklch(0.24 0.018 165 / 0.35);
+  --scrollbar-thumb: oklch(0.24 0.018 165 / 0.22);
+
+  /* Lines. Three capability families plus the main line; stations in one
+     family are told apart by glyph and name, never by colour alone. Keep
+     every --node-* name: StudioNode and friends use border-node-* etc. */
+  --node-main: oklch(0.26 0.02 165);
+  --node-agent: var(--node-main);
+  --node-guardrail: var(--node-main);
+  --node-router: var(--node-main);
+  --node-kb: oklch(0.52 0.1 215);
+  --node-memory: var(--node-kb);
+  /* A lighter tint of knowledge: a data source feeds the knowledge base. */
+  --node-datasource: oklch(0.6 0.09 212);
+  --node-action: oklch(0.5 0.17 345);
+  --node-tool: var(--node-action);
+  --node-database: var(--node-action);
+  --node-mcp: var(--node-action);
+  --node-subagent: oklch(0.5 0.16 285);
+  --node-icon: oklch(0.995 0.002 160);
 }
 
+/* Dark, "signal panel": the same green-grey hue family as light. */
 .dark {
-  --background: oklch(0.17 0.004 0);
-  --foreground: oklch(0.96 0.002 0);
-  --muted: oklch(0.25 0.004 0);
-  --muted-foreground: oklch(0.66 0.004 0);
-  --border: oklch(0.31 0.004 0);
-  --card: oklch(0.21 0.004 0);
-  --primary: oklch(0.68 0.19 29);
-  --primary-foreground: oklch(0.99 0 0);
-  --destructive: oklch(0.6 0.2 15);
-  --success: oklch(0.62 0.14 155);
-  --warning: oklch(0.72 0.15 75);
-  --ring: oklch(0.68 0.19 29);
-  --shadow-color: oklch(0 0 0 / 0.3);
+  --background: oklch(0.2 0.008 165);
+  --card: oklch(0.235 0.009 165);
+  --foreground: oklch(0.94 0.006 160);
+  --muted: oklch(0.27 0.01 165);
+  --muted-foreground: oklch(0.74 0.012 165);
+  --border: oklch(0.33 0.01 165);
+  --primary: oklch(0.93 0.008 160);
+  --primary-foreground: oklch(0.22 0.018 165);
+  --ring: var(--primary);
 
-  --field: oklch(0.2 0.004 0);
-  --field-border: oklch(0.27 0.004 0);
-  --field-border-hover: oklch(0.36 0.006 0);
-  --scrollbar-thumb: oklch(0.96 0.002 0 / 0.18);
+  --marker: oklch(0.88 0.15 100);
+  --marker-foreground: oklch(0.22 0.018 165);
 
-  --node-agent: var(--primary);
-  --node-guardrail: oklch(0.78 0.14 80);
-  --node-router: oklch(0.74 0.14 110);
-  --node-kb: oklch(0.7 0.14 140);
-  --node-datasource: oklch(0.7 0.13 165);
-  --node-tool: oklch(0.7 0.12 190);
-  --node-database: oklch(0.68 0.14 240);
-  --node-memory: oklch(0.68 0.15 275);
-  --node-subagent: oklch(0.68 0.16 305);
-  --node-mcp: oklch(0.68 0.17 345);
+  --destructive: oklch(0.72 0.17 25);
+  --destructive-foreground: oklch(0.2 0.03 25);
+  --success: oklch(0.77 0.14 150);
+  --success-foreground: oklch(0.2 0.03 150);
+  --warning: oklch(0.78 0.14 62);
+  --warning-foreground: oklch(0.22 0.03 62);
+
+  --field: oklch(0.18 0.008 165);
+  --field-border: oklch(0.56 0.012 165);
+  --field-border-hover: oklch(0.68 0.012 165);
+
+  --canvas: oklch(0.18 0.008 165);
+  --canvas-grid: oklch(0.31 0.01 165);
+  --station-border: oklch(0.55 0.012 165);
+  --line-unlit: oklch(0.38 0.01 165);
+
+  --shadow-color: oklch(0 0 0 / 0.5);
+  --float-shadow: 0 8px 24px -4px oklch(0 0 0 / 0.5);
+  --scrim: oklch(0 0 0 / 0.55);
+  --scrollbar-thumb: oklch(0.94 0.006 160 / 0.2);
+
+  --node-main: oklch(0.9 0.008 160);
+  --node-kb: oklch(0.75 0.1 212);
+  --node-datasource: oklch(0.82 0.08 210);
+  --node-action: oklch(0.74 0.15 348);
+  --node-subagent: oklch(0.74 0.12 285);
+  --node-icon: oklch(0.2 0.015 165);
+}
+
+/* A dialog's ::backdrop does not inherit custom properties in every
+   browser, so the scrim is declared on it directly as well. */
+::backdrop {
+  --scrim: oklch(0.24 0.018 165 / 0.35);
+}
+.dark ::backdrop {
+  --scrim: oklch(0 0 0 / 0.55);
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-card: var(--card);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
   --color-border: var(--border);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-active: var(--primary-active);
+  --color-destructive-hover: var(--destructive-hover);
+  --color-destructive-active: var(--destructive-active);
+  --color-ring: var(--ring);
+  --color-marker: var(--marker);
+  --color-marker-foreground: var(--marker-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
   --color-field: var(--field);
   --color-field-border: var(--field-border);
   --color-field-border-hover: var(--field-border-hover);
-  --color-card: var(--card);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-destructive: var(--destructive);
-  --color-success: var(--success);
-  --color-warning: var(--warning);
-  --color-ring: var(--ring);
+  --color-canvas: var(--canvas);
+  --color-canvas-grid: var(--canvas-grid);
+  --color-station-border: var(--station-border);
+  --color-line-unlit: var(--line-unlit);
+  --color-scrim: var(--scrim);
+  --color-node-main: var(--node-main);
   --color-node-agent: var(--node-agent);
   --color-node-guardrail: var(--node-guardrail);
   --color-node-router: var(--node-router);
   --color-node-kb: var(--node-kb);
   --color-node-datasource: var(--node-datasource);
+  --color-node-memory: var(--node-memory);
+  --color-node-action: var(--node-action);
   --color-node-tool: var(--node-tool);
   --color-node-database: var(--node-database);
-  --color-node-memory: var(--node-memory);
-  --color-node-subagent: var(--node-subagent);
   --color-node-mcp: var(--node-mcp);
-  --radius-lg: var(--radius);
-  --radius-md: calc(var(--radius) - 3px);
-  --radius-sm: calc(var(--radius) - 5px);
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
-  --font-serif: var(--font-source-serif), ui-serif, Georgia, serif;
+  --color-node-subagent: var(--node-subagent);
+  --color-node-icon: var(--node-icon);
+
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+
+  --font-sans: var(--font-fira-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-condensed: var(--font-fira-condensed), var(--font-fira-sans), sans-serif;
+  --font-mono: var(--font-fira-code), ui-monospace, monospace;
+  /* Transitional alias only: no component may use font-serif any more. */
+  --font-serif: var(--font-fira-sans), ui-sans-serif, system-ui, sans-serif;
+
+  /* Type scale (docs/DESIGN.md section 3). text-display and text-h1 are
+     set in font-condensed by the caller; 12px (text-small) is the floor. */
+  --text-display: 2.5rem;
+  --text-display--line-height: 2.75rem;
+  --text-display--letter-spacing: -0.01em;
+  --text-h1: 1.625rem;
+  --text-h1--line-height: 2rem;
+  --text-h1--letter-spacing: -0.005em;
+  --text-h2: 1.25rem;
+  --text-h2--line-height: 1.625rem;
+  --text-h3: 1rem;
+  --text-h3--line-height: 1.375rem;
+  --text-h4: 0.875rem;
+  --text-h4--line-height: 1.25rem;
+  --text-body: 0.875rem;
+  --text-body--line-height: 1.3125rem;
+  --text-reading: 0.9375rem;
+  --text-reading--line-height: 1.5rem;
+  --text-label: 0.8125rem;
+  --text-label--line-height: 1.125rem;
+  --text-small: 0.75rem;
+  --text-small--line-height: 1.0625rem;
+  --text-code: 0.8125rem;
+  --text-code--line-height: 1.25rem;
+
+  --animate-float-in: float-in 160ms ease-out;
+  --animate-dialog-in: dialog-in 160ms ease-out;
+  --animate-sheet-in: sheet-in 220ms cubic-bezier(0.2, 0, 0, 1);
+  --animate-lamp-pulse: lamp-pulse 1.6s ease-in-out infinite;
+
+  @keyframes float-in {
+    from {
+      opacity: 0;
+      transform: translateY(2px);
+    }
+  }
+  @keyframes dialog-in {
+    from {
+      opacity: 0;
+      transform: scale(0.98);
+    }
+  }
+  @keyframes sheet-in {
+    from {
+      transform: translateX(-100%);
+    }
+  }
+  @keyframes lamp-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+}
+
+/* Only floating layers (menus, popovers, toasts, sheets, dialogs, canvas
+   overlays) cast a shadow. Composes with ring utilities. */
+@utility shadow-float {
+  --tw-shadow: var(--float-shadow);
+  box-shadow:
+    var(--tw-inset-shadow, 0 0 #0000), var(--tw-inset-ring-shadow, 0 0 #0000),
+    var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--float-shadow);
+}
+
+/* Every cost, token count, duration, countdown, version and numeric
+   column. */
+@utility num {
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+/* A pulsing lamp for live state (running step, Indexing, Checking). Steady
+   under reduced motion: the state is spelled out in text anyway. */
+@utility lamp-live {
+  animation: var(--animate-lamp-pulse);
 }
 
 /* Global element defaults live in the base layer. Outside any layer they
@@ -133,45 +284,144 @@
     transition: background-color 9999s ease-out;
   }
 
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
     font-family: var(--font-sans);
+    font-size: 0.875rem;
+    line-height: 1.5;
+    text-rendering: optimizeLegibility;
   }
 
   ::selection {
-    background-color: color-mix(in oklch, var(--primary) 30%, transparent);
+    background-color: var(--color-marker);
+    color: var(--color-marker-foreground);
+  }
+
+  /* A default focus ring for anything interactive that doesn't draw its
+     own: 2px ink with a 2px offset. Primitives use the same ring. */
+  :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after,
+    ::backdrop {
+      /* 0s, not 0.01ms: transition-property defaults to "all", so any
+         non-zero duration turns every style change on every element into a
+         real transition, and those never finish in a hidden tab (the shell
+         was left with the loading state's padding). A 0s total duration
+         starts no transition at all. */
+      animation-duration: 0s !important;
+      animation-delay: 0s !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0s !important;
+      transition-delay: 0s !important;
+      scroll-behavior: auto !important;
+    }
   }
 }
 
-/* Canvas wiring handles (unlayered on purpose: React Flow's own stylesheet is
-   unlayered, and a rule inside @layer would lose to it). The default 6px dot
-   was hard to hit; this one is 12px with a 24px invisible hit area, grows on
-   hover, and turns green over a valid target while a connection is dragged. */
+/* React Flow theme (unlayered on purpose: React Flow's own stylesheet is
+   unlayered, and a rule inside @layer would lose to it). The tokens already
+   switch with .dark, so one block covers both modes. */
+.react-flow {
+  --xy-background-color: var(--canvas);
+  --xy-background-pattern-color: var(--canvas-grid);
+  --xy-edge-stroke: var(--station-border);
+  --xy-edge-stroke-width: 3;
+  --xy-edge-stroke-selected: var(--foreground);
+  --xy-connectionline-stroke: var(--foreground);
+  --xy-connectionline-stroke-width: 3;
+  --xy-edge-label-background-color: var(--card);
+  --xy-edge-label-color: var(--foreground);
+  --xy-handle-background-color: var(--station-border);
+  --xy-handle-border-color: var(--card);
+  --xy-node-background-color: var(--card);
+  --xy-node-color: var(--foreground);
+  --xy-node-border: 1.5px solid var(--station-border);
+  --xy-node-border-radius: 6px;
+  --xy-node-boxshadow-hover: none;
+  --xy-node-boxshadow-selected: 0 0 0 4px var(--marker);
+  --xy-selection-background-color: color-mix(in oklch, var(--marker) 18%, transparent);
+  --xy-selection-border: 1px dashed var(--foreground);
+  --xy-controls-button-background-color: var(--card);
+  --xy-controls-button-background-color-hover: var(--muted);
+  --xy-controls-button-color: var(--foreground);
+  --xy-controls-button-color-hover: var(--foreground);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-box-shadow: var(--float-shadow);
+  --xy-minimap-background-color: var(--card);
+  --xy-minimap-mask-background-color: color-mix(in oklch, var(--canvas) 70%, transparent);
+  --xy-minimap-mask-stroke-color: var(--border);
+  --xy-minimap-node-background-color: var(--line-unlit);
+  --xy-minimap-node-stroke-color: transparent;
+  --xy-attribution-background-color: color-mix(in oklch, var(--card) 80%, transparent);
+  --xy-resize-background-color: var(--foreground);
+}
+.react-flow__controls {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.react-flow__controls-button {
+  width: 32px;
+  height: 32px;
+  transition: background-color 120ms ease-out;
+}
+.react-flow__controls-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+.react-flow__attribution {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.react-flow__attribution a {
+  color: inherit;
+}
+
+/* Canvas wiring handles (unlayered, see above). 10px with a 2px card-coloured
+   edge and a 24px invisible hit area; they grow a little on hover, and while
+   a connection is dragged the target turns success over a valid target and
+   destructive over an invalid one. */
 .studio-canvas .react-flow__handle.studio-handle {
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--background);
-  background: var(--muted-foreground);
+  width: 10px;
+  height: 10px;
+  min-width: 10px;
+  min-height: 10px;
+  border: 2px solid var(--card);
+  border-radius: 9999px;
+  background: var(--station-border);
   transition:
-    transform 120ms ease,
-    background-color 120ms ease;
+    transform 120ms ease-out,
+    background-color 120ms ease-out;
 }
 .studio-canvas .react-flow__handle.studio-handle::after {
   content: "";
   position: absolute;
-  inset: -6px;
+  inset: -7px;
   border-radius: 9999px;
 }
 .studio-canvas .react-flow__handle.studio-handle:hover,
 .studio-canvas .react-flow__handle.studio-handle.connectingfrom {
-  transform: translate(-50%, -50%) scale(1.35);
-  background: var(--primary);
+  transform: translate(-50%, -50%) scale(1.25);
+  background: var(--foreground);
 }
 .studio-canvas .react-flow__handle.studio-handle.connectingto.valid,
 .studio-canvas .react-flow__handle.studio-handle.valid {
-  transform: translate(-50%, -50%) scale(1.5);
-  background: oklch(0.7 0.17 150);
+  transform: translate(-50%, -50%) scale(1.25);
+  background: var(--success);
 }
 .studio-canvas .react-flow__handle.studio-handle.connectingto:not(.valid) {
   background: var(--destructive);
@@ -209,8 +459,12 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .typing-dot,
-  .running-pulse {
+  .running-pulse,
+  .lamp-live {
     animation: none;
+  }
+  .typing-dot,
+  .running-pulse {
     opacity: 0.7;
   }
 }

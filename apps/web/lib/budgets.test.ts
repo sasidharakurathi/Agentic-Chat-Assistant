@@ -22,7 +22,7 @@ describe("parseLimit", () => {
 });
 
 describe("the bar", () => {
-  it("turns amber from 80% and red at 100%", () => {
+  it("turns ochre from 80% and red at 100%", () => {
     expect(budgetTone("ok")).toBe("bg-success");
     expect(budgetTone("warning")).toBe("bg-warning");
     expect(budgetTone("exceeded")).toBe("bg-destructive");
@@ -36,10 +36,10 @@ describe("the bar", () => {
 
   it("says whose budget and when it resets", () => {
     expect(budgetTitle({ scope: "org", period: "day", assistant_name: null })).toBe(
-      "Daily: whole organisation",
+      "Daily limit for the organization",
     );
     expect(budgetTitle({ scope: "assistant", period: "month", assistant_name: "Helper" })).toBe(
-      "Monthly: Helper",
+      "Monthly limit for Helper",
     );
     expect(resetsLabel({ period: "day", resets_at: "2026-10-01T00:00:00Z" })).toBe(
       "Resets at midnight UTC",
