@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loading } from "@/components/ui/loading";
 import { PageHeader } from "@/components/ui/page-header";
+import { SampleList } from "@/components/samples/SampleList";
 import { useToast } from "@/components/ui/toast";
 import { ApiError, assistants, type Assistant } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -175,7 +176,7 @@ export default function AssistantsPage() {
         {!loading && !loadFailed && rows.length === 0 && (
           <EmptyState
             title="Build your first assistant"
-            description="Answer a few questions and start with a pipeline already wired up, or type a name above and press Create to start from an empty canvas."
+            description="Answer a few questions and start with a pipeline already wired up, pick a sample below, or type a name above and press Create to start from an empty canvas."
             action={
               <Link href="/assistants/new" className={buttonVariants({ variant: "default" })}>
                 Start guided setup
@@ -252,6 +253,8 @@ export default function AssistantsPage() {
           </Button>
         )}
       </div>
+
+      {!loading && !loadFailed && <SampleList />}
     </div>
   );
 }

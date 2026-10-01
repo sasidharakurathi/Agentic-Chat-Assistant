@@ -14,10 +14,11 @@ address would have been fetched and its contents indexed.
 from __future__ import annotations
 
 import asyncio
+import codecs
 
 import trafilatura
 
-from app.security.ssrf import FetchLimits, SsrfBlocked, safe_request
+from app.security.ssrf import FetchLimits, SsrfBlocked, is_compressed, safe_request
 
 HTTP_ERROR_FROM = 400
 #: A web page, not a download: 5 MB of HTML is already far past normal.
@@ -36,19 +37,67 @@ async def fetch_url_text(url: str) -> str:
         raise UrlFetchError(f"can't fetch {url}: {exc}") from exc
     if result.status >= HTTP_ERROR_FROM:
         raise UrlFetchError(f"{url} returned HTTP {result.status}")
-    charset = "utf-8"
-    for part in result.headers.get("content-type", "").split(";")[1:]:
+    if is_compressed(result.headers):
+        # We asked for an uncompressed body; one that is compressed anyway is
+        # not inflated (its size would be the server's to choose).
+        raise UrlFetchError(f"{url} sent a compressed page, which can't be read")
+    charset = page_charset(result.headers.get("content-type", ""))
+    body = result.body
+
+    def read() -> str:
+        html = body.decode(charset, errors="replace")
+        return trafilatura.extract(html, include_comments=False, include_tables=True) or ""
+
+    return await asyncio.to_thread(read)
+
+
+#: Text encodings a page may declare. Python will happily "decode" with
+#: codecs that are not text encodings at all: `punycode` takes minutes on a
+#: few megabytes (and ran on the event loop), `idna` and `undefined` raise.
+_CHARSETS = frozenset(
+    {
+        "utf-8",
+        "utf-16",
+        "utf-16-le",
+        "utf-16-be",
+        "ascii",
+        "iso8859-1",
+        "iso8859-2",
+        "iso8859-15",
+        "cp1250",
+        "cp1251",
+        "cp1252",
+        "cp1253",
+        "cp1254",
+        "cp1256",
+        "shift_jis",
+        "euc_jp",
+        "iso2022_jp",
+        "gbk",
+        "gb2312",
+        "gb18030",
+        "big5",
+        "euc_kr",
+        "koi8-r",
+    }
+)
+
+
+def page_charset(content_type: str) -> str:
+    """The encoding to read a page with: the one it declares, when that is a
+    text encoding we know; otherwise UTF-8."""
+    for part in content_type.split(";")[1:]:
         key, _, value = part.strip().partition("=")
-        if key.lower() == "charset" and value:
-            charset = value.strip("\"'")
-    try:
-        html = result.body.decode(charset, errors="replace")
-    except LookupError:
-        html = result.body.decode("utf-8", errors="replace")
-    extracted = await asyncio.to_thread(
-        trafilatura.extract, html, include_comments=False, include_tables=True
-    )
-    return extracted or ""
+        if key.lower() != "charset" or not value:
+            continue
+        try:
+            name = codecs.lookup(value.strip("\"' ")).name
+        except (LookupError, ValueError):
+            break
+        if name in _CHARSETS:
+            return name
+        break
+    return "utf-8"
 
 
-__all__ = ["PAGE_LIMITS", "UrlFetchError", "fetch_url_text"]
+__all__ = ["PAGE_LIMITS", "UrlFetchError", "fetch_url_text", "page_charset"]

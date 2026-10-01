@@ -44,6 +44,8 @@ _CREDENTIAL_PARAMS = frozenset(
     {"key", "api_key", "apikey", "token", "access_token", "auth", "secret", "password"}
 )
 MAX_ENTRIES = 50
+#: Variables the dynamic loader acts on (Linux, macOS).
+_LOADER_ENV = ("LD_", "DYLD_")
 MAX_VALUE = 8_000
 
 
@@ -115,6 +117,10 @@ def check_env(env: dict[str, str]) -> dict[str, str]:
     for key, value in env.items():
         if not _ENV_KEY_RE.fullmatch(key):
             raise ValueError(f"'{key}' is not a valid environment variable name")
+        if key.upper().startswith(_LOADER_ENV):
+            # The dynamic loader reads these before any limit is applied:
+            # `LD_PRELOAD` would run code inside the jail's own start-up.
+            raise ValueError(f"'{key}' changes how programs are loaded and can't be set")
         if len(value) > MAX_VALUE or "\x00" in value:
             raise ValueError(f"the value of {key} is too long or contains a NUL byte")
     return env

@@ -35,7 +35,7 @@ from app.schemas.assistant_config import (
     HttpRequestTool,
     McpServerRef,
 )
-from app.security.redact import strip_secrets
+from app.security.redact import is_secret_key, strip_secrets
 
 log = get_logger(__name__)
 
@@ -80,11 +80,6 @@ _NO_ACTION_BUILTINS = {
 
 #: How much of an HTTP request body the approval card shows.
 _BODY_PREVIEW = 2_000
-
-#: Keys whose values must never reach a reviewer's screen or the logs.
-_REDACT_KEYS = frozenset(
-    {"password", "token", "secret", "api_key", "authorization", "cookie", "x-api-key", "api-key"}
-)
 
 
 class Requester(Protocol):
@@ -132,7 +127,7 @@ def redact(value: Any) -> Any:
     """
     if isinstance(value, dict):
         return {
-            k: ("<redacted>" if str(k).lower() in _REDACT_KEYS else redact(v))
+            k: ("<redacted>" if is_secret_key(str(k)) and v is not None else redact(v))
             for k, v in value.items()
         }
     if isinstance(value, list):
@@ -149,7 +144,9 @@ def describe(tool_name: str, tool_input: dict[str, Any]) -> str:
     approval card shows what will run, not a summary of it. "Approve a
     database write?" is unanswerable; the statement is answerable.
     """
-    short = tool_name.replace(f"mcp__{CAPS_SERVER_NAME}__", "")
+    # The prefix only: a server's own tool could be *named* `mcp__caps__sql_query`,
+    # and replacing that anywhere showed the reviewer a platform tool's name.
+    short = tool_name.removeprefix(f"mcp__{CAPS_SERVER_NAME}__")
     if short == "sql_query":
         return str(tool_input.get("sql", "")).strip()
     if short == "http_request":
@@ -157,13 +154,15 @@ def describe(tool_name: str, tool_input: dict[str, Any]) -> str:
         # where, then what would be sent. Header values that look like
         # credentials are redacted, the rest shown.
         method = str(tool_input.get("method") or "GET").upper()
-        lines = [f"{method} {tool_input.get('url', '')}"]
+        lines = [f"{method} {strip_secrets(str(tool_input.get('url', '')))}"]
         headers = tool_input.get("headers")
         if isinstance(headers, dict):
             lines += [f"{k}: {v}" for k, v in redact(headers).items()]
         body = tool_input.get("body")
         if body:
-            text = body if isinstance(body, str) else str(body)
+            # Credential-shaped parts are masked (a `password` in a JSON
+            # body, a key in a query string); the rest is what will be sent.
+            text = strip_secrets(body) if isinstance(body, str) else str(redact(body))
             lines += ["", text if len(text) <= _BODY_PREVIEW else text[:_BODY_PREVIEW] + " …"]
         return "\n".join(lines)
     if short.startswith("mcp__"):
@@ -442,6 +441,9 @@ def build_can_use_tool(
             "denied": "A human reviewer declined this action.",
             "expired": "Nobody responded to the approval request in time, so it was declined.",
             "interrupted": "The user stopped the turn before this was approved.",
+            # An eval run (task 6.1): there is nobody to ask.
+            "unattended": "This is an automated test run, so actions that need a "
+            "person's approval are declined.",
         }.get(decision, "This action was not approved.")
         # `interrupt` on a high-risk denial stops the agent rather than letting
         # it wander toward a different way of doing the same thing.

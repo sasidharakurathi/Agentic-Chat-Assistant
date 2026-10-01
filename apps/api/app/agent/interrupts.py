@@ -7,10 +7,10 @@ interrupt that lands on another worker is re-fired where the turn actually
 is. Redis is disposable here too — without it, interrupts still work for the
 single-worker case.
 
-Dropping the connection also stops a turn (it is recorded as aborted), but an
-explicit interrupt is the better path: the stream stays open, ends with a
-proper `done`, and the partial answer stays on screen rather than vanishing
-with the connection.
+Since QOS-01 (`services/turns.py`) this is the only way to stop a turn:
+dropping the connection no longer does, because a turn runs on the server
+and the connection only watches it. The stream ends with a proper `done`,
+and the partial answer stays on screen.
 """
 
 from __future__ import annotations

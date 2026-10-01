@@ -5,6 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import samples
 from app.api.deps import (
     ActiveMembership,
     AssistantContext,
@@ -14,13 +15,14 @@ from app.api.deps import (
     PageQuery,
     SessionDep,
 )
-from app.api.errors import BadRequest
+from app.api.errors import BadRequest, NotFound
 from app.graph.compile import GraphCompileError, compile_graph
 from app.graph.nodes import Graph
 from app.graph.validate import ValidationResult
 from app.schemas.assistant import (
     AssistantCreate,
     AssistantDetail,
+    AssistantFromSample,
     AssistantMetaUpdate,
     AssistantSummary,
     DraftConfigSaveResult,
@@ -34,6 +36,7 @@ from app.schemas.assistant import (
 from app.schemas.assistant_config import AssistantConfig
 from app.schemas.common import Message, Page
 from app.services import assistants as svc
+from app.services import samples as samples_svc
 
 router = APIRouter(prefix="/assistants", tags=["assistants"])
 
@@ -75,6 +78,21 @@ async def create_assistant(
         name=body.name,
         description=body.description,
         ip=ip,
+    )
+    return await _detail(AssistantContext(assistant=a, membership=m), session)
+
+
+@router.post(":from-sample", response_model=AssistantDetail, status_code=status.HTTP_201_CREATED)
+async def create_from_sample(
+    body: AssistantFromSample, session: SessionDep, m: ActiveMembership, ip: ClientIP
+) -> AssistantDetail:
+    """A new draft from a shipped sample (`GET /meta/samples`): its graph,
+    its documents queued for indexing, and its eval suite."""
+    sample = samples.get(body.sample_id)
+    if sample is None:
+        raise NotFound("No such sample", code="sample_not_found")
+    a = await samples_svc.create_from(
+        session, sample, org_id=m.org_id, user_id=m.user_id, name=body.name, ip=ip
     )
     return await _detail(AssistantContext(assistant=a, membership=m), session)
 

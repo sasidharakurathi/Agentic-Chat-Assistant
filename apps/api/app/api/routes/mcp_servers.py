@@ -7,6 +7,7 @@ import uuid
 from fastapi import APIRouter, status
 
 from app.api.deps import (
+    AssistantContext,
     AssistantCtx,
     ClientIP,
     CurrentUser,
@@ -15,7 +16,9 @@ from app.api.deps import (
     SessionDep,
     per_user_limit,
 )
+from app.api.errors import Forbidden
 from app.mcp.presets import PRESETS
+from app.models.enums import MemberRole
 from app.schemas.common import Message, Page
 from app.schemas.mcp_server import (
     McpCheckResult,
@@ -45,6 +48,20 @@ async def list_servers(
     return Page(items=[svc.to_summary(r) for r in rows.items], next_cursor=rows.next_cursor)
 
 
+def _commands_are_for_admins(ctx: AssistantContext, transport: str) -> None:
+    """A local-command server is a program the runner starts: `sh -c ...` is
+    a valid one. Adding, changing and starting those is for the org's admins
+    and owners (task 6.3). It used to be open to any member, since anyone
+    can create an assistant and is then its editor. Remote servers, which
+    run somewhere else, stay with the assistant's editors."""
+    if transport == "stdio" and not ctx.membership.role.satisfies(MemberRole.admin):
+        raise Forbidden(
+            "Only an admin or owner can add or start a local-command MCP server: it runs a "
+            "program on this server. A remote (URL) server doesn't need one.",
+            code="insufficient_role",
+        )
+
+
 @router.post(
     "/assistants/{assistant_id}/mcp-servers",
     response_model=McpServerSummary,
@@ -53,6 +70,7 @@ async def list_servers(
 async def create_server(
     body: McpServerCreate, ctx: EditableAssistantCtx, session: SessionDep, ip: ClientIP
 ) -> McpServerSummary:
+    _commands_are_for_admins(ctx, body.transport)
     server = await svc.create(
         session, assistant=ctx.assistant, body=body, user_id=ctx.membership.user_id, ip=ip
     )
@@ -76,6 +94,7 @@ async def update_server(
     server_id: uuid.UUID,
 ) -> McpServerSummary:
     server = await svc.get(session, assistant_id=ctx.assistant.id, server_id=server_id)
+    _commands_are_for_admins(ctx, server.transport.value)
     server = await svc.update(session, server, body, user_id=ctx.membership.user_id, ip=ip)
     return svc.to_summary(server)
 
@@ -100,6 +119,7 @@ async def check_server(
     """Connect and complete the MCP handshake; record the outcome on the
     server. For a local command, this starts it in the runner."""
     server = await svc.get(session, assistant_id=ctx.assistant.id, server_id=server_id)
+    _commands_are_for_admins(ctx, server.transport.value)
     return await mcp_discovery.check(session, server)
 
 
@@ -113,6 +133,7 @@ async def discover_tools(
 ) -> McpCheckResult:
     """Connect, list the server's tools, and store them on the server."""
     server = await svc.get(session, assistant_id=ctx.assistant.id, server_id=server_id)
+    _commands_are_for_admins(ctx, server.transport.value)
     return await mcp_discovery.discover(session, server)
 
 

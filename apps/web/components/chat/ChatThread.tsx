@@ -30,6 +30,8 @@ import {
   approvals as approvalsApi,
   conversations,
   streamMessage,
+  watchTurn,
+  type ChatEvent,
   type ChatMessage,
   type Citation,
   type MessageBlock,
@@ -74,6 +76,7 @@ export function ChatThread({
   onRename,
   onArchive,
   onTitle,
+  onRunning,
 }: {
   conversationId: string;
   assistantId: string;
@@ -88,6 +91,8 @@ export function ChatThread({
   onNewChat?: () => void;
   onRename?: (title: string) => void;
   onArchive?: () => void;
+  /** An answer started or stopped being written here: for the list's lamp. */
+  onRunning?: (running: boolean) => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [live, setLive] = useState<Live | null>(null);
@@ -114,8 +119,9 @@ export function ChatThread({
     return () => clearTimeout(t);
   }, [finished]);
   const scrollRef = useRef<HTMLDivElement>(null);
-  // The in-flight stream, so leaving the conversation mid-turn drops it
-  // rather than leaving it running in the background.
+  // The stream being watched. Leaving the conversation lets go of it; the
+  // turn itself carries on on the server (QOS-01), and is watched again
+  // when the conversation is opened.
   const abortRef = useRef<AbortController | null>(null);
   // When each live tool call started, so its step can show how long it took
   // before the saved message (which carries the server's timing) arrives.
@@ -130,7 +136,7 @@ export function ChatThread({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [spend, setSpend] = useState<Spend | null>(null);
 
-  const loadMessages = useCallback(async () => {
+  const loadMessages = useCallback(async (): Promise<string | null> => {
     const c = await conversations.get(conversationId);
     setMessages(c.messages);
     setOlder(c.messages_next_cursor);
@@ -141,6 +147,7 @@ export function ChatThread({
       tokensIn: Number(c.token_usage?.in ?? 0),
       tokensOut: Number(c.token_usage?.out ?? 0),
     });
+    return c.turn_id ?? null;
   }, [conversationId]);
 
   const loadOlder = useCallback(async () => {
@@ -185,11 +192,19 @@ export function ChatThread({
     setFailure(null);
     setPending([]);
     setSpend(null);
-    void loadMessages();
+    let gone = false;
+    void loadMessages().then((turnId) => {
+      // An answer is being written here (sent before a reload, or from
+      // another tab): watch it from its start.
+      if (turnId && !gone) void watchRef.current(turnId);
+    });
     void loadPending();
-    // Switching conversation or unmounting: the server records a dropped
-    // stream as an aborted turn, so nothing is lost by letting go of it.
-    return () => abortRef.current?.abort();
+    // Switching conversation or unmounting: stop watching. The turn is not
+    // stopped by that (QOS-01); it is watched again on coming back.
+    return () => {
+      gone = true;
+      abortRef.current?.abort();
+    };
   }, [loadMessages, loadPending]);
 
   // While approvals wait, the tab says so: the assistant is stuck on a
@@ -204,9 +219,10 @@ export function ChatThread({
     try {
       await conversations.interrupt(conversationId);
     } catch {
-      // If the stop request itself fails, dropping the connection is the
-      // fallback — the turn is still stopped and recorded, just less gently.
-      abortRef.current?.abort();
+      // Letting go of the stream no longer stops a turn, so there is no
+      // fallback: say so, and leave Stop there to try again.
+      setStopping(false);
+      setError("Couldn't stop the answer. Try Stop again.");
     }
   }, [conversationId]);
 
@@ -225,107 +241,114 @@ export function ChatThread({
     if (nearBottom.current) el.scrollTo({ top: el.scrollHeight });
   }, [messages, live, pending]);
 
-  const sendText = useCallback(
-    async (text: string) => {
-      if (!text || sending) return;
+  /** Watch a turn's events into the live answer, from sending a message
+   *  or from opening a conversation that is answering. `watching`: the turn
+   *  was started elsewhere, so its events are a replay, and an approval it
+   *  asked for may already be decided: the card comes from the server, not
+   *  from the event. */
+  const follow = useCallback(
+    async (
+      run: (onEvent: (e: ChatEvent) => void, signal: AbortSignal) => Promise<void>,
+      watching: boolean,
+    ) => {
       setFinished(null);
       setError(null);
       setFailure(null);
       setBudgetNotes([]);
       nearBottom.current = true;
       startedAt.current.clear();
-      setPendingUser(text);
       setLive({ text: "", tools: [], citations: [], guardrails: [] });
       setSending(true);
+      onRunning?.(true);
       const controller = new AbortController();
+      abortRef.current?.abort();
       abortRef.current = controller;
       let failed = false;
       try {
-        await streamMessage(
-          conversationId,
-          text,
-          (e) => {
-            if (e.type === "tool_call") startedAt.current.set(e.id, performance.now());
-            const began = e.type === "tool_result" ? startedAt.current.get(e.id) : undefined;
-            const took = began !== undefined ? Math.round(performance.now() - began) : null;
-            setLive((prev) => {
-              if (!prev) return prev;
-              switch (e.type) {
-                case "token":
-                  // A subagent's notes go on its delegation step, not into the
-                  // answer.
-                  return e.parent_id
-                    ? { ...prev, tools: appendSubagentText(prev.tools, e.parent_id, e.text) }
-                    : { ...prev, text: prev.text + e.text };
-                case "tool_call":
-                  return {
-                    ...prev,
-                    tools: [
-                      ...prev.tools,
-                      { id: e.id, name: e.name, input: e.input, parent_id: e.parent_id },
-                    ],
-                  };
-                case "tool_result":
-                  return {
-                    ...prev,
-                    tools: prev.tools.map((t) =>
-                      t.id === e.id
-                        ? {
-                            ...t,
-                            status: e.status,
-                            output: e.output,
-                            permission: e.permission,
-                            duration_ms: took,
-                          }
-                        : t,
-                    ),
-                  };
-                case "approval_required":
-                  setPending((p) => [
-                    ...p.filter((x) => x.approval_id !== e.approval_id),
-                    {
-                      approval_id: e.approval_id,
-                      tool: e.tool,
-                      input: e.input,
-                      risk: e.risk,
-                      rationale: e.rationale,
-                      expires_at: e.expires_at,
-                    },
-                  ]);
+        await run((e) => {
+          if (e.type === "tool_call") startedAt.current.set(e.id, performance.now());
+          const began = e.type === "tool_result" ? startedAt.current.get(e.id) : undefined;
+          const took = began !== undefined ? Math.round(performance.now() - began) : null;
+          setLive((prev) => {
+            if (!prev) return prev;
+            switch (e.type) {
+              case "token":
+                // A subagent's notes go on its delegation step, not into the
+                // answer.
+                return e.parent_id
+                  ? { ...prev, tools: appendSubagentText(prev.tools, e.parent_id, e.text) }
+                  : { ...prev, text: prev.text + e.text };
+              case "tool_call":
+                return {
+                  ...prev,
+                  tools: [
+                    ...prev.tools,
+                    { id: e.id, name: e.name, input: e.input, parent_id: e.parent_id },
+                  ],
+                };
+              case "tool_result":
+                return {
+                  ...prev,
+                  tools: prev.tools.map((t) =>
+                    t.id === e.id
+                      ? {
+                          ...t,
+                          status: e.status,
+                          output: e.output,
+                          permission: e.permission,
+                          duration_ms: took,
+                        }
+                      : t,
+                  ),
+                };
+              case "approval_required":
+                if (watching) {
+                  void loadPending();
                   return prev;
-                case "guardrail":
-                  return { ...prev, guardrails: [...prev.guardrails, e] };
-                case "citation":
-                  // Arrives at finalize, after the full answer — a [n] marker only
-                  // means something once every search in the turn has been seen.
-                  return { ...prev, citations: [...prev.citations, e as Citation] };
-                default:
-                  return prev;
-              }
-            });
-            if (e.type === "error") {
-              failed = true;
-              setError(asSentence(e.message));
-              setFailure({ code: e.code, retryable: Boolean(e.retryable) });
+                }
+                setPending((p) => [
+                  ...p.filter((x) => x.approval_id !== e.approval_id),
+                  {
+                    approval_id: e.approval_id,
+                    tool: e.tool,
+                    input: e.input,
+                    risk: e.risk,
+                    rationale: e.rationale,
+                    expires_at: e.expires_at,
+                  },
+                ]);
+                return prev;
+              case "guardrail":
+                return { ...prev, guardrails: [...prev.guardrails, e] };
+              case "citation":
+                // Arrives at finalize, after the full answer — a [n] marker only
+                // means something once every search in the turn has been seen.
+                return { ...prev, citations: [...prev.citations, e as Citation] };
+              default:
+                return prev;
             }
-            if (e.type === "title") onTitle?.(e.title);
-            if (e.type === "budget") setBudgetNotes((n) => [...n, e.message]);
-            // Spend as it is incurred, so a long turn is visibly costing money;
-            // replaced by the server's total once the turn is saved.
-            if (e.type === "usage") {
-              setSpend((s) =>
-                s
-                  ? {
-                      cost: s.cost + e.cost_usd,
-                      tokensIn: s.tokensIn + e.tokens_in,
-                      tokensOut: s.tokensOut + e.tokens_out,
-                    }
-                  : s,
-              );
-            }
-          },
-          controller.signal,
-        );
+          });
+          if (e.type === "error") {
+            failed = true;
+            setError(asSentence(e.message));
+            setFailure({ code: e.code, retryable: Boolean(e.retryable) });
+          }
+          if (e.type === "title") onTitle?.(e.title);
+          if (e.type === "budget") setBudgetNotes((n) => [...n, e.message]);
+          // Spend as it is incurred, so a long turn is visibly costing money;
+          // replaced by the server's total once the turn is saved.
+          if (e.type === "usage") {
+            setSpend((s) =>
+              s
+                ? {
+                    cost: s.cost + e.cost_usd,
+                    tokensIn: s.tokensIn + e.tokens_in,
+                    tokensOut: s.tokensOut + e.tokens_out,
+                  }
+                : s,
+            );
+          }
+        }, controller.signal);
         await loadMessages();
       } catch (err) {
         // Our own abort (leaving the conversation) is not an error to show.
@@ -338,24 +361,54 @@ export function ChatThread({
           );
         }
       } finally {
-        if (abortRef.current === controller) abortRef.current = null;
-        setLive(null);
-        setPendingUser(null);
-        setSending(false);
-        setStopping(false);
-        // A turn that ends (finished, stopped, failed) settles any approval it
-        // raised: stopped ones are expired by the server. Re-read what is really
-        // still pending, or a stale card sits there answering "already expired"
-        // next to the new turn's card.
-        if (!controller.signal.aborted) {
-          void loadPending();
-          // An error announces itself (role="alert"); a good ending doesn't.
-          if (!failed) setFinished("Answer ready");
+        // Only the stream still being watched settles the thread: one let
+        // go of (another conversation opened, or this one watched again)
+        // must not clear what replaced it.
+        if (abortRef.current === controller) {
+          abortRef.current = null;
+          setLive(null);
+          setPendingUser(null);
+          setSending(false);
+          setStopping(false);
+          // Let go of on purpose (this conversation was left): the turn is
+          // still running on the server, so the list keeps its lamp lit.
+          if (!controller.signal.aborted) {
+            onRunning?.(false);
+            // A turn that ends (finished, stopped, failed) settles any
+            // approval it raised: stopped ones are expired by the server.
+            // Re-read what is really still pending, or a stale card sits
+            // there answering "already expired" next to the new turn's card.
+            void loadPending();
+            // An error announces itself (role="alert"); a good ending doesn't.
+            if (!failed) setFinished("Answer ready");
+          }
         }
       }
     },
-    [conversationId, sending, loadMessages, loadPending, onTitle],
+    [loadMessages, loadPending, onTitle, onRunning],
   );
+
+  const sendText = useCallback(
+    async (text: string) => {
+      if (!text || sending) return;
+      setPendingUser(text);
+      await follow(
+        (onEvent, signal) => streamMessage(conversationId, text, onEvent, signal),
+        false,
+      );
+    },
+    [conversationId, sending, follow],
+  );
+
+  const watch = useCallback(
+    (turnId: string) =>
+      follow((onEvent, signal) => watchTurn(conversationId, turnId, onEvent, signal), true),
+    [conversationId, follow],
+  );
+  // The mount effect runs before `watch` exists in its closure: it reads
+  // the current one through this.
+  const watchRef = useRef(watch);
+  watchRef.current = watch;
 
   // ── slash commands ──────────────────────────────────────────
   const [menuIndex, setMenuIndex] = useState(0);

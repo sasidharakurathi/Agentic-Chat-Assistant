@@ -1,5 +1,14 @@
-# Optional Langfuse stack for LLM tracing (task 1.9). Enable with:
+# Optional observability stack. Enable with:
 #   docker compose -f docker-compose.yml -f docker-compose.observability.yml --profile observability up -d
+#
+# Two halves:
+# - Prometheus + Grafana (task 6.4): numbers. Prometheus scrapes the API's
+#   /metrics, evaluates deploy/observability/alerts.yml, and Grafana shows
+#   the "Assistant Studio" dashboard on http://localhost:3002.
+#   Set METRICS_TOKEN in .env first: the API refuses scrapes without it in
+#   production, and Prometheus sends it.
+# - Langfuse (task 1.9): LLM traces.
+#
 #
 # Langfuse v3: the first major version with an OpenTelemetry ingestion
 # endpoint (/api/public/otel, from 3.22). v2, which this file used to pin,
@@ -147,7 +156,52 @@ services:
       timeout: 5s
       retries: 20
 
+  # ── metrics (task 6.4) ─────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: ["observability"]
+    # The scrape token is written to a file the config points at, so it is
+    # never in the config itself (which Prometheus shows in its UI).
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        umask 077 && printf '%s' "$$METRICS_TOKEN" > /tmp/metrics_token &&
+        exec /bin/prometheus --config.file=/etc/prometheus/prometheus.yml
+        --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=30d
+    environment:
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheusdata:/prometheus
+    # Reaches the API on its published port, wherever the API runs.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    profiles: ["observability"]
+    depends_on: [prometheus]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # Local-only default: change it before exposing Grafana anywhere.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/assistant-studio.json
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3002}:3000"
+
 volumes:
+  prometheusdata:
+  grafanadata:
   langfusedbdata:
   langfuseclickhouse:
   langfuseminio:

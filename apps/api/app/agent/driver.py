@@ -492,8 +492,14 @@ class FakeDriver:
         if not reply_parts:
             reply_parts = ["(fake driver)", "you", "said:", prompt.strip() or "(nothing)"]
 
-        for part in reply_parts:
-            await asyncio.sleep(0)  # let the event loop breathe / interleave
+        # A load test's turn length (AGENT_FAKE_DELAY_MS): a quarter before
+        # the first token, as a model's thinking would be, the rest spread
+        # over the answer.
+        delay = settings.agent_fake_delay_ms / 1000
+        rest = delay * 0.75 / max(1, len(reply_parts) - 1)
+        for i, part in enumerate(reply_parts):
+            pause = delay * 0.25 if i == 0 else rest
+            await asyncio.sleep(pause)  # 0: let the event loop breathe / interleave
             if interrupt is not None and interrupt.is_set():
                 break  # stop generating; still report what was used, below
             yield TokenEvent(text=part + " ")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import atexit
 import os
 import shutil
@@ -50,6 +51,35 @@ async def _fresh_schema() -> AsyncIterator[None]:
     yield
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+
+
+@pytest.fixture(autouse=True)
+async def _turns_end_with_their_test(_fresh_schema: None) -> AsyncIterator[None]:
+    """A turn runs as a task of its own (QOS-01) and can outlive the request
+    that started it by a moment (its last writes). Each test waits for its
+    turns, and stops any still running, before its tables are dropped:
+    otherwise a turn from one test failed noisily inside the next."""
+    yield
+    from app.services import turns
+
+    if turns._tasks:
+        await asyncio.wait(list(turns._tasks), timeout=10)
+    if turns._tasks:
+        await turns.shutdown(wait_s=5)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_queue() -> Iterator[None]:
+    """The job queue keeps one Redis pool for the process, and a pool belongs
+    to the event loop that made it. Each test has its own loop, so a pool
+    left by an earlier test is dead: the next enqueue failed, and a new data
+    source came back as "error" instead of "pending", but only in the test
+    that happened to run second. Start each test without one."""
+    from app import queue
+
+    queue._state.pool = None
+    yield
+    queue._state.pool = None
 
 
 @pytest.fixture

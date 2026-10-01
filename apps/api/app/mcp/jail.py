@@ -107,7 +107,11 @@ def main(argv: list[str]) -> int:
         os.setsid()
     os.umask(0o077)
     drop_privileges()
-    no_new_privileges()
+    if sys.platform.startswith("linux") and not no_new_privileges():
+        # Its result used to be ignored: the server then started without the
+        # one guarantee that stops it regaining privileges through exec.
+        print("the jail could not set no_new_privs; not starting", file=sys.stderr)
+        return 3
     apply_limits(limits)
 
     executable = shutil.which(command[0])

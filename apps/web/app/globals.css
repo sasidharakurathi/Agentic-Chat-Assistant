@@ -188,6 +188,10 @@
   --text-display: 2.5rem;
   --text-display--line-height: 2.75rem;
   --text-display--letter-spacing: -0.01em;
+  /* The landing hero only (docs/DESIGN.md, Landing). */
+  --text-display-xl: 3.5rem;
+  --text-display-xl--line-height: 3.75rem;
+  --text-display-xl--letter-spacing: -0.015em;
   --text-h1: 1.625rem;
   --text-h1--line-height: 2rem;
   --text-h1--letter-spacing: -0.005em;
@@ -466,5 +470,350 @@
   .typing-dot,
   .running-pulse {
     opacity: 0.7;
+  }
+}
+
+/* ── Landing: the route hero (docs/DESIGN.md, Landing) ──────────────────
+   The line draws and its stops come in once (--d, --dur per element), then
+   a message travels it on a loop. Only transform, opacity and dash offsets
+   move, the drawing is its own layer (the dotted ground never repaints),
+   and the loop pauses off screen (.route-paused). */
+.landing-panel {
+  background-color: var(--canvas);
+  /* The builder's ground: 1.25px dots every 24px, the snap grid. */
+  background-image: radial-gradient(var(--canvas-grid) 1.25px, transparent 1.5px);
+  background-size: 24px 24px;
+  background-position: 12px 12px;
+}
+.landing-route {
+  will-change: transform;
+  contain: paint;
+}
+.route-paused .landing-route,
+.route-paused .landing-route * {
+  animation-play-state: paused;
+}
+.landing-route .route-draw {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: route-draw var(--dur, 0.8s) cubic-bezier(0.65, 0, 0.35, 1) var(--d, 0s) forwards;
+}
+.landing-route .route-pop {
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: route-pop 0.5s cubic-bezier(0.34, 1.4, 0.64, 1) var(--d, 0s) forwards;
+}
+@keyframes route-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes route-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* The loop. Every part shares one 9 s cycle that starts once the line is
+   drawn, so they never drift apart. The cycle starts and ends on "Waiting
+   for a message", which makes the wrap seamless. Seconds into the cycle:
+   0.2-1.8 the message travels to the Agent (and passes behind it);
+   1.9-2.7 the knowledge base is searched; 2.85-3.65 the database is
+   queried; 3.85-4.7 the message leaves for Output; 4.7-5.1 the answer
+   comes in; 7.9-8.4 it clears, ready for the next.
+   Without the loop (reduced motion), the base styles below are the still:
+   answered, with the answer showing. */
+.landing-route .route-loop {
+  animation-duration: 9s;
+  animation-delay: 1.7s;
+  animation-iteration-count: infinite;
+  animation-fill-mode: both;
+  animation-timing-function: linear;
+}
+.landing-route .route-token {
+  transform: translateX(830px);
+  animation-name: route-token;
+}
+.landing-route .route-pulse-kb,
+.landing-route .route-pulse-db {
+  stroke-dasharray: 0.12 2;
+  stroke-dashoffset: 0.12;
+}
+.landing-route .route-pulse-kb {
+  animation-name: route-pulse-kb;
+}
+.landing-route .route-pulse-db {
+  animation-name: route-pulse-db;
+}
+.landing-route .route-busy {
+  opacity: 0;
+  animation-name: route-busy;
+}
+.landing-route .route-s-wait,
+.landing-route .route-s-kb,
+.landing-route .route-s-db {
+  opacity: 0;
+}
+.landing-route .route-s-wait {
+  animation-name: route-s-wait;
+}
+.landing-route .route-s-kb {
+  animation-name: route-s-kb;
+}
+.landing-route .route-s-db {
+  animation-name: route-s-db;
+}
+.landing-route .route-s-done {
+  animation-name: route-s-done;
+}
+.landing-route .route-answer {
+  transform-box: fill-box;
+  animation-name: route-answer;
+}
+@keyframes route-token {
+  0%,
+  2.22% {
+    transform: translateX(0);
+    animation-timing-function: cubic-bezier(0.45, 0, 0.25, 1);
+  }
+  20% {
+    transform: translateX(580px);
+  }
+  42.78% {
+    transform: translateX(680px);
+    animation-timing-function: cubic-bezier(0.45, 0, 0.25, 1);
+  }
+  52.22%,
+  100% {
+    transform: translateX(830px);
+  }
+}
+/* A phone: the same message, down the line (Input y 60, the Agent's
+   plate 330-390, Output y 590). */
+.landing-route-tall .route-token {
+  transform: translateY(530px);
+  animation-name: route-token-tall;
+}
+@keyframes route-token-tall {
+  0%,
+  2.22% {
+    transform: translateY(0);
+    animation-timing-function: cubic-bezier(0.45, 0, 0.25, 1);
+  }
+  20% {
+    transform: translateY(300px);
+  }
+  42.78% {
+    transform: translateY(320px);
+    animation-timing-function: cubic-bezier(0.45, 0, 0.25, 1);
+  }
+  52.22%,
+  100% {
+    transform: translateY(530px);
+  }
+}
+@keyframes route-pulse-kb {
+  0%,
+  21.11% {
+    stroke-dashoffset: 0.12;
+    animation-timing-function: cubic-bezier(0.45, 0, 0.55, 1);
+  }
+  30%,
+  100% {
+    stroke-dashoffset: -1;
+  }
+}
+@keyframes route-pulse-db {
+  0%,
+  31.67% {
+    stroke-dashoffset: 0.12;
+    animation-timing-function: cubic-bezier(0.45, 0, 0.55, 1);
+  }
+  40.56%,
+  100% {
+    stroke-dashoffset: -1;
+  }
+}
+@keyframes route-busy {
+  0%,
+  20% {
+    opacity: 0;
+  }
+  22.22%,
+  41.11% {
+    opacity: 1;
+  }
+  44.44%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes route-s-wait {
+  0%,
+  20% {
+    opacity: 1;
+  }
+  21.67%,
+  91.11% {
+    opacity: 0;
+  }
+  93.33%,
+  100% {
+    opacity: 1;
+  }
+}
+@keyframes route-s-kb {
+  0%,
+  21.67% {
+    opacity: 0;
+  }
+  23.33%,
+  30.56% {
+    opacity: 1;
+  }
+  32.22%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes route-s-db {
+  0%,
+  32.22% {
+    opacity: 0;
+  }
+  33.89%,
+  41.11% {
+    opacity: 1;
+  }
+  42.78%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes route-s-done {
+  0%,
+  42.78% {
+    opacity: 0;
+  }
+  44.44%,
+  87.78% {
+    opacity: 1;
+  }
+  91.11%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes route-answer {
+  0%,
+  52.22% {
+    opacity: 0;
+    transform: translateY(8px);
+    animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
+  }
+  56.67%,
+  87.78% {
+    opacity: 1;
+    transform: none;
+    animation-timing-function: cubic-bezier(0.4, 0, 1, 1);
+  }
+  92.22%,
+  100% {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+/* Reduced motion: no loop; the base styles above are the still. (The
+   global rule only shortens animations; naming none stops them.) */
+@media (prefers-reduced-motion: reduce) {
+  .landing-route .route-loop {
+    animation-name: none;
+  }
+}
+
+/* ── Landing: the page below the hero ───────────────────────────────────
+   The hero's words rise in once on load (.load-rise, CSS only). Further
+   down, a <Reveal> marks its block .rv-wait until it scrolls into view,
+   then .rv-in, and its parts come in along the line: .rv rises, .rv-x and
+   .rv-y draw a line across or down, .rv-pop brings in a stop. --t is when
+   a group starts and --dt each part's offset within it. Only blocks below
+   the first screen wait, and never without JavaScript or under reduced
+   motion, so nothing is ever hidden that would not then appear. */
+.load-rise {
+  animation: rv-rise 0.8s cubic-bezier(0.2, 0, 0, 1) var(--dt, 0s) both;
+}
+.rv-wait .rv,
+.rv-wait .rv-pop {
+  opacity: 0;
+}
+.rv-wait .rv-x {
+  transform: scaleX(0);
+}
+.rv-wait .rv-y {
+  transform: scaleY(0);
+}
+.rv-in .rv {
+  animation: rv-rise 0.7s cubic-bezier(0.2, 0, 0, 1) calc(var(--t, 0s) + var(--dt, 0s)) both;
+}
+.rv-in .rv-x {
+  transform-origin: left center;
+  animation: rv-x 1.2s cubic-bezier(0.65, 0, 0.35, 1) calc(var(--t, 0s) + var(--dt, 0s)) both;
+}
+.rv-in .rv-y {
+  transform-origin: center top;
+  animation: rv-y 1.2s cubic-bezier(0.65, 0, 0.35, 1) calc(var(--t, 0s) + var(--dt, 0s)) both;
+}
+.rv-in .rv-pop {
+  animation: rv-pop 0.5s cubic-bezier(0.34, 1.4, 0.64, 1) calc(var(--t, 0s) + var(--dt, 0s)) both;
+}
+.rv-d1 {
+  --dt: 0.1s;
+}
+.rv-d2 {
+  --dt: 0.2s;
+}
+.rv-d3 {
+  --dt: 0.3s;
+}
+@keyframes rv-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes rv-x {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes rv-y {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes rv-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: none;
   }
 }

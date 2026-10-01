@@ -1,0 +1,64 @@
+# The one way in (task 6.6): TLS, then routing by path. Started by
+# docker-compose.prod.yml; see docs/EXPLAINER.md §12.6.
+#
+# SITE_ADDRESS is the host name people open. For a real domain whose DNS
+# points here, Caddy gets and renews a certificate by itself (ports 80 and
+# 443 must be reachable from the internet). For `localhost` it signs one
+# with its own local CA, which a browser will warn about until that CA is
+# trusted: fine for trying the stack, not for users.
+#
+# A sample: Traefik, nginx or a cloud load balancer can do the same job.
+# What any of them must do is in the comments below.
+
+{$SITE_ADDRESS} {
+	# Browsers must come back over HTTPS for a year. (Caddy already redirects
+	# http:// to https://.)
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# The largest request the API should ever be asked to read: a document
+	# upload. Refused here, before it costs the API anything.
+	request_body {
+		max_size 64MB
+	}
+
+	# Never published. /metrics reports spend and names orgs and assistants;
+	# scrape it from inside (docs/EXPLAINER.md §12.4).
+	handle /metrics {
+		respond "Not found" 404
+	}
+
+	# The API. `flush_interval -1`: a chat answer is a stream of server-sent
+	# events, and a proxy that buffers turns it into one long silence
+	# followed by the whole answer. Long timeouts for the same reason: a
+	# turn can wait minutes for someone to approve a tool call.
+	@api path /api/* /healthz /readyz
+	handle @api {
+		reverse_proxy api:8000 {
+			flush_interval -1
+			transport http {
+				read_timeout 15m
+				write_timeout 15m
+			}
+		}
+	}
+
+	# Citation links: URLs the API signs for this host and MinIO checks. The
+	# Host header must reach MinIO unchanged (Caddy's default), or the
+	# signature does not match. Only reads, only the one bucket.
+	@files {
+		method GET HEAD
+		path /{$S3_BUCKET}/*
+	}
+	handle @files {
+		reverse_proxy minio:9000
+	}
+
+	# Everything else is the web app.
+	handle {
+		encode zstd gzip
+		reverse_proxy web:3000
+	}
+}

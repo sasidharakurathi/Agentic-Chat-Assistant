@@ -221,6 +221,12 @@ def normalize_tools(tools: list[Any]) -> tuple[list[dict[str, Any]], list[str]]:
         if not TOOL_NAME_RE.fullmatch(name):
             skipped.append(f"{name[:80]!r}: names may use letters, digits, _ and - (up to 64)")
             continue
+        if "__" in name:
+            # `__` is how a tool's full name is put together
+            # (`mcp__server__tool`). A tool called `mcp__caps__sql_query`
+            # could pass for a platform tool on an approval card.
+            skipped.append(f"{name[:80]!r}: names may not contain a double underscore")
+            continue
         if name in seen:
             skipped.append(f"{name}: listed twice")
             continue

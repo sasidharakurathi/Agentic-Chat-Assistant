@@ -466,3 +466,115 @@ def test_sqlite_internals_are_refused(sql: str) -> None:
     because `_` is a word character, so `\\bPRAGMA\\b` never matches."""
     with pytest.raises(SqlBlocked):
         guard(sql, engine="sqlite", permissions=READ_ONLY)
+
+
+# ── the security pass (task 6.3) ─────────────────────────────
+
+
+def _blocked(sql: str, *, engine: str = "postgres", **perms: object) -> str:
+    with pytest.raises(SqlBlocked) as why:
+        guard(sql, engine=engine, permissions=Permissions(**perms))  # type: ignore[arg-type]
+    return str(why.value)
+
+
+def _allowed(sql: str, *, engine: str = "postgres", **perms: object) -> str:
+    return guard(sql, engine=engine, permissions=Permissions(**perms)).statement  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # A quoted, schema-qualified name kept its quotes when compared with
+        # the list, so it never matched, and Postgres ran the real function.
+        "SELECT pg_catalog.\"pg_read_file\"('/etc/passwd')",
+        'SELECT pg_catalog."pg_sleep"(100)',
+        "SELECT pg_catalog.\"lo_import\"('/etc/passwd')",
+        "SELECT pg_catalog.\"nextval\"('s')",
+        'SELECT "pg_read_file"(1)',
+        "SELECT PG_CATALOG.PG_READ_FILE('/etc/passwd')",
+    ],
+)
+def test_a_quoted_or_qualified_function_name_is_still_the_same_function(sql: str) -> None:
+    assert "is not allowed" in _blocked(sql)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # Siblings of names that were on the list.
+        "SELECT lowrite(0, 'abc')",
+        "SELECT lo_truncate(0, 0)",
+        "SELECT lo_get(1)",
+        "SELECT lo_open(1, 131072)",
+        "SELECT pg_stat_reset()",
+        "SELECT pg_logical_emit_message(true, 'a', 'b')",
+        "SELECT pg_create_restore_point('x')",
+        "SELECT pg_drop_replication_slot('x')",
+        "SELECT pg_advisory_lock(1)",
+        "SELECT dblink_connect_u('host=internal')",
+        "SELECT dblink_send_query('c', 'delete from x')",
+        # What the server is, and who else is on it.
+        "SELECT * FROM pg_stat_get_activity(NULL)",
+        "SELECT current_setting('data_directory')",
+        "SELECT pg_ls_logdir()",
+        "SELECT inet_server_addr()",
+    ],
+)
+def test_whole_function_families_are_refused_not_just_the_listed_names(sql: str) -> None:
+    assert "is not allowed" in _blocked(sql)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT table_to_xml('secret', true, false, '')",
+        "SELECT table_to_xml_and_xmlschema('secret', true, false, '')",
+        "SELECT query_to_xml_and_xmlschema('select * from secret', true, false, '')",
+        "SELECT schema_to_xml('public', true, false, '')",
+        "SELECT database_to_xml(true, false, '')",
+        "SELECT cursor_to_xml('c', 10, true, false, '')",
+    ],
+)
+def test_a_denied_table_cannot_be_dumped_through_a_function_that_takes_its_name(
+    sql: str,
+) -> None:
+    """The table is named inside a string, so the table checks never see it."""
+    assert "is not allowed" in _blocked(sql, deny_tables=["secret"])
+
+
+def test_ordinary_functions_still_work() -> None:
+    sql = "SELECT count(*), lower(name), coalesce(a, b), now(), pg_typeof(id) FROM orders"
+    assert "COUNT(*)" in _allowed(sql)
+    assert "PG_SIZE_PRETTY" in _allowed("SELECT pg_size_pretty(10)")
+
+
+def test_a_read_cannot_take_row_locks() -> None:
+    for tail in ("FOR UPDATE", "FOR UPDATE NOWAIT", "FOR SHARE"):
+        assert "cannot lock rows" in _blocked(f"SELECT * FROM orders {tail}")
+
+
+def test_a_schema_qualified_deny_entry_also_stops_the_bare_name() -> None:
+    assert "denied" in _blocked("SELECT * FROM secret", deny_tables=["public.secret"])
+    assert "denied" in _blocked("SELECT * FROM public.secret", deny_tables=["public.secret"])
+    assert "denied" in _blocked("SELECT * FROM public.secret", deny_tables=["secret"])
+    assert "denied" in _blocked("SELECT * FROM other.secret", deny_tables=["secret"])
+    # A different schema's table of the same name is a different table.
+    assert "other.secret" in _allowed("SELECT * FROM other.secret", deny_tables=["public.secret"])
+
+
+def test_a_bare_allow_entry_does_not_admit_another_schemas_table() -> None:
+    assert "not in this connection's allowed tables" in _blocked(
+        "SELECT * FROM evil.orders", allow_tables=["orders"]
+    )
+    # The default schema, spelled out or not, is the same table.
+    assert _allowed("SELECT * FROM orders", allow_tables=["orders"])
+    assert _allowed("SELECT * FROM public.orders", allow_tables=["orders"])
+    assert _allowed("SELECT * FROM orders", allow_tables=["public.orders"])
+    assert _allowed("SELECT * FROM main.orders", engine="sqlite", allow_tables=["orders"])
+    assert _allowed("SELECT * FROM evil.orders", allow_tables=["evil.orders"])
+    # MySQL's default is the connected database, which the guard doesn't
+    # know: a qualified table has to be listed qualified.
+    assert "not in this connection" in _blocked(
+        "SELECT * FROM shop.orders", engine="mysql", allow_tables=["orders"]
+    )
+    assert _allowed("SELECT * FROM shop.orders", engine="mysql", allow_tables=["shop.orders"])

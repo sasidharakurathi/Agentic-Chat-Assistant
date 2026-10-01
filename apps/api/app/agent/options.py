@@ -377,6 +377,21 @@ def permitted_tool_names(spec: RuntimeSpec) -> frozenset[str]:
     return frozenset(spec.enabled_tools) | frozenset(builtin_tools(spec))
 
 
+#: The server's own secrets, blanked in the CLI's environment.
+_SERVER_ONLY_ENV = (
+    "APP_KEK",
+    "JWT_SECRET",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "S3_ACCESS_KEY",
+    "S3_SECRET_KEY",
+    "VOYAGE_API_KEY",
+    "LANGFUSE_SECRET_KEY",
+    "MCP_RUNNER_TOKEN",
+    "SEED_ADMIN_PASSWORD",
+)
+
+
 def build_claude_options(spec: RuntimeSpec, can_use_tool: CanUseTool) -> Any:
     """Build ``claude_agent_sdk.ClaudeAgentOptions``. Imported lazily so the rest
     of the runtime works when the SDK's CLI isn't installed.
@@ -420,6 +435,10 @@ def build_claude_options(spec: RuntimeSpec, can_use_tool: CanUseTool) -> Any:
             # port of the editor's integration, which would connect a tenant's
             # agent to the developer's IDE. Never wanted here.
             "CLAUDE_CODE_SSE_PORT": "",
+            # And the server's own secrets (task 6.3). The model has no tool
+            # that reads the environment, so this is a second wall, not the
+            # first: the CLI has no use for any of them.
+            **dict.fromkeys(_SERVER_ONLY_ENV, ""),
         },
         system_prompt=spec.system_prompt,
         model=spec.model,

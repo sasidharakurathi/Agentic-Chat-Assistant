@@ -157,7 +157,8 @@ Scale (size/line-height, weight):
 
 | Role | Spec | Where |
 |---|---|---|
-| Display | 40/44 condensed 600, -0.01em | Landing only |
+| Display | 40/44 condensed 600, -0.01em | Landing only (headline on a phone) |
+| Display XL | 56/60 condensed 600, -0.015em | Landing headline from `sm` up (`text-display-xl`) |
 | H1 | 26/32 condensed 600, -0.005em | Page titles |
 | H2 | 20/26 sans 600 | Page sections, settings sections, manager headers |
 | H3 | 16/22 sans 600 | Plate headings, drawer title, dialog title |
@@ -370,6 +371,31 @@ the React Flow theme rules in `globals.css`.
   columns fill rows -1, +1, -2, +2 and so on. Rows land on the 24px grid.
   Update `graph-sync.test.ts` expectations to match ("never on the main
   row, balanced within one row").
+- **Zoom** goes down to 0.1, so "fit everything in view" can show a
+  pipeline of a hundred stations. Below 0.7 a station shows only its
+  bullet and name.
+- **Reading order**: stations are in the page in the order the diagram
+  reads: the main line stop by stop, then the rest by column and row.
+  That is the order Tab and a screen reader meet them in.
+
+### Comparing two versions (History)
+
+The same canvas, read-only, showing both versions as one drawing. It
+reuses the run trace's grammar: what did not change is **unlit**, so what
+changed is what you see.
+
+- A changed station keeps its colours and gets a **tag** on its top edge,
+  a small plate with the word: "Added" (success), "Removed"
+  (destructive), "Changed" (warning). The word carries the meaning; the
+  colour repeats it. Its border takes the tag's colour. A removed
+  station's name is struck through and its border dashed.
+- A changed station's detail line says how many settings changed.
+- An added line sits on a 7px success band (where selection's marker band
+  goes). A removed line is 3px dashed destructive: dashed still means
+  "won't run", which is exactly what a removed line is.
+- The drawing is tidied, not shown as either version was arranged, and
+  kept whole in view. Picking a station narrows the settings table below
+  it to that station.
 
 ## 7. Surfaces
 
@@ -411,14 +437,45 @@ the React Flow theme rules in `globals.css`.
 
 ### Landing (`app/page.tsx`) and auth
 
-- Landing: no pill. The display wordmark (condensed 40/44) with the brand
-  mark, one plain sentence ("Build an assistant by wiring together what it
-  can use: your documents, databases, tools and MCP servers. Then chat
-  with it and see every step it took."), actions "Create an account"
-  (default) and "Sign in" (outline). Below it, a small static SVG of the
-  main line (Input 1, Guardrails 2, Agent 3, Output 4, with a knowledge
-  line joining from above and an action line from below) is the only
-  illustration. Left-aligned column at about 28vh, not dead centre.
+- Landing (revamped after 1.0.0): one column, max 1360px, gutters
+  16/24/40/48 (base, `sm`, `lg`, `xl`): wide enough that a wide screen
+  is not framed in empty margins, narrow enough that the page keeps its
+  scale (1760px was tried and read as too big). Every section after the hero
+  opens with a full-width rule; on `lg` its condensed H2 sits on the left
+  and its one sentence on the right, aligned to the heading's last line,
+  as in the hero. No cards, no eyebrows, no section-entry animations.
+  - **Header:** wordmark, "Sign in" (ghost), "Create an account"
+    (default). Below `md` the wordmark only.
+  - **Signing in is for a computer.** Below `md` (768px) every "Sign in"
+    and "Create an account" on the page is gone, and the hero and the
+    closing section show the note "Sign in from a computer" instead
+    (`components/desktop-only.tsx`). The auth pages (`/login`,
+    `/register`, invites) show the same note in place of their forms.
+  - **Hero:** the headline "Build chat assistants on your own documents,
+    databases and tools." in Display XL, max 18ch. On `lg` the sentence and
+    the two actions sit in a right column aligned to the headline's last
+    line; below `lg` they follow it.
+  - **The route (`components/landing/RouteHero.tsx`):** one support
+    assistant drawn the way the builder draws it, on the dot-grid canvas
+    ground (`landing-panel`). Main line Input 1, Guardrails 2, Router 3,
+    the Agent as a plate (4), Output 5; Refund policy.pdf feeding a
+    knowledge base from above; Orders DB and a calculator joining from
+    below, no two lines crossing. Every word in it is the product's own.
+    Below `md` a second drawing takes its place, the same route down the
+    screen (the branches on the right, joining the plate from above and
+    below), at a size a phone can read. No SVG `<title>`: browsers show
+    it as a tooltip on hover; the drawing is named by `aria-label`.
+  - **Steps:** Draw it, Try it, Measure it, Publish it, numbered because
+    they are a sequence, on an ink main line (across on `md`, down on a
+    phone).
+  - **What an assistant can use:** three ruled columns in the family
+    colours: Knowledge, Actions, Helpers.
+  - **Oversight:** a drawn approval card and a drawn Run details strip,
+    each with three lamp points under it.
+  - **Runs on your own machine:** the compose commands, the preflight
+    output, and six ruled facts.
+  - **Start from a sample:** the actions again, ending on a main-line
+    terminus. Footer: wordmark and the version.
 - Auth layout: paper, no gradient. Mark plus wordmark above a single 400px
   plate at about 28vh. Errors in a bordered message above the submit
   button with `role="alert"`, saying what to do. Below 480px the plate
@@ -556,11 +613,23 @@ Motion only answers something the user did, or shows live state.
 - Menus and popovers: 160ms fade plus a 2px rise. Sheets: 220ms slide,
   `cubic-bezier(0.2, 0, 0, 1)`. Dialogs: 160ms fade plus scale from 0.98.
 - The one signature moment: the lit route draws once when a run opens on
-  the canvas or the route strip mounts.
+  the canvas or the route strip mounts. On the landing page it is the
+  hero: the main line draws and the stops come in once, then a message
+  travels it on a 9 s loop (behind the stops and the Agent's plate, never
+  popping in or out; the plate's edge lights while it works; a marker dash
+  down the knowledge base line, then the database line; out to Output;
+  the cited answer comes in, holds, and clears). No button: the user
+  asked for a loop. It pauses off screen. Below the hero, each block
+  comes in once as it scrolls into view, along the line: lines draw
+  across or down, stops pop in where the line reaches them, words rise
+  after. The approval still's lamp pulses and its clock counts down.
+  Only transform, opacity and dash offsets are animated.
 - Live lamps (running step, Indexing, Checking) pulse only while live.
 - Tidy up animates stations to their new positions over 240ms.
 - `prefers-reduced-motion: reduce`: everything above appears in its end
-  state; lamps are steady (the state is spelled out in text anyway).
+  state; lamps are steady (the state is spelled out in text anyway). The
+  landing hero shows its answered state, still, and nothing below it
+  waits to come in.
 
 ## 9. Words
 

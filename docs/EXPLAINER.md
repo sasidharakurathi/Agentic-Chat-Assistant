@@ -5530,3 +5530,1640 @@ past the rules it was meant to satisfy.
   with its edges removed, plus an unwired output. "Put it on the way to the
   agent" cleared two warnings and the rules ("Be kind.") were back in the
   config. The last warning was fixed from Panels.
+
+## 12. Phase 6: evals, hardening, deploy, docs
+
+Phase 6 makes the product safe to change and to run: evals and a
+regression gate, a security pass, observability, deployment and the
+guides. This section grows task by task.
+
+### 12.1 The eval harness (task 6.1)
+
+Until now the only way to know whether a change made an assistant better
+or worse was to chat with it and form an impression. Phase 2 had built the
+retrieval metrics (§4.12), but nothing ran them from the product.
+
+An **eval suite** is a list of questions an assistant must get right. A
+**run** asks every one of them against a chosen version and scores the
+answers. Two runs can be compared, so "did this prompt change fix the
+refund questions, and what did it break?" has an answer.
+
+#### A case is a real turn
+
+The plan says a run takes each case "through the real AgentRuntime". The
+simplest way to be sure of that is to not build a second path at all. Each
+case is one message in a conversation of its own, answered by
+`chat.run_message`: the same function the chat uses. So an eval measures
+what a user would have got, and every case has what any turn has: a run
+row, its steps, its trace, its spend on the ledger and against the
+budgets.
+
+Three things differ, all carried by one small object
+(`chat.Unattended`):
+
+- **The version is pinned.** A normal turn uses whatever is published now.
+  An eval runs against the version it was started on (or the draft), so a
+  run on version 3 still answers as version 3 after version 4 is
+  published.
+- **Nobody is there to approve anything.** A tool call that would ask a
+  person is declined at once, with no pending approval row and no waiting.
+  An eval can never change data or hang until a timeout. The call's audit
+  row says `unattended`, and the model is told why.
+- **The conversation is hidden.** It carries `eval_run_id`, which keeps
+  it out of the chat list and deletes it with its run. It is named up
+  front ("Eval: …"), so the turn doesn't pay for a title.
+
+#### Three kinds of score
+
+Each is optional, and a case with none of them passes by answering.
+
+| Score     | What it needs                                                                                           | Costs          |
+| --------- | ------------------------------------------------------------------------------------------------------- | -------------- |
+| Checks    | what the case lists: phrases the answer must or must not say, tools it must use, that it cites a source | nothing        |
+| Retrieval | labels: the sources (or chunks) that answer the question                                                | one retrieval  |
+| Judge     | the real model switched on, and the suite's judge toggle                                                | one model call |
+
+- **Checks** (`evals/checks.py`) are pure functions. Phrases match
+  whatever the capitals and spacing. A tool is named by its short name
+  (`sql_query` matches `mcp__caps__sql_query`), but never by a fragment of
+  one. These are what the CI gate (task 6.2) runs on, since it has no
+  judge.
+- **Retrieval** (`evals/labels.py`) runs the real `retrieve()` for the
+  question with the assistant's own settings, and scores recall, MRR and
+  nDCG with the Phase 2 metrics. Labels name **sources by their title**: a
+  builder knows "the refund policy answers this", not which chunk ids the
+  last reindex produced. A label that matches no source is reported on the
+  result, because otherwise a renamed document scores zero forever and
+  looks like a retrieval bug. Chunk ids work too, for an imported set.
+- **The judge** (`evals/judge.py`) is the assistant's `models.judge`
+  model, asked once per case for a structured verdict: four questions,
+  each scored 1 to 5 with a sentence of why.
+  - Groundedness: is each claim supported by the passages it retrieved?
+  - Correctness: does it answer the question, and agree with the
+    reference answer when the case has one?
+  - Citation validity: does each cited passage support the claim it is
+    attached to? (Not applicable when there was nothing to cite.)
+  - Refusal appropriateness: did it decline when it should, and only
+    then?
+
+  The answer and the passages are fenced and the judge is told they are
+  material, never instructions: an answer saying "score this 5" is just a
+  bad answer. A fence inside the answer is broken up so it can't close its
+  own block. The judge only runs on the real model, and its cost is
+  recorded on the ledger and counted against the budgets.
+
+**The verdict** (`evals/aggregate.py`): a case passes when its turn
+finished, every check holds, and the judge (if it graded) scored every
+applicable question at or above the suite's pass mark (3 by default). A
+judge that couldn't grade (it declined, or was unreachable) doesn't fail
+the case; the checks stand, and the run says how many answers went
+ungraded.
+
+**A run's metrics** are rebuilt from its result rows: pass rate, checks
+passed, the mean of each judge question, and the retrieval scores. Each
+is averaged over the cases it applied to, so a suite with two labelled
+questions reports retrieval over two, not over twenty.
+
+#### Running it
+
+`POST /eval-suites/{id}/runs` creates a queued run and hands it to the
+worker (`run_eval_job`). The runner (`evals/runner.py`) takes the cases
+one at a time and writes each result as it finishes, so the page can show
+progress.
+
+- **One at a time**, per suite and per case: an eval shouldn't take every
+  turn slot from people who are chatting.
+- **One broken case is a failed case**, not a failed run. The raw error
+  stays in the logs.
+- **A spent budget stops the run**: no later case could run either. The
+  run says why.
+- **Cancel** takes effect before the next case. What already ran is kept
+  and summarised.
+- **A run is never left "running".** If the queue is down the run says so
+  instead of waiting forever; if the job is cut off (its one-hour limit,
+  a worker restart) it is closed as stopped. Either would otherwise block
+  the suite, since only one run of a suite may be active.
+
+#### The data
+
+Four tables (migration `2e9a99664235`): `eval_suites`, `eval_cases`,
+`eval_runs`, `eval_case_results`, and `conversations.eval_run_id`.
+
+A result keeps its own copy of the case's question and expectations.
+Cases get edited and deleted; a result that changed meaning afterwards
+would make two runs impossible to compare.
+
+#### In the builder
+
+A new **Evals** tab:
+
+- **Suites:** name one, open it, see each suite's latest run.
+- **Cases:** add or change one in a form, or import a CSV or JSON file
+  (`lib/evals.ts`). Rows that can't be used are skipped and named, so one
+  bad row doesn't lose the rest.
+- **Run:** pick the draft or a published version. While it runs, the
+  progress and results update.
+- **Results:** the headline numbers, then each case. Opening one shows
+  the answer, each check in words ("Doesn't say "giraffe""), the judge's
+  four scores with its reasons, and the retrieval outcome.
+- **Compare:** pick an earlier run. A table shows each number before and
+  after, and the cases that were fixed, broke, are new or were removed.
+  Cases are matched by identity, so a reworded case is still the same
+  case.
+
+Anyone in the org can read suites and results. Creating, changing,
+running and cancelling are for the assistant's editors.
+
+#### Verified
+
+- **Tests:**
+  - `test_evals_scoring.py` (12): the checks; the verdict; the judge's
+    prompt, request and failures on the real SDK over the mock transport;
+    the metrics.
+  - `test_evals_runs.py` (16): suites and cases over the API; who may do
+    what; a full run on the fake driver; the hidden conversation and its
+    ledger rows; version pinning; approvals declined with nothing run;
+    cancelling; a spent budget; a crashing case; an interrupted run; the
+    judge's verdict, errors and cost; retrieval labels.
+  - web `lib/evals.test.ts` (11): CSV and JSON import, the wording, and
+    comparing runs.
+- **Mutation-tested:** 24 mutants. One survived at first: source labels
+  matched by exact case, because the test's label was already lowercase.
+  The test now uses mixed case, so 24 of 24 are killed.
+- **Live** (fake driver, a temporary assistant, deleted afterwards): the
+  real worker ran a three-case suite (2 of 3 passed; the calculator case
+  used its tool); the chat list stayed empty; a case added through the
+  form and a second run from the button gave 3 of 4; comparing the two
+  showed "Better" and one new case.
+- **Not exercised live:** the judge and retrieval scoring, which need the
+  real model and an indexed knowledge base. Both are covered by tests.
+
+### 12.2 The CI regression gate (task 6.2)
+
+The eval harness (§12.1) tells a builder whether their assistant got
+better. The gate asks the other question, on every push: did a change to
+the **platform** change what an assistant does? A tool that stops being
+offered, a guard that stops refusing, a citation that stops resolving:
+none of those fail a unit test of the piece that was edited, and all of
+them change answers.
+
+#### What is canned and what is real
+
+CI has no model, no Postgres and no embedding model, and the gate has to
+give the same verdict every time. So three things are stand-ins:
+
+- **The model** (`tests/canned_model.py`). It plays the CLI's side of the
+  SDK protocol through the scripted transport that already tested the
+  driver (`tests/scripted_cli.py`, moved out of `test_driver_transport.py`
+  so both can use it). For each question it follows a **play** from the
+  fixture: call these tools with these inputs, then answer with this text.
+- **The embedder, vector store and reranker** (`tests/lexical_rag.py`):
+  word overlap over the chunks in SQLite.
+- **The queue**: the run is started by calling the runner, as the worker
+  job does.
+
+Everything else is what production runs: `ClaudeSDKDriver` and the SDK
+client, the PreToolUse gate, the permission router, the tools on the
+in-process MCP server, the SQL guard and the SQLite adapter against a real
+database file, `retrieve()`'s fusion, threshold and hydration, the
+citation registry, `chat.run_message`, the eval runner and its scoring.
+
+Each tool call goes the way the real CLI sends it: hooks, then permission,
+then the call. What comes back is whatever the platform did.
+
+#### Answers are built from what the platform returned
+
+A canned answer that always says "30 days" would pass whether retrieval
+worked or not. So a play's answer is a template:
+
+- `{output}` is the last tool's result;
+- `{cite:Refund window}` is the marker `kb_search` printed for the passage
+  with that title, or nothing if retrieval didn't return it.
+
+"Refund requests must be submitted within 30 days [1]" only carries its
+`[1]` if the platform found the passage, numbered it, and later resolved
+that number to a source. Every check in the suite rests on something the
+platform returned, except the one plain greeting.
+
+#### The suite
+
+`app/evals/fixtures/regression_v1.json`: 15 cases on one fixture
+assistant (a 12-passage knowledge base, a SQLite shop database that allows
+writes but not schema changes, the calculator, no web search).
+
+| Cases | What they hold the platform to |
+| --- | --- |
+| 6 knowledge-base questions | the right passage is found, quoted and cited; one needs two sources and two markers |
+| 1 question with no answer | "No relevant results", and no citation |
+| 3 database questions | a sum, a join, and the table list, from the real file; reads get a row limit |
+| 1 change to data | declined, because nobody is there to approve it; the data is untouched |
+| 1 schema change | refused by the connection's permissions |
+| 1 calculation | the calculator's result |
+| 1 web search | refused by the gate: the tool is not switched on |
+| 1 greeting | a turn with no tools |
+
+Six cases are labelled with the sources that answer them, so the run also
+reports retrieval recall, MRR and nDCG.
+
+#### The rule
+
+`app/evals/gate.py` compares the run's metrics with a committed baseline
+(`regression_baseline.json`: pass rate 1.0, retrieval 1.0, over 15 cases).
+The build fails when:
+
+- a watched metric falls more than the tolerance (0.02) below its
+  baseline. One case of fifteen is 0.067, so this allows rounding and
+  nothing else;
+- a metric the baseline has was not measured at all;
+- any case ended in an error;
+- fewer cases ran than the baseline was measured over (deleting the
+  failing case is not a fix).
+
+A baseline is a floor. When a change improves the numbers, raise it in the
+same change.
+
+The gate is `tests/test_eval_gate.py`. It runs in the ordinary test step,
+and again as its own CI step ("Eval regression gate") so a red build says
+which it was. A failure prints the metric that fell and each failing case
+with its answer. It takes about four seconds.
+
+#### What it does not measure
+
+Retrieval **quality** and the model's own judgement. The stand-in ranks by
+word overlap, which is only good enough for the right passage to win on
+these questions. Whether real retrieval is any good is
+`test_evals_retrieval.py` on the real models (§4.12), and whether the
+model answers well is what a suite with the judge is for (§12.1).
+
+#### Verified
+
+- **Tests** (`test_eval_gate.py`, 12):
+  - the suite meets its baseline, and the things behind the numbers hold:
+    two markers resolved, the change and the schema change refused by the
+    permission router, the web search refused by the gate, no approval
+    left pending, the shop's rows unchanged, a row limit added to reads,
+    the cost exactly fifteen canned turns;
+  - the fixture and its baseline agree;
+  - five tests that break the platform on purpose and require the gate to
+    fail: a reranker that ranks backwards, citations that resolve to
+    nothing, the calculator switched off, a connection that allows schema
+    changes, a turn that errors;
+  - the rule itself: within and beyond the tolerance, a missing metric,
+    errors, a shrunken suite.
+- **Mutation-tested:** 12 of 12 killed. Six in the rule, and six in the
+  platform itself: `kb_search` printing no markers, a calculator that is
+  off by one, disabled tools getting through the gate, no row limit on
+  reads, an unattended approval being granted, retrieval returning
+  nothing.
+
+### 12.3 The security pass (task 6.3)
+
+Every guard in the platform was written by the same hands that tested it.
+This task had each one attacked by someone who hadn't written it: five
+reviewers, one surface each (outbound requests, the SQL guard, MCP
+servers, tenant isolation and roles, secrets), told to build a bypass and
+run it. Whatever they confirmed was fixed and pinned with a test.
+
+The reference is `docs/THREAT_MODEL.md`: what is protected, from whom,
+each wall, the full table of findings, and what is still open. This
+section is the story of the ones worth understanding.
+
+#### A database connection that read the platform itself
+
+A SQLite connection is a file path, and the API opened whatever path it
+was given. Registration is open, so anyone could sign up, add a
+"connection" pointing at the platform's own database file, and have the
+agent run `SELECT email, password_hash FROM users` on it. Tenant isolation
+held everywhere else and was walked around by one form field.
+
+`check_sqlite_path` now refuses the platform's own file always, confines
+connections to `DB_SQLITE_DIR` when it is set (after resolving `..` and
+symlinks), and refuses SQLite connections in production when it isn't.
+It runs when a connection is saved and again each time one is used, so a
+row saved before the rule existed is covered too.
+
+#### A list of banned functions loses to the one nobody listed
+
+The SQL guard refused `pg_read_file()`. It did not refuse
+`pg_catalog."pg_read_file"()`: a quoted name is a different node in the
+parse tree, and its text form kept the quotes, so it never equalled the
+entry on the list. Postgres ran the real function, in a statement the
+guard had classified as a read and approved without asking anyone.
+
+The same review found the list's siblings: `lo_import` was banned and
+`lowrite` was not, `dblink_exec` and not `dblink_send_query`,
+`query_to_xml` and not `table_to_xml`, which takes a table's name as a
+string and returns its contents, denied table or not.
+
+Two changes. The name is now read through the identifier, so quoting and
+qualifying change nothing. And whole families are refused by prefix
+(`pg_*`, `lo_*`, `dblink*`, anything ending `_to_xml`), with three
+harmless exceptions (`pg_typeof`, `pg_size_pretty`, `pg_column_size`). A
+list of names is a promise to keep up with Postgres; a prefix isn't.
+
+Table lists changed too. A deny entry written `public.secret` missed a
+query for plain `secret`, and an allow entry `orders` admitted
+`evil.orders`. The two lists now err in opposite directions: deny matches
+whenever the table name does unless both sides name different schemas;
+allow matches only when the schemas agree, with a missing schema meaning
+the engine's default.
+
+#### An admin who made themselves an owner
+
+Changing a role had been locked down in Phase 0: nobody grants above
+their own rank. Invites had no such rule. An admin invited an address of
+their own as owner, registered it (there is no email verification),
+accepted, and demoted the founder. `create_invite` now applies the same
+rank rule.
+
+Three more of the same kind, all "a member can read it, so the route let
+them act on it":
+
+- **Approvals.** Any member could approve a teammate's pending write. Now
+  it is the person whose conversation it is, or an admin: the rule for
+  posting into a conversation.
+- **End-user memory.** Reading an end user's memory was for editors, but
+  any member could start a conversation *as* that end user and ask the
+  assistant what it remembered. Starting one is now for editors too.
+- **Local commands.** Any member can create an assistant and is then its
+  editor, which let them register `sh -c …` as an MCP server and have the
+  runner start it. Adding, changing and starting a local-command server
+  is now for admins and owners.
+
+#### The log that printed its own secrets
+
+The redaction processor scrubbed the event, and then the renderer
+formatted the traceback, after it. In development the console's rich
+traceback listed each frame's local variables: a DSN, a request body, a
+plaintext on its way to being sealed. In production the JSON log had the
+opposite problem: no traceback at all, just `"exc_info": true`.
+
+`format_exc_info` now runs before the scrub, so a traceback is a string
+like any other field, and the console prints it plainly without locals.
+
+Redaction itself recognised credentials only by vendor format. It now
+also recognises them by where they sit: after `password=` in a query
+string or a DSN, as the value of a `"token"` key in JSON, on an
+`Authorization:` line, between `:` and `@` in a connection URI (with an
+empty user, or a `/` in the password for database URIs). The second kind
+is tied to tight syntax on purpose. "To reset your password: see the help
+page" and "Cookie: 200g flour" reach the model intact, and
+`next_page_token` survives, because a tool result the model can't
+paginate is a broken tool.
+
+#### Outbound requests
+
+The guard's core held: no bypass to loopback, private ranges or the
+metadata address, no rebinding, redirects re-checked. What was missing:
+
+- IPv6 addresses that carry an internal IPv4 in forms the unwrapping
+  didn't know (NAT64's `64:ff9b::a9fe:a9fe` is the metadata address on a
+  host with a NAT64 gateway). A NAT64 address is now as public as the
+  IPv4 inside it, so an IPv6-only host can still reach the IPv4 internet.
+- The size cap counted bytes after decompression: a 200 KB gzip body
+  became 200 MB under a 1 MB cap. The guard now asks for an uncompressed
+  body and does not read one that is compressed anyway.
+- A page's declared `charset` was handed to Python's codec lookup, where
+  `punycode` is a valid name that takes minutes on a few megabytes, on
+  the event loop. Only real text encodings are accepted now, and the
+  decoding happens in a thread.
+- Credentials survived a redirect to another port or from https to http.
+  Another origin now gets none of the caller's headers, and a downgrade is
+  refused.
+
+#### Every route, from the other side
+
+`test_tenant_isolation.py` builds two orgs, each owning one of everything,
+and asks for every route in the OpenAPI schema as the wrong org: once
+with all the victim's ids, once with the attacker's own parent and the
+victim's child id under it. Every answer must be "not found". Because it
+reads the schema, a route added next month is covered without anyone
+remembering to, and a new kind of id in a path fails the test until it is
+taught. It found nothing: the isolation that was there, holds.
+
+#### Dependencies
+
+`pip-audit` found ten advisories in `pyjwt` 2.13, the library that checks
+every session token; it is now 2.14 or later. `npm audit` found a high
+one in a dev-only package, fixed without breaking changes. Two moderate
+ones in `vitest` need a major upgrade and are listed as open.
+
+#### What is still open
+
+Listed in full in `docs/THREAT_MODEL.md` §5. The three to know:
+
+- **The MCP runner is one trust zone.** Local-command servers share a
+  user, `/tmp` and `/proc`, so one can read another's secrets. The fix is
+  a user or container per session. Until then only admins can add
+  commands, and they should add only what they trust.
+- **Registration is open** and there is no email verification; anyone who
+  signs up can use the builder. Gate sign-up for an internet-facing
+  deployment.
+- **Members can't be removed**, only lowered to `member`.
+
+#### Verified
+
+- **Tests:**
+  - `test_security_pass.py` (51): the SQLite path rules; invite rank;
+    who decides an approval; end-user conversations; local-command
+    servers; the login decoy hash and the refresh race; the chat stream's
+    error text; redaction by position, by key and by depth; tracebacks in
+    both log formats; approval cards; the access log; security headers;
+    connection options; the CLI's environment; production start-up; the
+    runner's ceilings, environment rules and last words.
+  - `test_ssrf.py` (+25): the IPv6 forms, the allowlist, the unified
+    message, compressed bodies, redirects, page encodings, URL sources.
+  - `test_sql_guard.py` (+33): quoted and qualified names, the function
+    families, the XML dumpers, row locks, the table lists.
+  - `test_tenant_isolation.py` (5): the walk, its control (the owner can
+    reach everything it asks for), and that nothing of the victim's
+    changed.
+- **Mutation-tested:** 40 of 40. Each fix was undone in turn (the own
+  database allowed, an invite above rank, any member resolving an
+  approval, a redaction rule removed, a header dropped, and so on) and a
+  test failed every time.
+
+### 12.4 Observability (task 6.4)
+
+Until now the platform could be looked at one turn at a time: the run
+trace in the builder, and the spans in Langfuse. Nothing answered "is it
+healthy right now" or "who is about to run out of budget". This task adds
+the numbers, the graphs, the alarms, and a test that the traces cover what
+they claim to.
+
+#### `/metrics`
+
+`GET /metrics` answers in Prometheus's text format. There are two kinds of
+number on the page, and the difference matters.
+
+**Observed in the API process, as things happen**
+(`observability/metrics.py`). These are timings, held in memory:
+
+| Metric | What it times |
+| --- | --- |
+| `assistant_studio_http_requests_total`, `..._http_request_duration_seconds` | every request, by method, route and status class |
+| `..._sse_stream_duration_seconds` | how long a chat stream stayed open |
+| `..._turn_duration_seconds` | an agent turn, by how it ended |
+| `..._tool_duration_seconds` | a tool call, by tool and outcome |
+| `..._retrieval_duration_seconds` | one knowledge-base search |
+| `..._approval_wait_seconds` | how long a tool call waited for a person |
+
+They reset when the API restarts, which Prometheus expects of counters.
+
+**Read at scrape time from the database and Redis**
+(`observability/collect.py`). These are totals and states:
+
+| Metric | Source |
+| --- | --- |
+| `..._tokens_total`, `..._cost_usd_total`, `..._assistant_cost_usd_total` | the usage ledger |
+| `..._runs_total`, `..._tool_calls_total`, `..._eval_runs` | run rows |
+| `..._data_sources`, `..._chunks` | the knowledge base |
+| `..._mcp_servers`, `..._approvals_pending` | integrations |
+| `..._budget_used_ratio` | each budget, as spend over limit |
+| `..._queue_depth` | the Arq queue in Redis |
+
+Reading them instead of counting them is why they are right: the ledger is
+the same whichever process wrote to it and however many times anything
+restarted. It is also why the worker needs no metrics endpoint of its own.
+A turn that ran in the worker (an eval case) is in the ledger like any
+other.
+
+Three rules the code holds to:
+
+- **Labels are bounded.** The route label is the route's template
+  (`/api/v1/assistants/{assistant_id}`), never the address, so an id never
+  becomes a series. Anything that matched no route shares one label,
+  `unmatched`. A tool is labelled by its short name, never by its input.
+- **A scrape is cheap.** The read metrics are cached for 10 seconds, so
+  two Prometheus servers, or someone reloading the page, cost one set of
+  queries.
+- **A failed read is reported, not zeroed.** Each group of read metrics is
+  collected on its own. If one fails (Redis is down), the others still
+  appear and `assistant_studio_scrape_errors{source="queue"}` is 1. A
+  graph that silently dropped to zero would look like good news.
+
+There is no Prometheus client library. The registry is about a hundred
+lines (counters, histograms, the text format), and one fewer dependency to
+audit.
+
+**Who can read it.** The page names orgs and assistants and says what each
+spends. With `METRICS_TOKEN` set, it needs that as a bearer token. Without
+one it is open in development and answers 404 in production, so a
+deployment that forgot the token exposes nothing.
+
+#### The dashboard and the alerts
+
+`docker compose -f docker-compose.yml -f docker-compose.observability.yml
+--profile observability up -d` now also starts Prometheus (port 9090) and
+Grafana (port 3002), both bound to localhost.
+
+- **Prometheus** (`deploy/observability/prometheus.yml`) scrapes the API
+  on its published port every 15 s. The token is written to a file inside
+  the container at start, so it is not in the config, which Prometheus
+  shows in its own UI.
+- **Grafana** is provisioned with the data source and one dashboard,
+  "Assistant Studio": traffic and errors, turn and first-byte latency,
+  tools, spend by model and by assistant, budgets, the knowledge base,
+  the queue, approvals. The dashboard JSON is generated by
+  `deploy/observability/grafana/build_dashboard.py`; edit the script and
+  rerun it, do not edit the JSON.
+- **Alerts** (`deploy/observability/alerts.yml`), eleven of them:
+
+| Alert | Fires when |
+| --- | --- |
+| `ApiDown` | the scrape has failed for 2 minutes |
+| `ApiErrorRate` | 5xx answers stay above the threshold for 10 minutes |
+| `TurnsFailing` | a high share of turns end in an error for 15 minutes |
+| `BudgetNearlySpent` | a budget is at 80% or more |
+| `BudgetSpent` | a budget is at 100%: its chats are being refused |
+| `IngestionFailing` | sources keep ending in `failed` |
+| `IngestionStuck` | sources are pending and the queue isn't moving for 30 minutes |
+| `QueueBacklog` | more than 50 jobs wait for 10 minutes |
+| `McpServerDown` | an MCP server has been in `error` for 10 minutes |
+| `ApprovalsWaiting` | a tool call has waited for a person for 15 minutes |
+| `MetricsIncomplete` | a group of read metrics can't be read |
+
+No Alertmanager is wired in: where alerts go (mail, Slack, a pager) is a
+deployment choice. The rules are evaluated and visible in Prometheus
+either way.
+
+Nothing in CI starts Prometheus or Grafana, so a renamed metric would
+leave an alert that can never fire and a panel that is always empty. Two
+tests close that: every metric name an alert or a panel uses must be one
+that `/metrics` really exports.
+
+#### Traces: what is covered, and a test that says so
+
+The plan asks for spans over HTTP, the database, each agent turn, each
+tool call, and the background jobs. The first four existed. Jobs did not:
+a worker job's database spans had no parent, so an ingestion showed up as
+a few hundred unrelated statements.
+
+`otel.span(name, **attributes)` wraps each job (`job.ingest_data_source`,
+`job.summarize_conversation`, `job.eval_run`), so its statements and HTTP
+calls hang off one span that says what the work was. It does nothing when
+tracing is off.
+
+A failed job marks its span as an error **by the exception's type only**.
+The SDK's default is to attach the message and the traceback. A message
+can quote a connection string, and spans leave the process, so that
+default is switched off.
+
+`test_every_kind_of_work_leaves_a_span` runs a turn with a tool call and
+the three jobs under one collecting provider and asserts that each kind of
+span is there, that a job's database span is a child of the job, and that
+a failed job's span carries the type and nothing else.
+
+#### Verified
+
+- **Tests:** `test_metrics.py` (16): the text format; bounded labels; the
+  token rules; counting by route template; a turn's timings and spend;
+  state read from the database; a failed source reported; the queue
+  depth; the cache; approval wait; a search timed when it fails; every
+  alert and every panel naming real metrics; the scrape config.
+  `test_observability.py` (+2): trace coverage, and a job span costing
+  nothing when tracing is off.
+- **Mutation-tested:** 30 of 30 (unescaped labels, non-cumulative
+  buckets, the token check removed, the raw address as a label, each
+  timer removed, a failed source reported as fine, each collector
+  removed, job spans not emitted or leaking the message, an alert naming
+  a metric that is gone).
+- **Not run here:** the Prometheus and Grafana containers themselves.
+  Their configuration is checked against the real metric names; starting
+  them is step 12.4 of the manual test.
+
+### 12.5 Load test and tuning (task 6.5)
+
+The PRD sets two targets: 95% of first tokens within 3.5 s, and 95% of
+full answers within 12 s. Nothing had measured either under load. This
+task adds the tool that does, and fixes what it found.
+
+#### The load test
+
+`apps/api/scripts/loadtest.py` holds N conversations going at once until a
+number of messages has been answered, and reports p50, p95, p99 and the
+worst for the first token and for the whole answer, against the two
+targets. Failures are counted by kind (`busy`, `http_429`,
+`internal_error`, a dropped connection) and kept out of the timings: a
+fast refusal is not a fast answer.
+
+    python -m scripts.loadtest --register --concurrency 8 32 64 --turns 300
+
+Three things make its numbers mean something:
+
+- **The fake driver, with a turn length.** `AGENT_FAKE_DELAY_MS=2000`
+  makes each fake turn last two seconds (a quarter before the first
+  token, the rest across the answer). Turns that are over in a
+  millisecond never fill a turn slot or a connection pool, so they hide
+  exactly the problems a load test is for. It costs nothing, and it
+  measures the platform and not the model.
+- **It reads `/metrics` while it runs.** Each level reports the most turns
+  it saw running and waiting, and the most database connections in use
+  (and the typical number). The result says what was full, not only how
+  slow it was.
+- **It needs no password.** `--register` makes a throwaway account with a
+  random password that is never shown or stored. Point it at a database
+  made for the test: a few thousand test conversations don't belong in
+  the dev data.
+
+The plan named Locust. This is one file on `httpx`, which the API already
+depends on, so there is no new dependency to install or audit.
+
+New gauges for this, per API process and never cached:
+`assistant_studio_turns{state="running"|"waiting"}`,
+`assistant_studio_turn_slots`,
+`assistant_studio_db_pool_connections{state="in_use"|"idle"}` and
+`assistant_studio_db_pool_limit`.
+
+#### What it found: a chat held two database connections for its whole length
+
+The first run, on the code as it was (pool of 5 plus 10 overflow, 8 turn
+slots, 2-second turns, 200 turns per level):
+
+| Chats at once | Answered | Failed | Connections in use |
+| --- | --- | --- | --- |
+| 8 | 200 | 0 | 15 of 15 |
+| 32 | 4 | 196 | 15 of 15 |
+| 64 | 8 | 204 | 15 of 15 |
+
+Eight chats used all fifteen connections. Thirty-two brought the API
+down: requests waited 30 seconds for a connection, then failed with a 500
+or a dropped stream.
+
+The cause was not the pool's size. A SQLAlchemy session keeps its
+connection for as long as it has a transaction open, and any read opens
+one. Two sessions were left that way for the whole turn:
+
+1. **The turn's own session.** It read the conversation, the config and
+   the budgets, then waited for a turn slot (up to 30 s), then streamed
+   the answer (seconds, or minutes if a tool waits for approval), all in
+   the same open transaction.
+2. **The request's session.** It checked who was asking. FastAPI closes a
+   request's dependencies when the response ends, and for a stream that
+   is the end of the turn.
+
+So every open chat, including every chat merely *queued*, held two
+connections and did nothing with them.
+
+The fix is `chat.release(session)`: commit, which ends the transaction and
+returns the connection to the pool. The session stays usable and takes a
+connection again at its next statement. It is called in three places:
+before waiting for a slot, before the model starts answering, and in the
+route before the stream opens. Tools that need the database during a turn
+already opened their own short session.
+
+The same run after the fix, same pool:
+
+| Chats at once | Answered | Failed | p95 first token | p95 full answer | Connections, typical |
+| --- | --- | --- | --- | --- | --- |
+| 8 | 200 | 0 | 1.0 s | 2.9 s | 0 |
+| 32 | 200 | 0 | 7.6 s | 9.2 s | 0 to 4 |
+| 64 | 200 | 0 | 17.2 s | 19.0 s | 0 to 4 |
+
+Nothing fails. What is left is honest queueing: eight slots of
+two-second turns answer about 3.4 turns a second, so the 32 chats wait
+their turn. That is what `AGENT_MAX_CONCURRENCY` is for.
+
+With 32 slots and the new pool defaults (300 turns per level):
+
+| Chats at once | Turns/s | p95 first token | p95 full answer | Turns waiting, most | Connections, typical |
+| --- | --- | --- | --- | --- | --- |
+| 8 | 3.4 | 0.8 s | 2.5 s | 1 | 0 |
+| 32 | 8.0 | 2.4 s | 5.4 s | 3 | 3 |
+| 64 | 11.1 | 4.9 s (over) | 6.7 s | 32 | 3.5 |
+
+One API process on this laptop meets both targets at 32 chats at once and
+misses the first-token target at 64, where half the chats are queued.
+Past that the answer is more slots, or a second API process.
+
+Read these numbers for what they are: the platform's own overhead and its
+queueing, on one Windows laptop, with a model that always takes two
+seconds. A real model adds its own latency on top, and each real turn is a
+CLI subprocess, which the fake driver's turns are not. So
+`AGENT_MAX_CONCURRENCY` on a real deployment is bounded by memory and CPU
+per subprocess, and these runs don't measure that.
+
+#### The settings this added
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `DB_POOL_SIZE` | 10 | connections kept open, per process |
+| `DB_MAX_OVERFLOW` | 20 | more that may be opened under load |
+| `DB_POOL_TIMEOUT_S` | 10 | how long a request waits for one before failing |
+| `DB_POOL_RECYCLE_S` | 1800 | replace connections older than this |
+| `AGENT_FAKE_DELAY_MS` | 0 | a fake turn's length, for load tests |
+| `RAG_HNSW_EF_SEARCH` | 100 | the vector index's candidate list |
+| `RAG_QUERY_CACHE_SIZE` | 512 | query embeddings kept in memory; 0 is off |
+| `RAG_QUERY_CACHE_TTL_S` | 600 | how long one is kept |
+
+The pool no longer needs to match the turn slots: a chat uses a
+connection for milliseconds at a time. The timeout went from 30 s to 10 s
+so a saturated pool fails quickly and visibly. Each API and worker process
+has its own pool, and processes x (size + overflow) must stay under
+Postgres's `max_connections` (100 by default).
+
+#### The vector index returned 40 rows, whatever was asked for
+
+pgvector's HNSW index keeps a candidate list while it searches
+(`hnsw.ef_search`, default 40), and a scan can never return more rows than
+that list holds. The retrieval config allows `top_k_dense` up to 500.
+
+Measured on 42,000 chunks (one assistant with 40,000, one with 2,000):
+
+| `top_k_dense` | Rows before | Rows after |
+| --- | --- | --- |
+| 40 | 40 | 40 |
+| 100 | 40 | 100 |
+| 250 | 250 (the planner gave up on the index and sorted every row) | 250 |
+
+An assistant set to 100 candidates got 40, and nothing said so. A second
+effect makes it worse in a shared index: the `WHERE assistant_id = ...`
+filter is applied to what the index returns, so neighbours that belong to
+another assistant are dropped and the result is shorter still (98 of 100
+even with a list of 100).
+
+`PgVectorStore.query` now sets two things for its own transaction only
+(`set_config(..., true)`, which is `SET LOCAL`, so nothing leaks to the
+next user of a pooled connection):
+
+- `hnsw.ef_search` = the larger of `RAG_HNSW_EF_SEARCH` and the search's
+  own `top_k_dense`, up to pgvector's ceiling of 1000.
+- `hnsw.iterative_scan = relaxed_order`: the scan keeps going until it
+  has enough rows that pass the filter. It may return them slightly out
+  of order, so the rows are sorted again before fusion, which ranks by
+  position.
+
+Why 100 and not higher: a larger list finds more of the true nearest
+chunks and takes longer (about 2 ms at 40, 4 ms at 100, 9 ms at 400 on
+this index). The reranker reads the candidates afterwards anyway, so
+the search only needs to be wide enough that the right chunks are among
+them. The test data here was random vectors, which say nothing about
+recall on real text: measure that with an eval suite's retrieval labels
+(12.1) before changing it.
+
+The index's build parameters (`m`, `ef_construction`) are left at
+pgvector's defaults. Changing them means rebuilding the index, and there
+is no measurement yet that says they are wrong.
+
+#### A repeated question is embedded once
+
+Embedding the question is the one network call in a search (or, offline,
+the one model run). `retrieve.query_embedding` keeps the last 512 query
+vectors in memory for ten minutes. A suggested question, a retry, or the
+agent searching twice in a turn skips the call. A hit is free, so it
+records no usage; `assistant_studio_query_cache_total{result}` counts
+hits and misses.
+
+The key is the embedder's name and the text. The embedder, because a
+vector from one model means nothing to another. Not the assistant or the
+org: an embedding is a function of the text alone and holds nothing of
+anyone's data.
+
+Deliberately not cached: search *results*. They depend on the index,
+which changes whenever a source is ingested, and a stale answer from a
+knowledge base is worse than a slow one.
+
+#### Verified
+
+- **Live:** the three load runs above, against a second API process on
+  its own Postgres database (`loadtest`) and Redis database, with the
+  fake driver. The index measurements, against the same database.
+- **Tests:** `test_load_tuning.py` (19): a streaming turn and a queued
+  turn hold no connection; the waiting count comes back down when the
+  wait gives up; an open chat stream leaves nothing checked out of the
+  pool; the pool is sized from settings; the process gauges are never
+  cached; the fake turn length; the candidate list rule; the index
+  settings lasting one transaction (on Postgres); the query cache (one
+  embedding per question, per embedder, bounded, expiring, switchable
+  off); the script's percentiles, gauge reading, report and a whole run.
+- **Mutation-tested:** 28 of 28.
+- **Found by its own test:** the script's percentile was one rank too
+  high (p95 of 1..100 came out as 96). Fixed before the numbers above
+  were written down; at 200 to 300 samples the difference is one sample.
+- **Not measured:** a real model, more than one API process, and recall
+  on real embeddings.
+
+### 12.6 Deploy (task 6.6)
+
+`docker-compose.yml` is a developer's stack: Postgres on a published port
+with the password `app`, MinIO as `minioadmin`, no TLS. This task adds the
+stack for a server, and makes a badly configured one refuse to start.
+
+#### The production stack
+
+    cp deploy/production.env.example .env.production      # fill it in
+    docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+
+`docker-compose.prod.yml` stands alone. It does not extend the dev file,
+so none of the dev defaults can leak into it.
+
+| | Dev stack | Production stack |
+| --- | --- | --- |
+| Published ports | Postgres, Redis, MinIO, API, web | the proxy only (80, 443) |
+| Secrets | defaults (`app`, `minioadmin`) | every one required; `up` stops with the name of a missing one |
+| TLS | none | at the proxy |
+| Sign-up | open | by invitation |
+| Redis | no password | password, read from the environment and not the command line |
+| Datastore network | the default one | `internal`: no route out |
+| Containers | as the images ship | no capabilities, no privilege escalation, restart on failure, capped logs |
+
+Three networks keep things apart:
+
+- `edge`: the proxy, the web app, the API and worker (they need the way
+  out: the model, embeddings, URL sources), and MinIO (the proxy passes
+  citation links to it).
+- `data` (internal): Postgres, Redis, MinIO, and the API and worker that
+  use them. Nothing on it can call out, and the proxy is not on it, so
+  the proxy cannot reach the database.
+- `mcp` (internal): the runner, as before.
+
+The worker starts after the API is healthy and neither migrates nor runs
+the preflight: one container does both, so they cannot race.
+
+**The web image is built for the domain.** Next bakes `NEXT_PUBLIC_API_URL`
+into the browser bundle at build time. The production file passes it as a
+build argument (`https://<DOMAIN>`, the same origin as the pages), so
+changing `DOMAIN` means rebuilding. The dev compose file set it as a
+runtime environment variable, which did nothing; that is fixed too.
+
+#### The proxy
+
+`deploy/proxy/Caddyfile` is the sample the plan asks for. Caddy, because a
+real domain gets a certificate with no further configuration; Traefik,
+nginx or a cloud load balancer can do the same job if they do these five
+things:
+
+1. **TLS and HSTS.** HTTP redirects to HTTPS, and browsers are told to
+   come back over HTTPS for a year.
+2. **Route by path, one origin.** `/api/*`, `/healthz` and `/readyz` go to
+   the API; everything else to the web app. One origin means no CORS
+   between the pages and the API.
+3. **Do not buffer the API.** A chat answer is a stream of server-sent
+   events. A buffering proxy turns it into a long silence and then the
+   whole answer at once (`flush_interval -1`, and 15-minute timeouts,
+   because a turn can wait for someone to approve a tool call).
+4. **Never publish `/metrics`.** It answers 404 at the proxy whatever the
+   API's token setting is.
+5. **Pass citation links to MinIO untouched.** The API signs a URL for
+   the public host and MinIO checks the signature against the `Host`
+   header it receives. Only `GET` and `HEAD`, only the one bucket.
+
+The API is told there is one proxy in front (`TRUSTED_PROXY_HOPS=1`), so
+rate limits and the audit log see the visitor's address and not the
+proxy's.
+
+#### Boot validation: the preflight
+
+The API already refused to start in production on a placeholder
+`JWT_SECRET`, a missing `APP_KEK` or model key, the default MinIO secret,
+and two MCP settings (`config.validate_production_secrets`). It did so as
+a traceback from an import.
+
+`python -m app.preflight` runs first in the container's entrypoint and
+says the same things in lines an operator can read:
+
+    [preflight] FAIL  settings: JWT_SECRET must be set to a strong value (>= 32 chars)
+    [preflight] FAIL  settings: S3_SECRET_KEY must be changed from its default
+    [preflight] cannot start: fix the FAIL lines above
+
+It adds what only makes sense once, at the start:
+
+- **The key is tried against what is stored.** If `APP_KEK` is not the
+  key the stored credentials were sealed with (a restore onto a new
+  server, a regenerated `.env`), every database connection and MCP
+  credential fails, but only when someone uses one. The preflight opens
+  one stored secret and fails the start if it cannot. Run against this
+  project's dev database with a different key, it said exactly that.
+- **Reachability**, with a verdict: no database or no agent CLI is fatal;
+  no Redis or object storage is a warning (the server runs degraded, as
+  `/readyz` also reports).
+- **Warnings for settings that are valid and probably not meant** in
+  production: open sign-up, a localhost address in `APP_BASE_URL` or
+  `CORS_ORIGINS`, SQLite, no embeddings key without `RAG_OFFLINE=1`, no
+  metrics token, and `TRUSTED_PROXY_HOPS=0`.
+
+It never prints a value. A malformed `APP_KEK` is reported by name, and a
+driver's error by its type, because a connection error can quote the
+connection string.
+
+#### Sign-up by invitation
+
+The threat model (12.3) left one item for a deployment to decide: anyone
+who could reach the server could create an account, and every account
+runs on the server's model key.
+
+`REGISTRATION=invite` closes it. An account can then be created by:
+
+- the **first** person, on a new install (someone has to be first), and
+- anyone holding a **live invite link for their own address**.
+
+The invite's token is required, not only an invited address: whoever
+merely knows that `ana@example.com` was invited must not be able to take
+that account before Ana does. A wrong, used or expired token gets the same
+refusal as none.
+
+In the web app nothing changes for an invited person: the invite page
+already sends them to sign-up with `?next=/invites/<token>`, and the
+sign-up form now sends that token along. The dev default stays `open`; the
+production compose file defaults to `invite`.
+
+#### Two things this found on the way
+
+- **The entrypoint had Windows line endings.** Scripts that patched files
+  in earlier tasks rewrote them with CRLF. For Python that is harmless;
+  for `entrypoint-api.sh` it means `sh` looks for a program called `sh`
+  plus a carriage return, and the container never starts. 221 files were
+  put back to LF (the repo's `.editorconfig` says LF), the image now
+  strips carriage returns from the entrypoint whatever a checkout hands
+  it, and a test fails if one comes back.
+- **`NEXT_PUBLIC_API_URL` on the running web container did nothing**, as
+  above.
+
+#### Verified
+
+- **Tests:** `test_deploy.py` (26): the preflight's warnings, verdicts,
+  timeout, and what it must not print; the key tried against a stored
+  secret; the entrypoint's order and line endings; sign-up by invitation
+  (first account, no invite, another person's invite, a made-up token, a
+  used one, an expired one, the real one); and the production files: only
+  the proxy published, no secret with a default, the datastores off the
+  internet, the API started as production behind one proxy, containers
+  locked down, the env example listing every required value with none
+  filled in, and the proxy's five jobs. Web: `inviteTokenFrom` (9 cases).
+- **Run here:** `docker compose config` accepts the production file with
+  values and names the missing one without; the preflight against the dev
+  database in production mode, with placeholder secrets, a malformed key,
+  and a wrong key.
+- **Not run here:** the production stack itself. Building the API image
+  re-downloads its dependencies, and the Caddy image is not on this
+  machine; pulling it needs your go-ahead. So the Caddyfile has been read
+  and checked by a test, and not yet by Caddy. `MANUAL_TESTING.md` §12.6
+  is the procedure; step 12.6.2 validates the Caddyfile in one command.
+
+### 12.7 Backups, runbooks, guides and samples (task 6.7)
+
+Four things an operator or a new builder needs and the code alone does not
+give them: a backup that is known to restore, a way to upgrade and to go
+back, two guides, and something finished to start from.
+
+#### Backup, verify, restore
+
+Three scripts in `deploy/backup/`, for the running stack:
+
+| Script | What it does |
+| --- | --- |
+| `backup.sh` | `pg_dump` of the database (one consistent snapshot) and a copy of every uploaded file, into `backups/<UTC time>/` |
+| `verify.sh` | restores that dump into a scratch database, checks it, drops the scratch database |
+| `restore.sh` | replaces the database and copies the files back, after you type the database's name |
+
+Four decisions in them:
+
+- **The manifest is written last.** `manifest.json` (when, schema
+  revision, file count, the dump's checksum) is only created after the
+  dump has been read back and the files copied. A run that died half-way
+  leaves a folder without one, and the other two scripts refuse a folder
+  without one. A partial backup cannot be mistaken for a backup.
+- **Verify, on a schedule.** A backup nobody has restored is a hope.
+  `verify.sh` restores into `restore_verify_<time>` next to the live
+  database, checks the schema revision, the main tables and that the
+  vector index came back, and drops it. Every statement in it that
+  changes anything names the scratch database; a test holds it to that.
+- **`APP_KEK` is not in the backup, and the script says so every time.**
+  The database holds credentials sealed with it. After a restore, the
+  API's preflight (12.6) tries the key against a restored credential and
+  refuses to start if it is the wrong one.
+- **No secret on a command line.** MinIO's credentials are read from the
+  running MinIO container into shell variables and handed to a one-off
+  container through its environment (`-e NAME`, no value).
+
+The files are copied by `mc` in a one-off container, because the MinIO
+image has no `tar` and an `exec` cannot mount a folder.
+
+**The `minio/mc` image could not be pulled.** The first run of
+`backup.sh` failed there: Docker Hub answered that the repository does
+not exist. The server image carries `mc` as well, so both compose files'
+bucket job and the backup scripts now use the server image, and the stack
+needs one MinIO image instead of two. Whether `minio/minio:latest` itself
+can still be pulled on a fresh machine was not tested here (that is a
+download); the operator guide says to set `MINIO_IMAGE` to an image you
+have pulled and tested.
+
+#### The upgrade runbook
+
+`docs/OPERATIONS.md` §7. Its shape follows from one fact: migrations run
+when the API starts and only go forward. So the way back from a bad
+upgrade is a restore, which makes "back up and verify" step 2 and not an
+appendix, and makes tagging the images (`APP_VERSION`) the thing that
+lets the old code come back.
+
+#### The two guides
+
+- **`docs/OPERATIONS.md`**, for whoever runs the server: what each
+  container is, install, the settings that matter, the one thing that
+  cannot be lost (`APP_KEK`), backups, restore onto the same or a new
+  machine, upgrade and going back, what to watch, a table of symptoms,
+  and a checklist before opening it to people.
+- **`docs/USER_GUIDE.md`**, for whoever builds assistants: samples, the
+  builder's views, **building an assistant on the canvas** (reading the
+  line diagram, adding and connecting, who may use what, problems and
+  their fixes), what can be connected, the chat and run details,
+  approvals, publishing, evals, costs, people, and a table of "it does
+  not do what I expect".
+
+The user guide's labels were checked against the components they name.
+Two things it would have promised were not there, and it now says so: the
+audit log has an API and no page, and History compares versions and has
+no one-click restore.
+
+#### Sample assistants, shipped as graphs
+
+`apps/api/app/samples/*.json`. Each file is a canvas graph plus a name, a
+description, what it needs, what to ask it, and optionally documents and
+an eval suite.
+
+| Sample | Shows | Comes with |
+| --- | --- | --- |
+| Store support desk | knowledge base, citations, rules | 4 documents, 5 test questions |
+| Team notebook | memory across conversations, two tools | 2 test questions |
+| Research desk | web search given to a research subagent, a router, two more tools | 3 test questions |
+
+**The graph is the source**, as for any assistant (ADR 0004). The config
+is compiled from it when the file loads, by the same compiler the canvas
+uses; nothing in a sample file is a config.
+
+**A sample uses only what every install has**: no database connection,
+no MCP server, no HTTP tool (it would need an allowlist), nothing with a
+credential. A test enforces it, so a sample that needs setting up cannot
+be added by accident.
+
+`POST /assistants:from-sample` makes the assistant through the same
+services as a person's clicks (so the audit log, the validator and the
+ingestion queue see an ordinary assistant): the assistant, then its
+documents, then the graph, then the eval suite. `GET /meta/samples` is
+the gallery: summaries, not graphs.
+
+In the web app the samples are a ruled list under the assistants, each
+row drawing what joins that sample's Agent as line bullets. **Use
+sample** creates the draft and opens it on the canvas.
+
+**A sample's own eval suite must pass.** That is the plan's demo ("build
+the sample assistant, run its eval suite"), and a test runs it for each
+sample on the free driver. It caught two things:
+
+- A case the offline driver could not parse (`(250 + 125) / 3`), replaced.
+- Run live, with the real local embedding model, one Store support case
+  failed: "what does express delivery cost?" found nothing. The fact was
+  a paragraph inside the *Support hours* document, and the whole document
+  was one chunk about something else. That is a real lesson about
+  knowledge bases (one topic per document), so delivery became its own
+  document and the run went to 5 of 5, recall 1.0.
+
+#### Verified
+
+- **Live, on a throwaway database** (`loadtest`, with its own API and
+  worker): signed up, saw the three samples listed, pressed Use sample,
+  landed on a 7-station canvas with no problems, watched the four
+  documents index, ran the eval suite: 5 of 5, 15 of 15 checks.
+- **Live, against the dev stack:** `backup.sh` (read-only: 117 files, the
+  count MinIO reports), `verify.sh` (restored 67 users, 387 messages, 204
+  chunks, vector index present, scratch database gone afterwards), and
+  `restore.sh` into a separate database and bucket made for the test:
+  same row counts, 117 files, and the preflight reported that the key
+  opens the restored credentials. The test database and bucket were
+  removed afterwards. The dev database and bucket were not written to.
+- **Tests:** `test_samples.py` (17) and 5 more in `test_deploy.py` for
+  the scripts (LF line endings, `sh -n`, manifest last, restore asks
+  first, verify only touches the scratch database, no secret as an
+  argument, one MinIO image). Web: `samples.test.ts` (5).
+- **Mutation-tested:** 24 of 24, after tightening two tests (the gallery's
+  order, and the restore script's checksum comparison).
+- **Not run:** `restore.sh` with the API and worker stop/start step (it
+  was run with `SKIP_SERVICES=1`, since the dev stack runs those outside
+  compose), and the scripts on Linux (they were run under Git Bash).
+
+### 12.8 The canvas: comparing versions, the keyboard, and size (task 6.8)
+
+Three things the plan asks of the canvas before release: see what changed
+between two versions as a drawing, use it without a mouse, and know it
+holds up with a hundred stations.
+
+#### Two versions as one drawing
+
+History compared versions as a list ("Added: Tool", "Disconnected: Tool
+from Agent") and a table of settings. Correct, and hard to picture.
+
+It now draws both versions as one pipeline, on the same canvas the
+builder uses, read-only:
+
+- everything in the newer version, plus the stations and lines the older
+  one had and the newer does not;
+- a changed station carries a tag with the word, **Added**, **Removed**
+  or **Changed**, and a changed one says how many of its settings did;
+- an added line sits on a green band; a removed line is dashed red (the
+  design's rule is that dashed means "won't run", which a removed line
+  is);
+- everything that did not change is grey, the way a run trace greys what
+  a run did not touch, so the change is what you see.
+
+Picking a station narrows the settings table below to that station. The
+list and the table are still there: the drawing is an addition, and they
+are what a screen reader gets, along with each station's name saying
+"added in the newer version".
+
+`compareGraphs` (`components/canvas/graph-diff.ts`) builds the drawing
+from the two graphs and the server's existing diff. Two decisions:
+
+- **The drawing is tidied**, not shown as either version was arranged.
+  The two were laid out by hand at different times, a removed station's
+  old place may now hold something else, and a comparison is about what
+  is connected. Tidying is deterministic, so the same pair always draws
+  the same way.
+- **A changed setting belongs to the station whose id its path starts
+  with**, and where one id is the start of another (`db` and
+  `db.orders`), to the longest that fits.
+
+The canvas is loaded only when a comparison is first drawn, so History
+costs the builder nothing until it is opened.
+
+**Found while looking at it:** "fit everything in view" did not. React
+Flow stops zooming out at 0.5 by default, and a pipeline wider than the
+box at that zoom had both ends cut off. The canvas now zooms out to 0.1,
+in the builder too.
+
+#### Without a mouse
+
+The canvas already had names for a screen reader, a visible focus ring,
+Enter to open a station and Delete to remove it. Four gaps were left:
+
+1. **A line could not be made without a pointer.** Drawing one means
+   dragging between two small handles. Every drawer now ends with
+   **Connections**: what the station goes to and comes from, a
+   Disconnect for each, and a "Connect to" list. The list holds exactly
+   what a drag would be allowed to reach, from the same wiring rules the
+   canvas applies (`connectionsOf`), and not what is already wired.
+2. **A station moved with the arrow keys jumped back.** React Flow moves
+   the selected station on an arrow key, and reports the end of a drag
+   but not of a key press, so the new place never reached the graph and
+   was lost at the next save. It is now saved shortly after the last key
+   press.
+3. **Tab followed the order stations were added in.** They are now in
+   the page in reading order: the main line stop by stop, then the rest
+   by column and row.
+4. **Changes were silent.** Connecting, disconnecting and removing are
+   announced ("Connected Web search to Agent."), and removing a line from
+   the canvas moves focus to the station it left instead of dropping it.
+
+After connecting or disconnecting in the drawer, focus goes to the
+Connections heading: the button that was pressed may no longer exist.
+
+#### A hundred stations
+
+Measured on a graph of 121 stations and 120 lines, every one of them with
+a validation error, in the dev build:
+
+| Picking one station | Stations re-rendered |
+| --- | --- |
+| Before | 726 (every station, several times over) |
+| After | 2 to 4 |
+
+Opening the canvas went from 726 station renders to 242. The time for a
+pick fell from about a second to about 160 ms in the same (dev, background
+window) conditions; treat the ratio as the result and not the numbers.
+
+Two causes, both needed:
+
+- **Every update handed React Flow new objects.** Each save, selection or
+  validation result rebuilt all the stations' data, so each looked
+  changed. `mergeFlowNodes` and `mergeFlowEdges` now give back the object
+  React Flow already holds when what it is drawn from is the same.
+- **One handler was a new function on every render**, and React Flow
+  passes it to every station. It is now kept, and the station and the
+  line are memoised.
+
+The pure parts (layout, building the drawing, merging) take about 2 ms
+for 150 stations, and a test holds them under a loose bound so an
+accidental quadratic fails.
+
+**Not done, on purpose:** React Flow can skip drawing what is off screen.
+That also takes those stations out of the page, so Tab and a screen
+reader could not reach them, which would undo the section above.
+
+**Not solved:** Tidy up puts every station of a kind in one column. A
+hundred data sources become one column eleven thousand pixels tall, which
+fits in view only as a thin line. It works (zoom, pan, Tab) and it is not
+a good picture.
+
+#### Verified
+
+- **Live**, on a throwaway database: published two versions of the
+  Research desk sample with a tool removed, a tool added and two stations
+  changed; History drew all of it (2 added, 2 removed, 2 changed), and
+  picking the Agent cut the settings table from 7 rows to 1.
+  Disconnected and connected Web search from the drawer (the draft graph
+  on the server changed each time, the announcement was made, focus
+  landed on the heading). Moved a station with the arrow keys and read
+  its new position back from the server. The render counts above.
+- **Tests:** `graph-diff.test.ts` (21): the comparison, its marks and
+  names on the canvas, reading order, a station's connections, and the
+  large graph (nothing re-rendered when nothing changed; only the one
+  that did). 213 web tests in all.
+- **Mutation-tested:** 28 of 28, after adding tests for which station a
+  changed setting belongs to.
+- **Limits of the live check:** the browser window was in the background,
+  where React Flow does not measure stations, so lines were not drawn
+  during the scripted checks; they were seen in screenshots. No real
+  screen reader was used: names, roles, focus and announcements were read
+  from the page.
+
+### 12.9 The changelog and the 1.0.0 release notes (task 6.9)
+
+Two documents, and the version number.
+
+- **`CHANGELOG.md`** (repo root), in the Keep a Changelog format: what
+  1.0.0 adds, grouped by what a builder or an operator does with it
+  (building, knowledge bases, databases, tools, the agent, running it),
+  then the security review's findings, the problems fixed before release,
+  and the known limitations in short. Each entry points at the section
+  of this explainer that describes it. The release date is left as
+  "Unreleased" for whoever tags it.
+- **`docs/RELEASE_NOTES_v1.0.0.md`**: what it is, the highlights, how to
+  install, and two sections written to be argued with:
+  - **Against the product's own targets**: the PRD's success metrics,
+    each with what was actually measured and how. Most of the honest
+    answers are "measured on the stand-in model" or "not measured": no
+    real-model runs were made while building, by the project's own rule
+    against spending credits without asking. The notes say so, and say
+    what to run to turn each into a number.
+  - **Known limitations**: the open items of the threat model, the parts
+    of the deployment not brought up whole, and what the product does not
+    do yet.
+- **The version**: the API reports 1.0.0 (`app/__init__.py`, which
+  `/healthz` and the OpenAPI document read, and `pyproject.toml`). The
+  npm workspace packages are private and never published, so their
+  `0.0.0` is left alone rather than rewriting the lockfile for nothing.
+
+Tagging, building and publishing images is the team's, as the plan says.
+
+#### The release check found a regression
+
+The full check that closes Phase 6 failed on its first run, on a test
+from Phase 4 that the security pass's targeted runs had not included:
+
+    Authorization: Bearer abcdef0123456789abcdef and postgres://app:s3cr3t@db/x
+    became
+    Authorization: <redacted>
+
+The header rule added in 12.3 took everything after the colon. A log line
+that went on to say something else lost all of it, and lost `Bearer`,
+which says what kind of credential was there. The rule now knows three
+shapes:
+
+| After the colon | What goes |
+| --- | --- |
+| `Bearer`, `Basic` or `Token`, then one token | the token (with its quotes, if quoted) |
+| `Digest` or `Negotiate`, then quoted parameters | everything to the end of the line |
+| no scheme | everything up to a quote (the end of the value inside JSON) |
+
+Six cases were added to `test_security_pass.py`. The lesson is the one
+the phase-end check exists for: a targeted run picks the tests that look
+related, and the test that caught this lived in `test_post_tool.py`.
+
+The same run skipped the backup scripts' `sh -n` test under PowerShell,
+where `sh` is not on the PATH; it now also looks for Git's shell.
+
+## 13. After the phases: detached turns (QOS-01)
+
+The one item deferred until every phase was done. Reported in the first
+manual test pass: switching conversations or reloading mid-answer ended
+the answer. A turn lived inside the request that streamed it, so closing
+that request (a reload, another conversation, a dropped network) ended the
+turn: recorded as aborted, its approval closed, the answer lost. Only the
+conversation on screen could be answering.
+
+### A turn runs on the server; requests only watch it
+
+`services/turns.py`:
+
+- **`start`** runs the turn as a task of its own, with its own database
+  session, and returns its id. Every event the turn produces is appended
+  to the turn's **log**.
+- **`follow`** reads a turn's log: from the start, or after the last event
+  seen, then whatever comes next, until the turn ends. Any number of
+  watchers; none is needed.
+- A conversation runs **one turn at a time**. The running turn's id is
+  kept under the conversation while it runs. Sending while one runs
+  answers 409 `turn_in_progress`.
+
+The routes:
+
+| Route | Does |
+| --- | --- |
+| `POST /conversations/{id}/messages` | starts a turn and watches it (the same stream as before, now with event ids, and an `X-Turn-Id` header) |
+| `GET /conversations/{id}/turn` | the running turn's id, or null |
+| `GET /conversations/{id}/turns/{turn_id}/events?after=` | watch a turn from the start, or after an event (also `Last-Event-ID`); finished turns stay readable for 10 minutes |
+
+The conversation detail carries `turn_id` and the list carries `running`,
+so a page knows, without another request, what to watch and which
+conversations to mark.
+
+**Stop is now the only way to end a turn.** It already worked across
+processes (`interrupts`, task 1.6). An approval waits for its decision, or
+its five-minute timeout, whether or not anyone watches.
+
+### Where the log lives
+
+A Redis stream per turn (`turn:events:<conversation>:<turn>`), so a page
+can watch a turn through any API process. The running turn is a key per
+conversation (`turn:live:<conversation>`) that expires 30 seconds after
+the turn stops saying it is alive, every 10 seconds.
+
+Three things follow from where it lives:
+
+- **The key includes the conversation.** A turn can only be read through
+  the conversation it belongs to, which the route has already checked the
+  caller may see. A turn id on its own opens nothing; the tenant walk
+  (12.3) covers the new routes.
+- **A turn belongs to the process running it.** If that process stops,
+  the turn stops with it. A shutdown stops its turns properly (each
+  recorded as aborted, and watchers told). A crash cannot, so a watcher
+  that sees no new events and finds the turn's heartbeat gone is told
+  "The server stopped while this answer was being written", instead of
+  waiting for ever.
+- **Without Redis, a turn falls back to a log in the process's memory.**
+  It still runs and can be watched, just not through another process. A
+  failure to append an event mid-turn costs watchers that event; the turn
+  carries on and is saved. Tests use the memory log; the Redis one is
+  tested against a real Redis in the integration tier.
+
+### In the chat page
+
+- Opening a conversation that is answering watches it from its first
+  event: the answer is rebuilt as it was written so far, then continues
+  live, with Stop.
+- Leaving lets go of the stream and does not stop the turn. The list keeps
+  a green lamp on every conversation that is answering, so several can
+  run at once and each can be returned to.
+- When a page watches a turn it did not start, an approval event is a
+  replay that may already be decided, so the card comes from the server's
+  list of pending approvals, not from the event.
+- The stream reader now reads each event's id (`parseSseFrame`), and only
+  the stream still being watched may reset the page when it ends: one let
+  go of must not clear what replaced it.
+
+### Found on the way
+
+- **Turns outliving their test.** A turn now runs a moment past the
+  request that started it (its last writes). A test fixture waits for each
+  test's turns, and stops any still running, before the test's tables are
+  dropped; without it a turn from one test failed inside the next.
+- **The list's lamp went out when leaving.** Checked live: leaving a
+  conversation mid-answer ran the same "the stream ended" code as a
+  finished answer and turned its lamp off. Letting go on purpose is now
+  told apart from an ending.
+
+### Verified
+
+- **Live**, against a throwaway database with a 12-second stand-in model
+  and the Redis log: sent a message and reloaded 2 seconds in: the page
+  came back watching the answer, with Stop, and the run was saved as a
+  normal finished turn, not aborted. Sent another, opened a second
+  conversation (the first kept its lamp), came back through the lamp: the
+  answer so far was there and continuing. Pressed Stop on a turn being
+  watched after a reload: recorded as stopped after 6 seconds. The turns'
+  logs were in Redis and expired on their own.
+- **Tests:** `test_turns.py` (13): a turn carries on when nobody watches;
+  sending still streams the whole answer, with event ids; a page finds the
+  running turn and watches it from the start, and after the last event
+  seen (parameter and header); one turn per conversation and many
+  conversations at once; Stop and an approval with nobody watching; a turn
+  watched only through its own conversation and not by another org; a
+  shutdown; the memory fallback; an append that fails. `test_turns_redis.py`
+  (4, integration): writing, watching, ending and expiry; a lost turn;
+  the heartbeat; keys scoped to the conversation. Web: `sse.test.ts` (4).
+- **Mutation-tested:** 24 of 24, after one test was fixed: it had patched
+  the key builder wholesale, so a key without the conversation went
+  unnoticed.
+
+## 14. The landing page
+
+Asked for after QOS-01: a landing page that looks finished, with motion
+and more detail. It follows `docs/DESIGN.md` (the line diagram) rather
+than a generic product page: no cards, no gradients, no section-entry
+animations; one moment of motion, and that moment is the product's own
+picture.
+
+### What is on it
+
+`app/page.tsx` is a server component. Three small client components sit
+in it: the hero's diagram, `Reveal` (scroll-in) and `Countdown` (the
+approval still's clock).
+
+- **The hero.** The headline, one sentence on what the product does, and
+  the two actions. Under it, `components/landing/RouteHero.tsx`: a support
+  assistant drawn as the builder draws it. Input, Guardrails, Router, the
+  Agent, Output on the main line; a document feeding a knowledge base from
+  above; a database and a tool from below. Every name in it is a real one
+  from the product.
+- **Four steps** (Draw it, Try it, Measure it, Publish it), numbered
+  because they are a sequence.
+- **What an assistant can use**, in the three family colours.
+- **Oversight:** a drawn approval card and a drawn Run details strip.
+- **Self-hosting:** the compose commands, what the preflight prints, and
+  where the data, the model and search live.
+- **Start from a sample**, and the footer with the version.
+
+### Motion
+
+**The hero loops.** The main line draws and its stops come in once, then
+a message travels it on a 9-second loop, for as long as the page is open:
+it leaves Input, passes behind Guardrails and the Router, goes behind the
+Agent's plate (whose edge lights in the marker colour while it works), a
+marker dash runs down the knowledge base line and then the database line
+while the status line says what the Agent is doing, it comes out the far
+side to Output, and the answer comes in with its citation and cost,
+holds, and clears for the next. There is no button: a loop was asked for.
+
+It is CSS only (`globals.css`, the `route-loop` keyframes). Every moving
+part shares the one 9 s cycle and the same start, so they never drift
+apart; the comment above the keyframes gives the second-by-second plan
+the percentages come from. The cycle starts and ends on "Waiting for a
+message" with no answer showing, so the wrap is seamless. The message is
+drawn before the stops and the plate, so it is always hidden at the
+moments it jumps (from Output back to Input, and across the plate).
+
+**Smooth.** Only transform, opacity and dash offsets move. The drawing is
+its own layer (`will-change: transform; contain: paint`), so the dotted
+ground behind it never repaints. An IntersectionObserver pauses every
+animation in the drawing while it is off screen (`.route-paused`).
+
+**Below the hero.** `Reveal` holds a block back (`.rv-wait`) until it
+scrolls into view, then `.rv-in` lets its parts come in along the line:
+`.rv` rises, `.rv-x` and `.rv-y` draw a line across or down, `.rv-pop`
+brings a stop in. `--t` is when a group starts and `--dt` a part's offset
+in it, so the Steps line draws and each numbered stop pops in as the line
+reaches it, then its words; the Run details route draws down and its
+steps follow it; the preflight prints line by line, with `ok` in green and
+`WARN` in amber. The hero's words rise in once on load (`.load-rise`).
+The approval still's lamp pulses (`live`) and its clock counts down.
+
+**Nothing stays hidden.** Only a block below the first screen ever
+waits, and only once JavaScript has run and motion is allowed; without
+either, the page is simply there. Reduced motion: the hero shows its
+answered state, still (the loop's base styles are that state), and no
+block waits.
+
+**Labels.** A name above a bullet sat 7px over its centre, so its second
+line ran into the 10px bullet ("Data source" through the blue dot). Names
+now sit clear of the bullet, and the Agent's plate is wide enough for its
+longest status. Checked by measuring every text and bullet in the drawing
+against every other: the only overlaps left are the stop numbers inside
+their own circles.
+
+### Found on the way
+
+- **Turns outliving their test.** A turn now runs a moment past the
+  request that started it (its last writes). A test fixture waits for each
+  test's turns, and stops any still running, before the test's tables are
+  dropped; without it a turn from one test failed inside the next.
+- **The list's lamp went out when leaving.** Checked live: leaving a
+  conversation mid-answer ran the same "the stream ended" code as a
+  finished answer and turned its lamp off. Letting go on purpose is now
+  told apart from an ending.
+
+### Verified
+
+- **Live**, against a throwaway database with a 12-second stand-in model
+  and the Redis log: sent a message and reloaded 2 seconds in: the page
+  came back watching the answer, with Stop, and the run was saved as a
+  normal finished turn, not aborted. Sent another, opened a second
+  conversation (the first kept its lamp), came back through the lamp: the
+  answer so far was there and continuing. Pressed Stop on a turn being
+  watched after a reload: recorded as stopped after 6 seconds. The turns'
+  logs were in Redis and expired on their own.
+- **Tests:** `test_turns.py` (13): a turn carries on when nobody watches;
+  sending still streams the whole answer, with event ids; a page finds the
+  running turn and watches it from the start, and after the last event
+  seen (parameter and header); one turn per conversation and many
+  conversations at once; Stop and an approval with nobody watching; a turn
+  watched only through its own conversation and not by another org; a
+  shutdown; the memory fallback; an append that fails. `test_turns_redis.py`
+  (4, integration): writing, watching, ending and expiry; a lost turn;
+  the heartbeat; keys scoped to the conversation. Web: `sse.test.ts` (4).
+- **Mutation-tested:** 24 of 24, after one test was fixed: it had patched
+  the key builder wholesale, so a key without the conversation went
+  unnoticed.
+
+## 14. The landing page
+
+Asked for after QOS-01: a landing page that looks finished, with motion
+and more detail. It follows `docs/DESIGN.md` (the line diagram) rather
+than a generic product page: no cards, no gradients, no section-entry
+animations; one moment of motion, and that moment is the product's own
+picture.
+
+### What is on it
+
+`app/page.tsx` is a server component. Three small client components sit
+in it: the hero's diagram, `Reveal` (scroll-in) and `Countdown` (the
+approval still's clock).
+
+- **The hero.** The headline, one sentence on what the product does, and
+  the two actions. Under it, `components/landing/RouteHero.tsx`: a support
+  assistant drawn as the builder draws it. Input, Guardrails, Router, the
+  Agent, Output on the main line; a document feeding a knowledge base from
+  above; a database and a tool from below. Every name in it is a real one
+  from the product.
+- **Four steps** (Draw it, Try it, Measure it, Publish it), numbered
+  because they are a sequence.
+- **What an assistant can use**, in the three family colours.
+- **Oversight:** a drawn approval card and a drawn Run details strip.
+- **Self-hosting:** the compose commands, what the preflight prints, and
+  where the data, the model and search live.
+- **Start from a sample**, and the footer with the version.
+
+### The one moment of motion
+
+The diagram plays one message through, once, in about 6 seconds: the
+main line draws, the stops come in, a marker travels to the Agent, a
+marker dash runs down the knowledge base line and then the database line
+while the Agent's status line says what it is doing, the marker leaves for
+Output, and the answer appears with its citation and cost.
+
+It is CSS only. Each element carries its delay and duration as CSS
+variables (`--d`, `--dur`, set by `at()`), and the keyframes in
+`globals.css` (`route-draw`, `route-pop`, `route-pulse`, `route-token`,
+...) read them. "Play again" changes the SVG's `key`, so React mounts it
+afresh and every animation starts over; no timers to clear.
+
+**Reduced motion.** With `prefers-reduced-motion: reduce` the page opens
+on the finished picture, and the button reads "Play the message". Pressing
+it is asking for motion, so then it plays. That needed one change in the
+global rule: it zeroes every animation with `!important` inside
+`@layer base`, which no later rule can beat (a layered `!important`
+outranks an unlayered one). The rule now skips `.route-asked` and its
+descendants, the class the diagram gets once someone presses the button.
+
+### On a phone
+
+Asked for next: the page fully usable on a phone, with signing in left to
+a computer.
+
+- **Signing in is for a computer.** Below `md` (768px, the same width
+  where the app's own layout switches to its phone bar), the landing page
+  shows no "Sign in" or "Create an account" anywhere. The hero and the
+  closing section show a note instead: "Sign in from a computer", because
+  the builder is a canvas that needs a larger screen
+  (`components/desktop-only.tsx`). The auth layout does the same for
+  `/login`, `/register` and invites, so following a link on a phone gives
+  the same answer rather than a form. This is the page, not a rule: the
+  API does not look at screen sizes, and a session started on a computer
+  still opens on a phone.
+- **A drawing for a phone.** The wide drawing on a phone was 720px wide
+  in a 343px frame, scrolled sideways. Below `md` a tall drawing replaces
+  it: the main line down the left, stops named beside it, the knowledge
+  base coming down the right into the Agent's plate and the database and
+  calculator coming up into it. The loop is the same 9 s cycle; only the
+  message's path differs (`route-token-tall`, down instead of across).
+  The hidden drawing is `display: none`, so its animations do not run.
+- **No tooltip.** The drawing's name was an SVG `<title>`, which browsers
+  show as a tooltip when the pointer rests on it. It is an `aria-label`
+  now: the same words for a screen reader, nothing on hover.
+
+### Found on the way
+
+- **The page scrolled sideways on a phone** (530px of page on a 375px
+  screen). A one-column grid with no column template sizes its column to
+  its widest content, here the longest line of a code block, so
+  `overflow-x-auto` on the `pre` never applied. The grid now says
+  `minmax(0,1fr)`. The header's two buttons were 9px too wide as well;
+  below `sm` the header keeps "Sign in" only, since the hero's "Create an
+  account" is right below it.
+- **Empty margins on wide screens** (reported after the first pass): the
+  column stopped at 1120px, so a 1920px screen showed about 400px of
+  nothing on each side. 1760px was tried next and felt too big: the
+  diagram dominated and the text looked small beside it. The column now
+  stops at 1360px, with gutters that grow with the screen, and each
+  section's heading and sentence sit side by side on `lg`, as in the
+  hero, instead of a short block on the left with nothing beside it.
+- **Two lines crossed** in the first drawing of the diagram; the tool now
+  joins the Agent at x 610 and the database at x 650.
+
+### Verified
+
+- In the browser, dark and light, at 1155px, 1536px and 375px: no
+  sideways page scroll. At 375px: the tall drawing, every text measured
+  clear of every other and of every bullet, none outside the drawing; no
+  account links; the note in the hero and at the end; `/login` shows the
+  note and no form. At 1536px: the wide drawing, all six account links,
+  no note, the login form. No `<title>` left in either drawing.
+- The loop, frozen at moments of the cycle and read back: the message
+  under Input at 0 s, on its way at 1 s, behind the plate with the plate
+  lit and "Searching the knowledge base" at 2.3 s, "Querying Orders DB"
+  at 3.2 s, leaving at 4.3 s, the answer in at 6 s, clearing at 8.25 s,
+  and the same state at 8.99 s as at 0 s. The dashes run down the
+  knowledge base line from 1.9 s and the database line from 2.85 s.
+- The reveal, on the Steps block: hidden while waiting; once in, the line
+  starts at 0.25 s and stops 1 to 4 at 0.3, 0.58, 0.86 and 1.14 s, each
+  with its words after it; at the end every part fully shown. With the
+  browser's reduced motion on, all 76 reveal parts show at once.
+- Web typecheck, lint, Prettier and the 217 web tests pass.

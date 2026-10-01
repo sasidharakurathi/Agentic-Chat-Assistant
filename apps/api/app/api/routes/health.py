@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import platform
 import shutil
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Request, Response, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +18,7 @@ from app.api.deps import SessionDep
 from app.config import settings
 from app.db.redis import get_redis
 from app.logging import get_logger
+from app.observability import collect, metrics
 from app.schemas.common import HealthResponse, ReadyResponse
 from app.services import mcp_runner
 from app.storage import probe_bucket
@@ -39,6 +41,33 @@ CRITICAL = frozenset({"database", "agent_cli"})
 async def healthz() -> HealthResponse:
     """Liveness: the process is up. No dependency checks."""
     return HealthResponse(status="ok", version=__version__)
+
+
+@router.get("/metrics", include_in_schema=False)
+async def prometheus_metrics(request: Request) -> Response:
+    """Prometheus's text format (task 6.4): what this process observed, and
+    what the database and the queue say right now.
+
+    The page names orgs and assistants and says what each spends, so it is
+    not public: with `METRICS_TOKEN` set it needs that as a bearer token.
+    Without one it is open in development and absent in production.
+    """
+    expected = settings.metrics_token
+    if expected:
+        given = request.headers.get("authorization", "")
+        if not hmac.compare_digest(given.encode(), f"Bearer {expected}".encode()):
+            return Response(
+                "metrics need a bearer token\n",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                headers={"WWW-Authenticate": "Bearer"},
+                media_type="text/plain",
+            )
+    elif settings.is_production:
+        return Response(
+            "not found\n", status_code=status.HTTP_404_NOT_FOUND, media_type="text/plain"
+        )
+    body = metrics.render(await collect.collect())
+    return Response(body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 def claude_cli_path() -> str | None:

@@ -83,3 +83,16 @@ async def enqueue_summary(conversation_id: uuid.UUID, version: int) -> bool:
         _state.pool = None
         return False
     return True
+
+
+async def enqueue_eval(run_id: uuid.UUID) -> bool:
+    """Queue an eval run (task 6.1); False if the queue is down, so the
+    caller can say so on the run instead of leaving it queued forever."""
+    try:
+        queue = await get_queue()
+        await queue.enqueue_job("run_eval_job", str(run_id), _job_id=f"eval:{run_id}")
+    except Exception as exc:
+        log.warning("enqueue_eval_failed", eval_run_id=str(run_id), error=str(exc))
+        _state.pool = None
+        return False
+    return True

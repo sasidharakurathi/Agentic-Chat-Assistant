@@ -3,7 +3,12 @@
 import { X } from "lucide-react";
 import { useEffect, useId, useRef, type ReactNode } from "react";
 
-import { NODE_LABEL, STRUCTURAL_NODE_TYPES } from "@/components/canvas/graph-sync";
+import { Connections } from "@/components/canvas/Connections";
+import {
+  NODE_LABEL,
+  STRUCTURAL_NODE_TYPES,
+  type StationConnections,
+} from "@/components/canvas/graph-sync";
 import { stationName } from "@/components/canvas/station";
 import {
   AgentPanel,
@@ -38,6 +43,9 @@ export function NodeDrawer({
   agentAssist,
   sharedSubagentModel = "",
   wiredIn = [],
+  connections = null,
+  onConnect,
+  onDisconnect,
   onPatch,
   onDelete,
   onClose,
@@ -58,6 +66,10 @@ export function NodeDrawer({
   sharedSubagentModel?: string;
   /** What is wired into the selected node, by label (task 5.10). */
   wiredIn?: string[];
+  /** The station's lines, to list and change without a pointer. */
+  connections?: StationConnections | null;
+  onConnect?: (source: string, target: string) => void;
+  onDisconnect?: (source: string, target: string) => void;
   onPatch: (patch: Record<string, unknown>) => void;
   onDelete?: (id: string) => void;
   onClose: () => void;
@@ -181,6 +193,14 @@ export function NodeDrawer({
           />
         )}
         {t === "router" && <RouterNodePanel data={node.data} models={models} onChange={onPatch} />}
+        {connections && onConnect && onDisconnect && (
+          <Connections
+            name={title}
+            connections={connections}
+            onConnect={(target) => onConnect(node.id, target)}
+            onDisconnect={onDisconnect}
+          />
+        )}
       </div>
 
       {canDelete && (

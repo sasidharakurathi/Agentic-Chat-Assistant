@@ -10,14 +10,18 @@ built — nothing before this task could answer a question against it.
 
 from __future__ import annotations
 
+import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.rag import Chunk, DataSource, Document
-from app.rag.embedders import get_embedder
+from app.observability.metrics import QUERY_CACHE, RETRIEVAL_DURATION
+from app.rag.embedders import Embedder, get_embedder
 from app.rag.rerankers import get_reranker
 from app.rag.vectorstore import PgVectorStore, ScoredChunk
 from app.schemas.assistant_config import RagRetrieval
@@ -119,9 +123,65 @@ async def retrieve(
     config: RagRetrieval,
     source_ids: list[uuid.UUID] | None = None,
 ) -> list[RetrievedChunk]:
+    started = time.perf_counter()
+    try:
+        return await _retrieve(session, assistant_id, query, config, source_ids)
+    finally:
+        # Timed whether it found anything or failed: a slow failure is still
+        # time the turn spent here.
+        RETRIEVAL_DURATION.observe(time.perf_counter() - started)
+
+
+#: (embedder, query) -> (when it was stored, the vector). Oldest first.
+_query_cache: OrderedDict[tuple[str, str], tuple[float, list[float]]] = OrderedDict()
+
+
+async def query_embedding(embedder: Embedder, query: str) -> list[float]:
+    """The query's vector, from memory when this process embedded the same
+    text recently (task 6.5).
+
+    Embedding the question is the one network call (or, offline, the one
+    model run) in a search, and people ask the same things: a suggested
+    question, a retry, the agent searching twice in a turn. A hit is free,
+    so it records no usage.
+
+    Keyed by the embedder as well as the text: a vector from one model
+    means nothing to another. Not keyed by assistant or org: an embedding
+    is a function of the text alone, and holds nothing of anyone's data.
+    Per process, bounded, and short-lived.
+    """
+    size = settings.rag_query_cache_size
+    if size <= 0:
+        return await embedder.embed_query(query)
+    key = (embedder.name, " ".join(query.split()))
+    now = time.monotonic()
+    hit = _query_cache.get(key)
+    if hit is not None and now - hit[0] < settings.rag_query_cache_ttl_s:
+        _query_cache.move_to_end(key)
+        QUERY_CACHE.inc("hit")
+        return hit[1]
+    QUERY_CACHE.inc("miss")
+    vector = await embedder.embed_query(query)
+    _query_cache[key] = (now, vector)
+    _query_cache.move_to_end(key)
+    while len(_query_cache) > size:
+        _query_cache.popitem(last=False)
+    return vector
+
+
+def clear_query_cache() -> None:
+    _query_cache.clear()
+
+
+async def _retrieve(
+    session: AsyncSession,
+    assistant_id: uuid.UUID,
+    query: str,
+    config: RagRetrieval,
+    source_ids: list[uuid.UUID] | None,
+) -> list[RetrievedChunk]:
     store = PgVectorStore()
-    embedder = get_embedder()
-    query_vector = await embedder.embed_query(query)
+    query_vector = await query_embedding(get_embedder(), query)
 
     dense = await store.query(
         session,

@@ -29,11 +29,15 @@ from pydantic import BaseModel, ConfigDict, Field
 class SandboxLimits(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    memory_mb: int = Field(default=1024, ge=64, le=8192)
+    # The ceilings sit under what the runner's container is given in
+    # docker-compose.yml (2 GB, 512 processes, a 512 MB /tmp): one server
+    # asking for the maximum must not be able to take the runner, and every
+    # other org's servers, down with it (task 6.3).
+    memory_mb: int = Field(default=1024, ge=64, le=1536)
     cpu_seconds: int = Field(default=600, ge=5, le=7200)
-    max_processes: int = Field(default=128, ge=4, le=1024)
+    max_processes: int = Field(default=128, ge=4, le=256)
     max_open_files: int = Field(default=256, ge=16, le=4096)
-    max_file_mb: int = Field(default=64, ge=1, le=1024)
+    max_file_mb: int = Field(default=64, ge=1, le=256)
     wall_clock_s: int = Field(default=3600, ge=10, le=86_400)
     idle_timeout_s: int = Field(default=600, ge=10, le=3600)
 

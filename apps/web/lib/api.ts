@@ -193,6 +193,7 @@ export type GraphFix = S["GraphFix"];
 export type ValidationResult = S["ValidationResult"];
 
 export type Assistant = S["AssistantSummary"];
+export type SampleSummary = S["SampleSummary"];
 export type AssistantDetail = Omit<S["AssistantDetail"], "draft_graph" | "draft_config"> & {
   draft_graph: Graph;
   draft_config: AssistantConfig;
@@ -201,6 +202,23 @@ export type AssistantVersion = S["VersionSummary"];
 export type EffortLevel = S["ModelSpec-Output"]["effort"];
 export type DiffEntry = S["DiffEntry"];
 export type VersionDiff = S["VersionDiff"];
+
+// Evals (task 6.1).
+export type EvalSuite = S["EvalSuiteOut"];
+export type EvalSuiteDetail = S["EvalSuiteDetail"];
+export type EvalSuiteConfig = S["EvalSuiteConfig-Output"];
+export type EvalCase = S["EvalCaseOut"];
+export type EvalExpected = S["EvalExpected-Output"];
+export type EvalLabels = S["EvalLabels-Output"];
+/** A case as it is sent: every expectation is optional. */
+export type EvalCaseDraft = {
+  input: string;
+  expected?: Partial<EvalExpected>;
+  labels?: Partial<EvalLabels>;
+};
+export type EvalRun = S["EvalRunSummary"];
+export type EvalRunDetail = S["EvalRunDetail"];
+export type EvalCaseResult = S["EvalCaseResultOut"];
 
 export type Conversation = S["ConversationSummary"];
 /** Where a cited chunk sits inside its source document. */
@@ -273,9 +291,11 @@ void _configFits;
 // ── Endpoints ────────────────────────────────────────────────
 
 export const auth = {
-  register: (email: string, password: string, name: string) =>
+  /** `inviteToken`: from the invite link that led here, for a server where
+   *  sign-up is by invitation. */
+  register: (email: string, password: string, name: string, inviteToken?: string | null) =>
     request<TokenPair>("/api/v1/auth/register", {
-      body: { email, password, name },
+      body: { email, password, name, invite_token: inviteToken ?? null },
       auth: false,
       org: false,
     }),
@@ -346,12 +366,19 @@ export const meta = {
       real_model?: boolean;
     }>("/api/v1/meta/config-schema", { org: false }),
   graphSchema: () => request<GraphSchema>("/api/v1/meta/graph-schema", { org: false }),
+  /** The sample assistants shipped with this server. */
+  samples: () => request<SampleSummary[]>("/api/v1/meta/samples", { org: false }),
 };
 
 export const assistants = {
   list: (cursor?: string | null) => request<Page<Assistant>>(paged("/api/v1/assistants", cursor)),
   create: (name: string, description = "") =>
     request<AssistantDetail>("/api/v1/assistants", { body: { name, description } }),
+  /** A new draft from a shipped sample: its graph, documents and eval suite. */
+  fromSample: (sampleId: string, name?: string) =>
+    request<AssistantDetail>("/api/v1/assistants:from-sample", {
+      body: { sample_id: sampleId, name: name ?? null },
+    }),
   get: (id: string) => request<AssistantDetail>(`/api/v1/assistants/${id}`),
   patch: (id: string, body: Partial<Pick<Assistant, "name" | "description" | "status">>) =>
     request<AssistantDetail>(`/api/v1/assistants/${id}`, { method: "PATCH", body }),
@@ -375,9 +402,46 @@ export const assistants = {
     ),
   versions: (id: string, cursor?: string | null) =>
     request<Page<AssistantVersion>>(paged(`/api/v1/assistants/${id}/versions`, cursor)),
+  /** One published version, with its graph and config. */
+  version: (id: string, number: number) =>
+    request<AssistantVersion & { graph: Graph; config: AssistantConfig }>(
+      `/api/v1/assistants/${id}/versions/${number}`,
+    ),
   /** Config + graph differences between two published versions. */
   diff: (id: string, a: number, b: number) =>
     request<VersionDiff>(`/api/v1/assistants/${id}/versions/diff?a=${a}&b=${b}`),
+};
+
+export const evals = {
+  suites: (assistantId: string) =>
+    request<S["EvalSuitesOut"]>(`/api/v1/assistants/${assistantId}/eval-suites`),
+  createSuite: (assistantId: string, name: string) =>
+    request<EvalSuiteDetail>(`/api/v1/assistants/${assistantId}/eval-suites`, { body: { name } }),
+  suite: (suiteId: string) => request<EvalSuiteDetail>(`/api/v1/eval-suites/${suiteId}`),
+  updateSuite: (suiteId: string, body: { name?: string; config?: EvalSuiteConfig }) =>
+    request<EvalSuiteDetail>(`/api/v1/eval-suites/${suiteId}`, { method: "PATCH", body }),
+  removeSuite: (suiteId: string) =>
+    request<{ message: string }>(`/api/v1/eval-suites/${suiteId}`, { method: "DELETE" }),
+  /** Add cases, or (`replace`) swap every case for these. */
+  addCases: (suiteId: string, cases: EvalCaseDraft[], mode: "append" | "replace" = "append") =>
+    request<EvalSuiteDetail>(`/api/v1/eval-suites/${suiteId}/cases:bulk`, {
+      body: { cases, mode },
+    }),
+  updateCase: (suiteId: string, caseId: string, body: EvalCaseDraft) =>
+    request<EvalCase>(`/api/v1/eval-suites/${suiteId}/cases/${caseId}`, { method: "PUT", body }),
+  removeCase: (suiteId: string, caseId: string) =>
+    request<{ message: string }>(`/api/v1/eval-suites/${suiteId}/cases/${caseId}`, {
+      method: "DELETE",
+    }),
+  /** Queue a run on a published version; `null` runs the draft. */
+  start: (suiteId: string, versionId: string | null) =>
+    request<EvalRun>(`/api/v1/eval-suites/${suiteId}/runs`, {
+      body: { assistant_version_id: versionId },
+    }),
+  runs: (suiteId: string) => request<{ runs: EvalRun[] }>(`/api/v1/eval-suites/${suiteId}/runs`),
+  run: (runId: string) => request<EvalRunDetail>(`/api/v1/eval-runs/${runId}`),
+  cancel: (runId: string) =>
+    request<EvalRun>(`/api/v1/eval-runs/${runId}:cancel`, { method: "POST" }),
 };
 
 export const conversations = {
@@ -387,10 +451,16 @@ export const conversations = {
     request<Conversation>(`/api/v1/assistants/${assistantId}/conversations`, { body: { title } }),
   /** The conversation plus its most recent messages (not the whole history:
    *  `messages_next_cursor` pages further back via `olderMessages`). */
+  /** The conversation plus its most recent messages, and the turn running
+   *  in it (`turn_id`), if any. */
   get: (id: string) =>
-    request<Conversation & { messages: ChatMessage[]; messages_next_cursor: string | null }>(
-      `/api/v1/conversations/${id}`,
-    ),
+    request<
+      Conversation & {
+        messages: ChatMessage[];
+        messages_next_cursor: string | null;
+        turn_id?: string | null;
+      }
+    >(`/api/v1/conversations/${id}`),
   /** Runs (one per answered turn), newest first; `messageId` narrows to the
    *  run that produced one message. */
   runs: (id: string, messageId?: string) =>
@@ -407,8 +477,9 @@ export const conversations = {
   /** Archive: leaves the list and becomes read-only. A direct link still reads it. */
   archive: (id: string) =>
     request<{ message: string }>(`/api/v1/conversations/${id}`, { method: "DELETE" }),
-  /** Ask the running turn to stop. Its own stream then ends with a normal
-   *  `done`, keeping whatever text had already arrived. */
+  /** Ask the running turn to stop. Its stream then ends with a normal
+   *  `done`, keeping whatever text had already arrived. The only way to stop
+   *  one: leaving the page does not (QOS-01). */
   interrupt: (id: string) =>
     request<{ message: string }>(`/api/v1/conversations/${id}:interrupt`, { method: "POST" }),
 };
@@ -694,6 +765,46 @@ export type ChatEvent =
     }
   | { type: "done"; message_id: string; run_id: string };
 
+/** One server-sent event: its `data:` as a chat event, and its `id:` if it
+ *  has one. Null for a frame with no data (a comment, a keep-alive). */
+export function parseSseFrame(frame: string): { id: string | null; event: ChatEvent } | null {
+  let id: string | null = null;
+  let data: string | null = null;
+  for (const raw of frame.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (line.startsWith("id: ")) id = line.slice(4);
+    else if (line.startsWith("data: ")) data = (data === null ? "" : data + "\n") + line.slice(6);
+  }
+  return data === null ? null : { id, event: JSON.parse(data) as ChatEvent };
+}
+
+/** Read a turn's events off a response until it ends. */
+async function readTurn(res: Response, onEvent: (e: ChatEvent) => void): Promise<void> {
+  if (!res.ok || !res.body) {
+    const body = await res.text();
+    throw new ApiError(
+      res.status,
+      body ? JSON.parse(body) : { error: { code: "stream_failed", message: "stream failed" } },
+    );
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const frames = buf.split("\n\n");
+    buf = frames.pop() ?? "";
+    for (const frame of frames) {
+      const parsed = parseSseFrame(frame);
+      if (parsed) onEvent(parsed.event);
+    }
+  }
+}
+
+/** Send a message: starts a turn on the server and watches it. Leaving
+ *  (aborting `signal`) stops watching, not the turn (QOS-01). */
 export async function streamMessage(
   conversationId: string,
   text: string,
@@ -712,25 +823,24 @@ export async function streamMessage(
       signal,
     }),
   );
-  if (!res.ok || !res.body) {
-    const body = await res.text();
-    throw new ApiError(
-      res.status,
-      body ? JSON.parse(body) : { error: { code: "stream_failed", message: "stream failed" } },
-    );
-  }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const frames = buf.split("\n\n");
-    buf = frames.pop() ?? "";
-    for (const frame of frames) {
-      const line = frame.trim();
-      if (line.startsWith("data: ")) onEvent(JSON.parse(line.slice(6)) as ChatEvent);
-    }
-  }
+  await readTurn(res, onEvent);
+}
+
+/** Watch a turn already running (or just finished) in a conversation, from
+ *  its first event: what a page does when it opens a conversation that is
+ *  answering (QOS-01). */
+export async function watchTurn(
+  conversationId: string,
+  turnId: string,
+  onEvent: (e: ChatEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await authedFetch(
+    `${API_URL}/api/v1/conversations/${conversationId}/turns/${encodeURIComponent(turnId)}/events`,
+    (token) => ({
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) } as Record<string, string>,
+      signal,
+    }),
+  );
+  await readTurn(res, onEvent);
 }

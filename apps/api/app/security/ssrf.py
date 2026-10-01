@@ -50,8 +50,29 @@ ALLOWED_SCHEMES = frozenset({"http", "https"})
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 #: Request headers the caller may not set: the guard owns routing and framing.
 _RESERVED_HEADERS = frozenset(
-    {"host", "content-length", "transfer-encoding", "connection", "upgrade", "proxy-authorization"}
+    {
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "upgrade",
+        "proxy-authorization",
+        "accept-encoding",
+    }
 )
+#: What survives a redirect to a different origin. Anything else could be a
+#: credential under a name nobody thought to list.
+_SAFE_ACROSS_ORIGINS = frozenset(
+    {"user-agent", "accept", "accept-language", "accept-encoding", "content-type"}
+)
+#: IPv6 ranges that carry an IPv4 address in their low 32 bits, which a
+#: translator or an old stack delivers to that IPv4 host: NAT64 (well-known
+#: and local-use), IPv4-compatible, and SIIT.
+_EMBEDS_IPV4 = tuple(
+    ipaddress.ip_network(n) for n in ("64:ff9b::/96", "64:ff9b:1::/48", "::/96", "::ffff:0:0:0/96")
+)
+#: Deprecated site-local space: private by intent, "global" to `ipaddress`.
+_SITE_LOCAL = ipaddress.ip_network("fec0::/10")
 USER_AGENT = "AssistantStudio/1.0 (+outbound fetch)"
 
 
@@ -97,18 +118,29 @@ def normalize_domain(domain: str) -> str:
 def host_allowed(host: str, allowed_domains: Iterable[str]) -> bool:
     """True when there is no allowlist, or `host` is an allowed domain or a
     subdomain of one. `evil-example.com` does not match `example.com`."""
-    allowed = [normalize_domain(d) for d in allowed_domains if normalize_domain(d)]
-    if not allowed:
+    raw = list(allowed_domains)
+    if not raw:
         return True
+    # A list whose entries all come to nothing ("*.", " ") is a mistake, not
+    # "no restriction": it used to let every host through.
+    allowed = [d for d in (normalize_domain(d) for d in raw) if d]
     h = host.lower().rstrip(".")
     return any(h == d or h.endswith("." + d) for d in allowed)
 
 
 def is_public_ip(ip: IpAddress) -> bool:
     """Globally routable, including once any IPv4 hiding inside an IPv6
-    address (mapped, 6to4, Teredo) has been unwrapped."""
+    address has been unwrapped: mapped, 6to4, Teredo, and the ranges a
+    NAT64 gateway or an old stack translates (`64:ff9b::a9fe:a9fe` is the
+    cloud metadata address on a host with NAT64)."""
     if isinstance(ip, ipaddress.IPv6Address):
+        if ip in _SITE_LOCAL:
+            return False
         inner = ip.ipv4_mapped or ip.sixtofour or (ip.teredo[1] if ip.teredo else None)
+        if inner is None and any(ip in net for net in _EMBEDS_IPV4):
+            inner = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+            # The address is only as public as the IPv4 it stands for.
+            return is_public_ip(inner)
         if inner is not None and not is_public_ip(inner):
             return False
     return ip.is_global and not ip.is_multicast
@@ -118,6 +150,11 @@ async def system_resolver(host: str, port: int) -> list[str]:
     loop = asyncio.get_running_loop()
     infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     return list(dict.fromkeys(str(info[4][0]) for info in infos))
+
+
+#: The same words whether the name doesn't exist or points inside: two
+#: different answers would tell the asker which internal names resolve.
+_NOT_REACHABLE = "{host} can't be reached: it has no public address"
 
 
 async def resolve_public(host: str, port: int, resolver: Resolver = system_resolver) -> IpAddress:
@@ -139,17 +176,15 @@ async def resolve_public(host: str, port: int, resolver: Resolver = system_resol
     try:
         addrs = await resolver(host, port)
     except (OSError, UnicodeError) as exc:
-        raise SsrfBlocked(f"could not resolve {host}") from exc
+        raise SsrfBlocked(_NOT_REACHABLE.format(host=host)) from exc
     ips: list[IpAddress] = []
     for a in addrs:
         try:
             ips.append(ipaddress.ip_address(a.split("%", 1)[0]))
         except ValueError:
             continue
-    if not ips:
-        raise SsrfBlocked(f"could not resolve {host}")
-    if not all(is_public_ip(ip) for ip in ips):
-        raise SsrfBlocked(f"{host} resolves to a private or reserved address")
+    if not ips or not all(is_public_ip(ip) for ip in ips):
+        raise SsrfBlocked(_NOT_REACHABLE.format(host=host))
     return ips[0]
 
 
@@ -165,7 +200,10 @@ def _check_url(url: httpx.URL, allowed_domains: Iterable[str]) -> None:
 
 
 def _clean_headers(headers: dict[str, str] | None) -> dict[str, str]:
-    out = {"user-agent": USER_AGENT}
+    # `identity`: the size cap counts bytes as they arrive, so a body must
+    # not be able to inflate after it. A compressed 200 KB answer used to
+    # become 200 MB in memory under a 1 MB cap.
+    out = {"user-agent": USER_AGENT, "accept-encoding": "identity"}
     for k, v in (headers or {}).items():
         key = str(k).strip().lower()
         if not key or key in _RESERVED_HEADERS:
@@ -202,9 +240,17 @@ def _follow(hop: _Hop, status: int, location: str) -> _Hop:
     if status == _SEE_OTHER or (status in _MOVED and method not in ("GET", "HEAD")):
         method, content = "GET", None
     headers = hop.headers
-    if nxt.host != hop.target.host:
-        # Never carry credentials to a different host.
-        headers = {k: v for k, v in headers.items() if k not in ("authorization", "cookie")}
+    was, now = hop.target, nxt
+    if was.scheme == "https" and now.scheme != "https":
+        # What was sent encrypted is not repeated in the clear.
+        raise SsrfBlocked("the server redirected from https to http")
+    if (was.scheme, was.host, _port(was)) != (now.scheme, now.host, _port(now)):
+        # A different origin gets none of the caller's headers beyond the
+        # harmless ones, and no replayed body: an API key can be in any
+        # header, and a 307 would otherwise repeat a POST somewhere else.
+        headers = {k: v for k, v in headers.items() if k in _SAFE_ACROSS_ORIGINS}
+        if method not in ("GET", "HEAD"):
+            method, content = "GET", None
     return _Hop(nxt, method, content, headers)
 
 
@@ -286,7 +332,16 @@ async def safe_request(
             raise SsrfBlocked(f"the request failed: {type(exc).__name__}") from exc
 
 
+def is_compressed(headers: httpx.Headers | dict[str, str]) -> bool:
+    return str(headers.get("content-encoding", "")).strip().lower() not in ("", "identity")
+
+
 async def _read_capped(response: httpx.Response, max_bytes: int) -> tuple[bytes, bool]:
+    # A server that compresses anyway (we asked for `identity`) is not read
+    # at all: the client would inflate it, and the cap only sees the result.
+    # The caller is told through the `content-encoding` header it kept.
+    if is_compressed(response.headers):
+        return b"", False
     buf = bytearray()
     async for chunk in response.aiter_bytes():
         buf.extend(chunk)
@@ -301,6 +356,7 @@ __all__ = [
     "FetchResult",
     "SsrfBlocked",
     "host_allowed",
+    "is_compressed",
     "is_public_ip",
     "normalize_domain",
     "resolve_public",

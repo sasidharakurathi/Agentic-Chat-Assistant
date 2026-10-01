@@ -28,6 +28,13 @@ def get_engine() -> AsyncEngine:
     if url.startswith("sqlite"):
         # SQLite: no pooling knobs; allow use across the asyncio loop's threads.
         kwargs.pop("pool_pre_ping", None)
+    else:
+        kwargs.update(
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout_s,
+            pool_recycle=settings.db_pool_recycle_s,
+        )
     engine = create_async_engine(url, **kwargs)
     if url.startswith("sqlite"):
         # SQLite ignores foreign keys — including every ON DELETE rule —

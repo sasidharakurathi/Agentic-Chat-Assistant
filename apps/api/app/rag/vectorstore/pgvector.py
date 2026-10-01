@@ -11,11 +11,54 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.rag import Chunk, Document
 from app.rag.vectorstore.base import ChunkRecord, ScoredChunk
+
+#: pgvector's ceiling for `hnsw.ef_search`.
+MAX_EF_SEARCH = 1000
+
+
+def ef_search_for(top_k: int) -> int:
+    """The candidate list for one search: the configured size, and never
+    smaller than the number of rows asked for.
+
+    An HNSW scan returns at most `ef_search` rows. At pgvector's default of
+    40, an assistant configured with `top_k_dense: 100` got 40 candidates
+    and nothing said so (measured, task 6.5).
+    """
+    return min(MAX_EF_SEARCH, max(settings.rag_hnsw_ef_search, top_k))
+
+
+async def tune_index_scan(session: AsyncSession, top_k: int) -> None:
+    """Set the index's search parameters for this transaction only.
+
+    - `hnsw.ef_search`: see `ef_search_for`.
+    - `hnsw.iterative_scan`: the index is shared by every assistant, and
+      the `WHERE assistant_id = ...` filter is applied to what the index
+      returns. Without this, a scan that found `ef_search` neighbours, most
+      of them another assistant's, returned the few that were left. With
+      it the scan keeps going until it has `top_k` rows that pass the
+      filter. `relaxed_order` may hand them back slightly out of order, so
+      `query` sorts them again.
+
+    Postgres only; the settings belong to the pgvector extension (0.8+).
+    `set_config(..., true)` is `SET LOCAL`: it ends with the transaction and
+    never leaks to the next user of a pooled connection.
+    """
+    bind = session.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    await session.execute(
+        text(
+            "SELECT set_config('hnsw.ef_search', :ef, true), "
+            "set_config('hnsw.iterative_scan', 'relaxed_order', true)"
+        ),
+        {"ef": str(ef_search_for(top_k))},
+    )
 
 
 class PgVectorStore:
@@ -69,8 +112,9 @@ class PgVectorStore:
             stmt = stmt.join(Document, Document.id == Chunk.document_id).where(
                 Document.data_source_id.in_(source_ids)
             )
+        await tune_index_scan(session, top_k)
         rows = (await session.execute(stmt)).all()
-        return [
+        found = [
             ScoredChunk(
                 id=chunk.id,
                 document_id=chunk.document_id,
@@ -81,6 +125,10 @@ class PgVectorStore:
             )
             for chunk, dist in rows
         ]
+        # An iterative scan returns batches, each in order but not the whole:
+        # the fusion that follows ranks by position, so put them in order.
+        found.sort(key=lambda c: c.score, reverse=True)
+        return found
 
     async def query_sparse(
         self,

@@ -1,0 +1,447 @@
+{
+  "name": "regression-v1",
+  "about": "The CI regression gate's suite (task 6.2). A fixture assistant with a small knowledge base, a SQLite shop database, the calculator and no web search. Each case carries a play: what the canned model does for that question. Everything the play triggers is real, and every check rests on what the platform returned ({output}, {cite:...}), never on text the play wrote itself, except the one plain answer.",
+  "corpus": [
+    {
+      "title": "Refund window",
+      "text": "Refund requests must be submitted within 30 days of the delivery date. Once approved, the amount is returned to the original payment method and typically appears within five business days."
+    },
+    {
+      "title": "Refund conditions",
+      "text": "Items must be unused and in their original packaging to qualify for a refund. Products showing wear, missing accessories, or damage caused after delivery are not eligible."
+    },
+    {
+      "title": "Exchanges",
+      "text": "Exchanges are accepted for 60 days and may be made for any item of equal or lesser value. Exchanges do not require the original packaging, unlike refunds."
+    },
+    {
+      "title": "Store credit",
+      "text": "Store credit never expires and can be combined with other payment methods at checkout. It cannot be converted back into cash."
+    },
+    {
+      "title": "Dispatch",
+      "text": "Orders placed before noon are dispatched the same business day. Standard dispatch otherwise takes up to two business days."
+    },
+    {
+      "title": "Delivery",
+      "text": "Domestic parcels usually arrive three to five business days after dispatch. Tracking numbers are emailed as soon as the carrier scans the parcel."
+    },
+    {
+      "title": "International orders",
+      "text": "International orders may be held by customs, which can add one to three weeks. Any duties or import taxes are the recipient's responsibility."
+    },
+    {
+      "title": "Warranty length",
+      "text": "All hardware carries a two year limited warranty beginning on the date of purchase. Batteries and other consumable parts are covered for the first six months only."
+    },
+    {
+      "title": "Warranty exclusions",
+      "text": "Accidental damage, liquid ingress, and damage from unauthorised repairs are not covered by the limited warranty. Extended protection plans cover accidental damage separately."
+    },
+    {
+      "title": "Account closure",
+      "text": "You can close your account from the privacy settings page. Closure is permanent after a 14 day grace period, during which signing in restores the account."
+    },
+    {
+      "title": "Password reset",
+      "text": "Use the 'forgot password' link on the sign-in page to receive a reset email. Reset links expire after one hour for security reasons."
+    },
+    {
+      "title": "Support hours",
+      "text": "Live chat is staffed Monday to Friday, 9am to 6pm. Emails sent outside those hours are answered on the next working day."
+    }
+  ],
+  "database": [
+    "CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+    "CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER NOT NULL REFERENCES customers(id), total_cents INTEGER NOT NULL, status TEXT NOT NULL)",
+    "INSERT INTO customers (id, name) VALUES (1, 'Asha Rao'), (2, 'Gita Iyer'), (3, 'Tomas Lind')",
+    "INSERT INTO orders (id, customer_id, total_cents, status) VALUES (1, 1, 12050, 'shipped'), (2, 2, 48125, 'shipped'), (3, 3, 9990, 'open'), (4, 1, 2300, 'open')"
+  ],
+  "cases": [
+    {
+      "id": "kb_refund_window",
+      "input": "How long do I have to request a refund?",
+      "expected": {
+        "contains": [
+          "30 days"
+        ],
+        "tools": [
+          "kb_search"
+        ],
+        "cites": true
+      },
+      "labels": {
+        "relevant_sources": [
+          "Refund window"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "mcp__caps__kb_search",
+            "input": {
+              "query": "refund request deadline days delivery"
+            }
+          }
+        ],
+        "answer": "Refund requests must be submitted within 30 days of delivery {cite:Refund window}."
+      }
+    },
+    {
+      "id": "kb_store_credit",
+      "input": "Does store credit expire?",
+      "expected": {
+        "contains": [
+          "never expires"
+        ],
+        "tools": [
+          "kb_search"
+        ],
+        "cites": true
+      },
+      "labels": {
+        "relevant_sources": [
+          "Store credit"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "mcp__caps__kb_search",
+            "input": {
+              "query": "store credit expires"
+            }
+          }
+        ],
+        "answer": "No. Store credit never expires {cite:Store credit}."
+      }
+    },
+    {
+      "id": "kb_warranty",
+      "input": "How long is the hardware warranty?",
+      "expected": {
+        "contains": [
+          "two year"
+        ],
+        "tools": [
+          "kb_search"
+        ],
+        "cites": true
+      },
+      "labels": {
+        "relevant_sources": [
+          "Warranty length"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "mcp__caps__kb_search",
+            "input": {
+              "query": "hardware warranty year purchase"
+            }
+          }
+        ],
+        "answer": "Hardware carries a two year limited warranty {cite:Warranty length}."
+      }
+    },
+    {
+      "id": "kb_support_hours",
+      "input": "When is live chat staffed?",
+      "expected": {
+        "contains": [
+          "Monday to Friday"
+        ],
+        "tools": [
+          "kb_search"
+        ],
+        "cites": true
+      },
+      "labels": {
+        "relevant_sources": [
+          "Support hours"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "mcp__caps__kb_search",
+            "input": {
+              "query": "live chat staffed hours"
+            }
+          }
+        ],
+        "answer": "Live chat is staffed Monday to Friday, 9am to 6pm {cite:Support hours}."
+      }
+    },
+    {
+      "id": "kb_password",
+      "input": "How do I reset my password?",
+      "expected": {
+        "contains": [
+          "forgot password"
+        ],
+        "tools": [
+          "kb_search"
+        ],
+        "cites": true
+      },
+      "labels": {
+        "relevant_sources": [
+          "Password reset"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "mcp__caps__kb_search",
+            "input": {
+              "query": "reset password link email"
+            }
+          }
+        ],
+        "answer": "Use the 'forgot password' link on the sign-in page {cite:Password reset}."
+      }
+    },
+    {
+      "id": "kb_two_sources",
+      "input": "Can I exchange an item without its original packaging, and what about a refund?",
+      "expected": {
+        "contains": [
+          "60 days",
+          "original packaging"
+        ],
+        "tools": [
+          "kb_search"
+        ],
+        "cites": true
+      },
+      "labels": {
+        "relevant_sources": [
+          "Exchanges",
+          "Refund conditions"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "mcp__caps__kb_search",
+            "input": {
+              "query": "exchange original packaging refund"
+            }
+          }
+        ],
+        "answer": "Exchanges are accepted for 60 days without the original packaging {cite:Exchanges}. A refund needs the item unused and in its original packaging {cite:Refund conditions}."
+      }
+    },
+    {
+      "id": "kb_nothing_found",
+      "input": "What is the airspeed of an unladen swallow?",
+      "expected": {
+        "contains": [
+          "No relevant results"
+        ],
+        "not_contains": [
+          "[1]"
+        ],
+        "tools": [
+          "kb_search"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "mcp__caps__kb_search",
+            "input": {
+              "query": "airspeed unladen swallow"
+            }
+          }
+        ],
+        "answer": "{output}"
+      }
+    },
+    {
+      "id": "sql_total",
+      "input": "What is the total value of all orders, in cents?",
+      "expected": {
+        "contains": [
+          "72465"
+        ],
+        "tools": [
+          "sql_query"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "mcp__caps__sql_query",
+            "input": {
+              "connection_id": "$connection",
+              "sql": "SELECT SUM(total_cents) AS total FROM orders"
+            }
+          }
+        ],
+        "answer": "The total is: {output}"
+      }
+    },
+    {
+      "id": "sql_largest",
+      "input": "Which customer placed the largest order?",
+      "expected": {
+        "contains": [
+          "Gita Iyer"
+        ],
+        "not_contains": [
+          "Asha Rao"
+        ],
+        "tools": [
+          "sql_query"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "mcp__caps__sql_query",
+            "input": {
+              "connection_id": "$connection",
+              "sql": "SELECT c.name FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.total_cents DESC LIMIT 1"
+            }
+          }
+        ],
+        "answer": "The largest order was placed by: {output}"
+      }
+    },
+    {
+      "id": "sql_introspect",
+      "input": "Which tables does the shop database have?",
+      "expected": {
+        "contains": [
+          "customers",
+          "orders"
+        ],
+        "tools": [
+          "sql_introspect"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "mcp__caps__sql_introspect",
+            "input": {
+              "connection_id": "$connection"
+            }
+          }
+        ],
+        "answer": "The database has these tables: {output}"
+      }
+    },
+    {
+      "id": "sql_write_needs_a_person",
+      "input": "Mark every open order as cancelled.",
+      "expected": {
+        "contains": [
+          "approval",
+          "declined"
+        ],
+        "tools": [
+          "sql_query"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "mcp__caps__sql_query",
+            "input": {
+              "connection_id": "$connection",
+              "sql": "UPDATE orders SET status = 'cancelled' WHERE status = 'open'"
+            }
+          }
+        ],
+        "answer": "I couldn't change the orders. {output}"
+      }
+    },
+    {
+      "id": "sql_ddl_refused",
+      "input": "Drop the orders table.",
+      "expected": {
+        "contains": [
+          "read-only for schema changes"
+        ],
+        "tools": [
+          "sql_query"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "mcp__caps__sql_query",
+            "input": {
+              "connection_id": "$connection",
+              "sql": "DROP TABLE orders"
+            }
+          }
+        ],
+        "answer": "I couldn't drop the table. {output}"
+      }
+    },
+    {
+      "id": "calculator",
+      "input": "What is 17 * 23?",
+      "expected": {
+        "contains": [
+          "391"
+        ],
+        "tools": [
+          "calculator"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "mcp__caps__calculator",
+            "input": {
+              "expression": "17 * 23"
+            }
+          }
+        ],
+        "answer": "{output}"
+      }
+    },
+    {
+      "id": "web_search_is_off",
+      "input": "Search the web for today's headlines.",
+      "expected": {
+        "contains": [
+          "WebSearch is not enabled"
+        ],
+        "tools": [
+          "WebSearch"
+        ]
+      },
+      "play": {
+        "steps": [
+          {
+            "tool": "WebSearch",
+            "input": {
+              "query": "today's headlines"
+            }
+          }
+        ],
+        "answer": "I couldn't search the web. {output}"
+      }
+    },
+    {
+      "id": "plain_answer",
+      "input": "Say hello in one short sentence.",
+      "expected": {
+        "contains": [
+          "hello"
+        ]
+      },
+      "play": {
+        "steps": [],
+        "answer": "Hello! How can I help with your order today?"
+      }
+    }
+  ]
+}

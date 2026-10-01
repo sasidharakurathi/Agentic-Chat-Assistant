@@ -12,23 +12,30 @@ and run on the **Anthropic Agent SDK (Python)**.
 - Architecture decisions: [`docs/adr/`](docs/adr/)
 - Database access, safely: [`docs/DATABASE_ACCESS.md`](docs/DATABASE_ACCESS.md)
 - Manual testing, with test data: [`docs/MANUAL_TESTING.md`](docs/MANUAL_TESTING.md) (`.\scripts\seed-testdata.ps1` loads the data)
+- **Using it: [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)**. **Running it: [`docs/OPERATIONS.md`](docs/OPERATIONS.md)**
+- What it defends against, and what is still open: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
+- How the interface is designed: [`docs/DESIGN.md`](docs/DESIGN.md)
 
 ## Where things stand
 
-> **Phases 0–3 built** (foundations; config, graph and chat; RAG; database
-> integrations with human approval). Phases 4–6 (tools + MCP, agent depth,
-> evals and hardening) are not started. Gate status and the remaining per-task
-> gaps are tracked in [`docs/PHASE_0_3_AUDIT.md`](docs/PHASE_0_3_AUDIT.md).
+> **All six phases of the plan are built, and 1.0.0 is prepared** (not
+> yet tagged): see [`CHANGELOG.md`](CHANGELOG.md) and
+> [`docs/RELEASE_NOTES_v1.0.0.md`](docs/RELEASE_NOTES_v1.0.0.md).
+> `docs/EXPLAINER.md` walks through every task.
 > `.\scripts\check.ps1` runs everything CI runs.
 
 **Working end to end today:**
 
-- Auth, orgs, multi-tenant isolation, RBAC with rank rules, audit log, invites
-- Assistants: a visual node-graph canvas, form panels, raw config JSON and a
-  guided wizard over one `AssistantConfig`; immutable published versions with a
-  history and diff view
-- Streaming chat over SSE with Stop, run details (tokens, cost, trace id),
-  per-conversation budgets enforced mid-turn, usage ledger + org rollups
+- Auth, orgs, multi-tenant isolation, RBAC with rank rules, audit log, invites,
+  and sign-up by invitation for a server on the internet
+- Assistants: a visual node-graph canvas (drawn as a line diagram), form
+  panels, the compiled config and a guided setup over one `AssistantConfig`;
+  AI help writing a prompt or a whole pipeline; one-click fixes for wiring
+  problems; immutable published versions with a history and diff view; three
+  sample assistants to start from
+- Streaming chat over SSE with Stop, run details and a trace you can show on
+  the canvas, budgets per conversation, assistant and org, rate limits, a
+  usage ledger
 - **RAG**: files / URLs / pasted text → Arq ingestion → hybrid retrieval
   (pgvector + Postgres full-text, RRF, reranked) → cited answers with a sources
   panel
@@ -37,6 +44,16 @@ and run on the **Anthropic Agent SDK (Python)**.
   and human approval (showing the exact statement) before any write. See
   [`docs/DATABASE_ACCESS.md`](docs/DATABASE_ACCESS.md) for how to give an
   assistant database access safely.
+- **Tools and MCP**: web search, HTTP requests behind an SSRF guard, a
+  calculator and a clock; remote and local-command MCP servers, the latter in
+  a sandboxed runner, with per-tool approval
+- **Agent depth**: subagents, a router, conversation memory with summaries, a
+  memory tool, guardrails against prompt injection and data leaving
+- **Evals**: suites of test questions scored by free checks, retrieval labels
+  and a judge model; a regression gate in CI
+- **Operations**: a production compose file with TLS, a preflight that refuses
+  a bad configuration, `/metrics` with a dashboard and alerts, tested
+  backup and restore scripts, an upgrade runbook
 
 **Costs nothing to run.** `.env` pins `AGENT_DRIVER=fake` (offline deterministic chat
 driver) and `RAG_OFFLINE=1` (local `bge-m3` embeddings + local cross-encoder reranker).
@@ -53,6 +70,7 @@ apps/web        Next.js 15 frontend
 packages/shared API types generated from the OpenAPI schema
 scripts/        PowerShell dev entry points (setup, migrate, seed, dev-*, check)
 docker/         Dockerfiles + entrypoints
+deploy/         production: proxy config, env template, backup scripts, dashboards
 docs/           PRD, plan, explainer, ADRs
 ```
 

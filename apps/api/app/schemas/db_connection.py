@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.models.integration import DbConnectionStatus, DbEngine
 from app.schemas.common import ApiModel, ORMModel
+from app.security.redact import is_secret_key, strip_secrets
 
 Engine = Literal["postgres", "mysql", "sqlite", "mongodb"]
 
@@ -27,11 +28,32 @@ CREDENTIAL_OPTION_KEYS = frozenset(
 )
 
 
+def _credential_keys(value: Any, path: str = "") -> list[str]:
+    """Every key, at any depth, that names a credential or holds something
+    shaped like one. It used to look at the top-level keys of `options`
+    only: `{"auth": {"password": ...}}` and anything under `ssl` (a client
+    key, say) were stored and returned in the clear."""
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            name = f"{path}.{key}" if path else str(key)
+            if str(key).lower() in CREDENTIAL_OPTION_KEYS or is_secret_key(str(key)):
+                found.append(name)
+            else:
+                found += _credential_keys(inner, name)
+    elif isinstance(value, list):
+        for n, inner in enumerate(value):
+            found += _credential_keys(inner, f"{path}[{n}]")
+    elif isinstance(value, str) and strip_secrets(value) != value:
+        found.append(path)
+    return found
+
+
 def _refuse_credentials_in_options(options: dict[str, Any] | None) -> None:
     """`options` is shown to anyone who can view the connection. Refused rather
     than silently moved, so whoever put a secret there learns it belongs in a
     write-only field — and the error names the key, never the value."""
-    bad = sorted(k for k in (options or {}) if str(k).lower() in CREDENTIAL_OPTION_KEYS)
+    bad = sorted(_credential_keys(options or {}))
     if bad:
         raise ValueError(
             f"options may not contain {', '.join(bad)}: options are stored and shown in plain "
@@ -81,6 +103,7 @@ class DbConnectionCreate(BaseModel):
     @model_validator(mode="after")
     def _engine_needs_its_fields(self) -> DbConnectionCreate:
         _refuse_credentials_in_options(self.options)
+        _refuse_credentials_in_options(self.ssl)
         if self.connection_uri and self.engine != "mongodb":
             raise ValueError("connection_uri is only for mongodb; use host/port/username/password")
         if self.engine == "sqlite":

@@ -480,11 +480,9 @@ database:
 - [ ] **6.5.4 No remembered consent.** Send the UPDATE again. **Expect:** it
   asks again.
 - [ ] **6.5.5 Reload while waiting.** Send an UPDATE and, while the card is
-  waiting, reload the page. **Expect:** the card is gone. A turn currently
-  lives on its connection, so the reload ends it: the run is recorded as
-  **aborted**, its approval is closed, and the statement never runs.
-  (Keeping turns alive across reloads and conversation switches is planned
-  work.)
+  waiting, reload the page. **Expect:** the card is still there: the turn
+  runs on the server and waits for its decision whether or not the page
+  is open (QOS-01, §13). Deny it to leave the data as it was.
 - [ ] **6.5.6 Stop while waiting.** Send an UPDATE and click **Stop** while
   the card is waiting. **Expect:** the turn ends within a second, the card
   disappears, and the statement never runs. Send the UPDATE again.
@@ -1306,6 +1304,421 @@ Use an assistant with a database connection (the Databases tab).
   and fixing there clears it on the canvas too.
 - [ ] **11.11.7 Not everything.** Delete the Agent node. **Expect:** an
   error with no Fix button.
+
+## 12. Evals, hardening and deploy (Phase 6)
+
+### 12.1 Evals (6.1)
+
+Runs on the fake driver, which answers with the question it was asked.
+Keep the **worker** window running (`.\scripts\dev-worker.ps1`): it runs
+the suite. Use an assistant with the **calculator** tool switched on.
+
+- [ ] **12.1.1 A suite.** Builder › **Evals** › name a suite "Basics" ›
+  **Create suite**. **Expect:** it opens, with "No cases yet".
+- [ ] **12.1.2 Add cases.** **Add a case** three times:
+  - Question "hello there", must say "hello there";
+  - Question "what is a zebra", must say "giraffe";
+  - Question "calculate 2 + 3", must say "5", must use "calculator".
+
+  **Expect:** each listed with what it checks in words.
+
+- [ ] **12.1.3 Run it.** **Run 3 cases** on **The draft**. **Expect:**
+  "Waiting to start", then progress, then **Finished** with "2 of 3 (67%)
+  passed". The zebra case says **Failed**, "Doesn't say "giraffe"". Open
+  the calculator case: the answer, each check, and "Tools used".
+- [ ] **12.1.4 Not in chat.** Open **Chat** for the assistant. **Expect:**
+  none of the eval questions in the conversation list. Usage still counts
+  them.
+- [ ] **12.1.5 Compare.** Change the zebra case to say "zebra", run again,
+  then **Compare with** the first run. **Expect:** "Passed" is **Better**,
+  and the zebra case is listed as **Fixed**.
+- [ ] **12.1.6 A version.** Publish, then run against **Version 1**.
+  **Expect:** the run is labelled "Version 1".
+- [ ] **12.1.7 Import.** Save a CSV with the header
+  `input,contains,tools` and two rows, one with an empty input. **Import
+  a file**. **Expect:** one case added and a note that row 3 was skipped.
+- [ ] **12.1.8 Nothing waits for approval.** With a database that allows
+  writes wired in, add the case "sql: DELETE FROM orders" and run.
+  **Expect:** the run finishes; nothing was deleted; no approval card
+  anywhere.
+- [ ] **12.1.9 Cancel.** Start a run and press **Cancel run**. **Expect:**
+  **Cancelled**, with the cases that had finished.
+- [ ] **12.1.10 No worker.** Stop the worker and Redis, then run.
+  **Expect:** the run says the background worker couldn't be reached, and
+  you can run again once it is back.
+- [ ] **12.1.11 Read-only.** As a member who didn't create the assistant:
+  suites and results are visible; there is no Add, Import, Run or Delete.
+- [ ] **12.1.12 The judge** (costs a few cents; only if you choose to
+  switch `AGENT_DRIVER` off `fake`): run a suite with **Grade answers with
+  the judge** on. **Expect:** four scores out of 5 with reasons on each
+  case, and the judge's cost on the Usage page.
+
+### 12.2 The regression gate (6.2)
+
+Nothing to click: this is a test. From `apps/api`, with the virtual
+environment active.
+
+- [ ] **12.2.1 It passes.** Run
+  `python -m pytest tests/test_eval_gate.py -q`. **Expect:** 12 passed,
+  in a few seconds, with no network and no database server.
+- [ ] **12.2.2 It fails when something breaks.** In
+  `app/agent/caps.py`, change the calculator's result line to return
+  `result + 1`, and run it again. **Expect:** a failure naming "pass
+  rate fell to 0.9333 from a baseline of 1.0000" and the question "What
+  is 17 \* 23?" with its wrong answer. Undo the change.
+- [ ] **12.2.3 In CI.** On a pull request, the **api** job shows a step
+  **Eval regression gate** after **Pytest**.
+
+### 12.3 The security pass (6.3)
+
+Use an org with an owner, an admin and a member (**Members** › invite).
+
+- [ ] **12.3.1 The platform's own database.** Only if your `DATABASE_URL`
+  is SQLite: Databases › add a SQLite connection whose file is that
+  database. **Expect:** refused, "this server's own database".
+- [ ] **12.3.2 Invites stop at your own role.** As the admin, invite
+  someone as **Owner**. **Expect:** refused. As **Admin** or **Member**:
+  works.
+- [ ] **12.3.3 Approvals.** As the owner, ask an assistant with a writable
+  database to change something, and leave the approval card pending. As
+  the member, open that conversation. **Expect:** the member can see it is
+  waiting, and pressing Approve is refused. The admin can approve it.
+- [ ] **12.3.4 Local commands.** As the member, create an assistant and
+  add an MCP server with a **local command**. **Expect:** refused, with a
+  note that a remote (URL) server doesn't need an admin. As the admin it
+  works.
+- [ ] **12.3.5 SQL the guard refuses.** In chat with a database wired in,
+  send each of these and **expect** a refusal that names the reason:
+  - `sql: SELECT pg_catalog."pg_read_file"('/etc/passwd')`
+  - `sql: SELECT table_to_xml('orders', true, false, '')`
+  - `sql: SELECT * FROM orders FOR UPDATE`
+- [ ] **12.3.6 Logs.** With the API running in a terminal, cause an error
+  (stop Postgres and load a page). **Expect:** a traceback in the log, no
+  list of local variables under each frame, and no password in any
+  connection string.
+- [ ] **12.3.7 Headers.** In the browser's Network tab, open any API
+  response and any page. **Expect:** `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer` on both.
+- [ ] **12.3.8 The scans.** From the repo root: `npm audit` reports no
+  high or critical advisories; from `apps/api`: `python -m pip_audit`
+  reports none.
+- [ ] **12.3.9 The tests.** From `apps/api`:
+  `python -m pytest tests/test_security_pass.py tests/test_tenant_isolation.py -q`.
+  **Expect:** all pass.
+
+### 12.4 Observability (6.4)
+
+- [ ] **12.4.1 The page.** With the API running, open
+  `http://localhost:8000/metrics`. **Expect:** plain text, lines starting
+  `assistant_studio_`. (If you set `METRICS_TOKEN`, the browser gets a
+  401; use `curl -H "Authorization: Bearer <token>"`.)
+- [ ] **12.4.2 A turn shows up.** Send one chat message, wait 10 seconds,
+  reload the page. **Expect:** `assistant_studio_turn_duration_seconds_count{status="ok"}`
+  went up by one, and `assistant_studio_runs_total{status="ok"}` too.
+- [ ] **12.4.3 No ids in labels.** Search the page for the id of one of
+  your assistants. **Expect:** it appears only as `assistant_id=` on the
+  cost and budget lines, never inside a `route=` label.
+- [ ] **12.4.4 The stack.** Set `METRICS_TOKEN` in `.env` (the command to
+  generate one is in `.env.example`), restart the API, then from the repo
+  root:
+  `docker compose -f docker-compose.yml -f docker-compose.observability.yml --profile observability up -d prometheus grafana`
+  **Expect:** `http://localhost:9090/targets` shows `assistant-studio-api`
+  as **UP** within a minute.
+- [ ] **12.4.5 The dashboard.** Open `http://localhost:3002` (admin /
+  admin unless you set `GRAFANA_ADMIN_PASSWORD`). **Expect:** the
+  "Assistant Studio" dashboard opens as the home page, and after a few
+  chat messages the request, turn and spend panels have data.
+- [ ] **12.4.6 The alerts.** Open `http://localhost:9090/alerts`.
+  **Expect:** eleven rules, all inactive. Stop the API and wait about
+  three minutes. **Expect:** `ApiDown` is firing. Start the API again.
+- [ ] **12.4.7 A budget alert.** Set an org budget you have already spent
+  80% of (Budgets page). **Expect:** within about five minutes
+  `BudgetNearlySpent` is pending, then firing. Remove the budget.
+- [ ] **12.4.8 The tests.** From `apps/api`:
+  `python -m pytest tests/test_metrics.py tests/test_observability.py -q`.
+  **Expect:** all pass.
+
+### 12.5 Load test (6.5)
+
+This costs nothing: it uses the fake driver. Don't run it against the dev
+database; it makes a few hundred conversations.
+
+- [ ] **12.5.1 A database for it.** Create an empty database next to the
+  dev one and migrate it (from `apps/api`, PowerShell):
+  `docker exec assistant-studio-postgres-1 psql -U app -c "CREATE DATABASE loadtest"`
+  then
+  `$env:DATABASE_URL="postgresql+asyncpg://app:app@localhost:45432/loadtest"; python -m alembic upgrade head`
+  (If it already exists, skip the first command.)
+- [ ] **12.5.2 A second API.** In the same terminal:
+  `$env:AGENT_DRIVER="fake"; $env:RAG_OFFLINE="1"; $env:RATE_LIMIT_ENABLED="0"; $env:AGENT_FAKE_DELAY_MS="2000"; $env:API_PORT="8011"; $env:METRICS_TOKEN=""; python -m app.devserver`
+  **Expect:** `http://localhost:8011/healthz` answers.
+- [ ] **12.5.3 The run.** In another terminal, from `apps/api`:
+  `python -m scripts.loadtest --base-url http://localhost:8011 --register --concurrency 8 32 --turns 200`
+  **Expect:** two blocks, each with 200 answered and 0 failed; at
+  concurrency 8, p95 first token under 3.5 s and "typically 0" database
+  connections in use; at 32, turns waiting (8 slots) and still 0 failed.
+- [ ] **12.5.4 More slots.** Stop the second API, set
+  `$env:AGENT_MAX_CONCURRENCY="32"`, start it again and rerun 12.5.3.
+  **Expect:** at concurrency 32, more turns per second than before and
+  p95 first token within the target.
+- [ ] **12.5.5 Rate limits count.** Start the second API without
+  `RATE_LIMIT_ENABLED=0` and rerun. **Expect:** most turns fail as
+  `http_429`, listed under "failures". Stop the second API when done.
+- [ ] **12.5.6 The gauges.** On the normal API, open `/metrics` during a
+  chat. **Expect:** `assistant_studio_turns{state="running"} 1` while it
+  answers and 0 after.
+- [ ] **12.5.7 The tests.** From `apps/api`:
+  `python -m pytest tests/test_load_tuning.py tests/test_rag_vectorstore.py -m "integration or not integration" -q`.
+  **Expect:** all pass (the Postgres ones need the dev stack running).
+
+### 12.6 Deploy (6.6)
+
+The production stack runs beside the dev one (its own project name and
+volumes). It needs ports 80 and 443 free, or set `HTTP_PORT` and
+`HTTPS_PORT` in the env file. To try it without spending anything, set `AGENT_DRIVER=fake` and
+`RAG_OFFLINE=1` in the env file: answers are canned and no model is called
+(`ANTHROPIC_API_KEY` must still be non-empty; any text will do).
+
+- [ ] **12.6.1 The preflight, on the dev setup.** From `apps/api`:
+  `python -m app.preflight`. **Expect:** `ok` lines for settings,
+  database, encryption key, redis and object storage, and "ready to start".
+- [ ] **12.6.2 The Caddyfile.** From the repo root (pulls the Caddy image
+  the first time):
+  `docker run --rm -e SITE_ADDRESS=localhost -e S3_BUCKET=assistant-uploads -v "${PWD}/deploy/proxy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile`
+  **Expect:** "Valid configuration".
+- [ ] **12.6.3 Missing values stop it.** Copy
+  `deploy/production.env.example` to `.env.production`, leave it as it
+  is, and run
+  `docker compose --env-file .env.production -f docker-compose.prod.yml config --quiet`.
+  **Expect:** an error naming the first missing value (`DOMAIN`).
+- [ ] **12.6.4 Fill it in.** Set `DOMAIN=localhost` and generate every
+  REQUIRED value with the commands at the top of the file. For a free
+  trial: `AGENT_DRIVER=fake`, `RAG_OFFLINE=1`, and any text as
+  `ANTHROPIC_API_KEY`. Run the `config --quiet`
+  command again. **Expect:** no output.
+- [ ] **12.6.5 Start it.**
+  `docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build`
+  (the first build takes a while). Then
+  `docker compose -f docker-compose.prod.yml --env-file .env.production logs api`.
+  **Expect:** `[preflight]` lines ending "ready to start", with a WARN for
+  `METRICS_TOKEN` if you left it empty, then the migrations, then uvicorn.
+- [ ] **12.6.6 One way in.** `docker compose -f docker-compose.prod.yml --env-file .env.production ps`.
+  **Expect:** only `proxy` shows published ports.
+- [ ] **12.6.7 HTTPS.** Open `https://localhost`. **Expect:** a
+  certificate warning (Caddy's local CA); continue, and the sign-in page
+  loads. `http://localhost` redirects to `https://`.
+- [ ] **12.6.8 The first account, then nobody.** Create an account.
+  **Expect:** it works. Sign out and create a second one with another
+  address. **Expect:** refused: "creates accounts by invitation".
+- [ ] **12.6.9 An invite opens it.** As the first account: Members ›
+  invite an address. Open the invite link in a private window, choose
+  Create account, use that address. **Expect:** the account is created
+  and joins the org.
+- [ ] **12.6.10 Chat streams.** Create an assistant and send a message.
+  **Expect:** the answer appears word by word, not all at once.
+- [ ] **12.6.11 Metrics are not public.** Open `https://localhost/metrics`.
+  **Expect:** "Not found".
+- [ ] **12.6.12 A wrong key is caught.** Add a database connection with a
+  password (any host). Stop the stack, change `APP_KEK` in
+  `.env.production` to a new generated value, start it, and read the api
+  log. **Expect:** `[preflight] FAIL  encryption key: APP_KEK does not
+  open the stored credentials`, and the api container does not become
+  healthy. Put the old key back and start again.
+- [ ] **12.6.13 Clean up.**
+  `docker compose -f docker-compose.prod.yml --env-file .env.production down`
+  (add `-v` to delete its volumes too).
+- [ ] **12.6.14 The tests.** From `apps/api`:
+  `python -m pytest tests/test_deploy.py -q`. **Expect:** all pass.
+
+### 12.7 Samples, backups and the guides (6.7)
+
+Needs the API, the web app and the worker running (the worker indexes the
+sample's documents).
+
+- [ ] **12.7.1 The samples are listed.** Open **Assistants**. **Expect:**
+  under your assistants, "Start from a sample" with three rows: Store
+  support desk, Team notebook, Research desk, each with coloured bullets
+  for what it uses.
+- [ ] **12.7.2 Start from one.** Press **Use sample** on Store support
+  desk. **Expect:** you land on the canvas of a new draft with seven
+  stations and no Problems list.
+- [ ] **12.7.3 Its documents index.** Open **Sources**. **Expect:** four
+  documents, each reaching **Ready** within a minute.
+- [ ] **12.7.4 It answers from them.** **Chat**, and send
+  `search: how many days do I have to return an item?`. **Expect:** an
+  answer containing "30 days" with a citation, and the refund policy in
+  the sources panel.
+- [ ] **12.7.5 Its evals pass.** **Evals** › Policy answers › run against
+  the draft. **Expect:** 5 of 5 cases pass (it takes about a minute with
+  the local model).
+- [ ] **12.7.6 The other two.** Use Team notebook and send
+  `Remember: our release day is Thursday.`, then in a **new** chat
+  `Memories: what do you know?`. **Expect:** the second answer mentions
+  Thursday. Use Research desk and send `Calculate 4500 / 12`. **Expect:**
+  375, with a calculator card.
+- [ ] **12.7.7 A backup.** In Git Bash (or any `sh`), from the repo root:
+  `COMPOSE="docker compose -f docker-compose.yml" BACKUP_DIR=./backups-test sh deploy/backup/backup.sh`
+  **Expect:** `done: ... (schema <revision>, <n> files)` and a folder
+  holding `db.dump`, `objects/` and `manifest.json`.
+- [ ] **12.7.8 It restores.** Same two variables, then
+  `sh deploy/backup/verify.sh`. **Expect:** `checksum ok`, `files ok`,
+  a line of row counts that match your data, and `verified:`. Afterwards
+  `docker exec assistant-studio-postgres-1 psql -U app -lqt` shows no
+  `restore_verify_` database.
+- [ ] **12.7.9 A damaged backup is refused.** Delete `manifest.json` from
+  the backup folder and run `verify.sh` again. **Expect:** "has no
+  manifest.json: the backup did not finish". Then delete `backups-test`.
+- [ ] **12.7.10 A restore asks first.** Do **not** run this against data
+  you want. Read `deploy/backup/restore.sh`'s header; to see the prompt
+  safely, run it with a folder and answer `no`. **Expect:** "not
+  confirmed; nothing was changed".
+- [ ] **12.7.11 The guides.** Read `docs/USER_GUIDE.md` §3 with the
+  canvas open and do what it says. **Expect:** every button and view it
+  names is there under that name. Note any that is not.
+- [ ] **12.7.12 The tests.** From `apps/api`:
+  `python -m pytest tests/test_samples.py tests/test_deploy.py -q`.
+  **Expect:** all pass.
+
+### 12.8 The canvas: versions, keyboard, size (6.8)
+
+- [ ] **12.8.1 Two versions, drawn.** Publish an assistant. Remove one
+  tool, add another, change the Agent's instructions, publish again.
+  Open **History**. **Expect:** one drawing with the removed tool tagged
+  "Removed" (name struck through, dashed red line), the new one tagged
+  "Added" (line on a green band), the Agent tagged "Changed" with "1
+  setting changed", and everything else grey. The whole pipeline is in
+  view.
+- [ ] **12.8.2 Pick a station.** Click the Agent in that drawing.
+  **Expect:** "Showing the changed settings of Agent." and the settings
+  table shows only its rows. **Show all** brings the rest back.
+- [ ] **12.8.3 Nothing to edit there.** Try to drag a station in the
+  History drawing, and press Delete with one picked. **Expect:** nothing
+  moves and nothing is removed.
+- [ ] **12.8.4 Tab order.** On the Canvas, click the empty background,
+  then press Tab repeatedly. **Expect:** focus visits Input, Guardrails,
+  (Router,) Agent, Output, then the other stations left to right and top
+  to bottom, each with a visible ring.
+- [ ] **12.8.5 Connect without a mouse.** Tab to a tool, press Enter. In
+  the drawer, Tab to **Connections**. Press **Disconnect** next to Agent.
+  **Expect:** the line disappears, focus is on the "Connections" heading,
+  and the Problems list says the tool is not connected. Choose Agent
+  under **Connect to** and press **Connect**. **Expect:** the line is
+  back and the problem gone.
+- [ ] **12.8.6 Only what is allowed.** Open the Input station's drawer.
+  **Expect:** no "Connect to" list (it is already connected to the only
+  thing it may go to). Open a database's. **Expect:** the list offers the
+  Agent and any subagents, and nothing else.
+- [ ] **12.8.7 Arrow keys move and stay.** Tab to a station, Enter, press
+  the Down arrow three times, wait a second, reload the page.
+  **Expect:** the station is three grid steps lower than before.
+- [ ] **12.8.8 A screen reader** (NVDA or Narrator), if you have one:
+  Tab through the canvas. **Expect:** each station is read as its name,
+  its kind and its step ("Agent, step 4 of the pipeline"); connecting and
+  disconnecting are announced.
+- [ ] **12.8.9 Fit a large graph.** On any assistant with many stations,
+  press the fit button (bottom left). **Expect:** everything is in view,
+  however small.
+- [ ] **12.8.10 The tests.** From the repo root:
+  `npm run test -w web -- components/canvas`. **Expect:** all pass.
+
+### 12.9 Before tagging 1.0.0 (6.9)
+
+The release itself (the tag, the images, publishing) is the team's to do.
+These are the checks to make first.
+
+- [ ] **12.9.1 The full check.** `.\scripts\check.ps1`. **Expect:** "All
+  green." The numbers from the run this release was prepared with are in
+  `docs/RELEASE_NOTES_v1.0.0.md`.
+- [ ] **12.9.2 The version.** `http://localhost:8000/healthz`.
+  **Expect:** `"version": "1.0.0"`. The OpenAPI page (`/docs`) says 1.0.0
+  too.
+- [ ] **12.9.3 The notes say what is true.** Read
+  `docs/RELEASE_NOTES_v1.0.0.md`, "Against the product's own targets"
+  and "Known limitations". **Expect:** nothing you know to be different.
+  Decide whether any limitation should block the release.
+- [ ] **12.9.4 The changelog's date.** In `CHANGELOG.md`, replace
+  "Unreleased" under 1.0.0 with the date you tag.
+- [ ] **12.9.5 The production stack, once.** §12.6 end to end, with
+  `AGENT_DRIVER=fake` if you do not want to spend: it is the one part of
+  the release not yet brought up whole.
+- [ ] **12.9.6 The real model, once** (spends a little). With the real
+  key, run each sample's eval suite (§12.7.5) and note the pass rate, the
+  judge's scores and the retrieval recall in the release notes, where
+  they say "not measured".
+
+## 13. Answers that don't depend on the page (QOS-01)
+
+For a slow enough answer to try these, start the API with
+`AGENT_FAKE_DELAY_MS=12000` (each stand-in answer then takes 12 seconds).
+The worker is not needed.
+
+- [ ] **13.1 Reload mid-answer.** Send a message and reload the page two
+  seconds later. **Expect:** the answer comes back as far as it had got,
+  then continues to the end, with Stop showing while it does. Open **Run
+  details**: a normal finished run, not "aborted".
+- [ ] **13.2 Leave and come back.** Send a message and open another
+  conversation at once. **Expect:** the first one has a green lamp in the
+  list. Click it. **Expect:** the answer so far, continuing. When it ends,
+  the lamp goes out.
+- [ ] **13.3 Several at once.** Send in one conversation, open a second
+  and send there too. **Expect:** both lamps lit; both answers finish.
+- [ ] **13.4 One at a time.** In a conversation that is answering, open the
+  same conversation in a second tab and send a message there.
+  **Expect:** "An answer is still being written in this conversation."
+- [ ] **13.5 Stop after coming back.** Send, reload, press **Stop**.
+  **Expect:** the answer stops within a couple of seconds, and the run is
+  recorded as stopped.
+- [ ] **13.6 Close the tab.** Send, close the tab, wait 15 seconds, open
+  the conversation again. **Expect:** the finished answer.
+- [ ] **13.7 An approval nobody watches.** With a database allowed to
+  write (§6.5), send an UPDATE, reload while the card is waiting.
+  **Expect:** the card is back (it never went away on the server);
+  approving it runs the statement and the answer finishes.
+- [ ] **13.8 The tests.** From `apps/api`:
+  `python -m pytest tests/test_turns.py -q` and, with the dev stack up,
+  `python -m pytest tests/test_turns_redis.py -m integration -q`.
+  **Expect:** all pass.
+
+## 14. The landing page
+
+Signed out, open `http://localhost:3000/`.
+
+- [ ] **14.1 The loop.** **Expect:** the main line draws and the stops
+  come in, then a marker leaves Input, passes behind the stops into the
+  Agent (its edge lights), a dash runs down the knowledge base line and
+  then the database line (the status follows: "Searching the knowledge
+  base", "Querying Orders DB"), the marker comes out to Output and an
+  answer appears citing Refund policy.pdf. A few seconds later it clears
+  and the next message starts. No jumps, no flicker, no button.
+- [ ] **14.2 Labels.** **Expect:** no text touches a dot or a line
+  ("Data source" and "4 documents" sit clear above their dots), and
+  every status fits inside the Agent's box.
+- [ ] **14.3 Scrolling down.** Reload and scroll slowly. **Expect:** each
+  section comes in once as it reaches the screen: the steps' line draws
+  and its numbered stops pop in along it; the family bars draw; the Run
+  details route draws down; the preflight prints line by line. The
+  approval's lamp pulses and its clock counts down. Scroll back up:
+  nothing replays.
+- [ ] **14.4 Reduced motion.** Turn on reduced motion (Windows: Settings,
+  Accessibility, Visual effects, Animation effects off) and reload.
+  **Expect:** the diagram answered and still, and every section simply
+  there.
+- [ ] **14.5 Phone width.** In the browser's device toolbar at 375px wide
+  (or on a phone). **Expect:** no sideways scrolling of the page; the
+  diagram runs down the screen, readable, with the same loop; the code
+  blocks scroll inside their own frames; the steps run down the page; no
+  "Sign in" or "Create an account" anywhere, and a "Sign in from a
+  computer" note in the hero and at the end.
+- [ ] **14.6 Sign-in on a phone.** Still at 375px, open `/login`, then
+  `/register`. **Expect:** the same note, no form. Widen past 768px.
+  **Expect:** the form.
+- [ ] **14.7 No tooltip.** Rest the pointer on the diagram. **Expect:**
+  no tooltip.
+- [ ] **14.8 Light and dark.** Switch the system theme. **Expect:** both
+  read clearly, lines in the family colours on both.
+- [ ] **14.9 The links.** **Create an account** and **Sign in** (top,
+  hero and bottom), on a computer. **Expect:** the sign-up and sign-in
+  pages.
 
 ## Reporting a failure
 

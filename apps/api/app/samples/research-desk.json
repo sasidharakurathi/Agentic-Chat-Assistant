@@ -1,0 +1,293 @@
+{
+  "id": "research-desk",
+  "order": 3,
+  "name": "Research desk",
+  "description": "Looks things up on the web, hands longer digging to a research helper, and spends more effort on hard questions than on easy ones. Shows the full line: a router, a subagent and three tools.",
+  "needs": [
+    "Web search, which is switched off when the server runs offline (RAG_OFFLINE=1). The calculator and the clock work either way."
+  ],
+  "try_asking": [
+    "Calculate 1840 * 0.175 and tell me what the result would be as a percentage of 9200.",
+    "What is today's date, and how many days are left in this year?",
+    "Research: what changed in the most recent stable release of PostgreSQL?"
+  ],
+  "graph": {
+    "schema_version": 1,
+    "nodes": [
+      {
+        "id": "input",
+        "position": {
+          "x": 0.0,
+          "y": 0.0
+        },
+        "type": "input",
+        "data": {}
+      },
+      {
+        "id": "guardrail",
+        "position": {
+          "x": 260.0,
+          "y": 0.0
+        },
+        "type": "guardrail",
+        "data": {
+          "rules": [
+            "Name the source for every factual claim taken from the web.",
+            "Do not present a guess as a finding."
+          ],
+          "pii_redaction": true,
+          "injection_scan": true,
+          "refusal_fallback": true,
+          "untrusted_content_notice": true
+        }
+      },
+      {
+        "id": "memory",
+        "position": {
+          "x": 640.0,
+          "y": -96.0
+        },
+        "type": "memory",
+        "data": {
+          "persist_history": true,
+          "summarize_after_tokens": 120000,
+          "memory_tool": false,
+          "auto_title": true
+        }
+      },
+      {
+        "id": "agent",
+        "position": {
+          "x": 1040.0,
+          "y": 0.0
+        },
+        "type": "agent",
+        "data": {
+          "system_prompt": "You are a research assistant. For anything that depends on current facts, search the web and say where each claim comes from. Hand a question that needs several searches to the research helper and report what it found. Use the calculator for arithmetic instead of doing it in your head, and the clock for anything about today's date. Say plainly when sources disagree or when you could not find something.",
+          "models": {
+            "router": {
+              "model": "claude-haiku-4-5",
+              "effort": "high",
+              "thinking": {
+                "type": "adaptive"
+              },
+              "max_turns": null,
+              "max_budget_usd": null
+            },
+            "main": {
+              "model": "claude-sonnet-5",
+              "effort": "high",
+              "thinking": {
+                "type": "adaptive"
+              },
+              "max_turns": null,
+              "max_budget_usd": null
+            },
+            "subagent": {
+              "model": "claude-haiku-4-5",
+              "effort": "high",
+              "thinking": {
+                "type": "adaptive"
+              },
+              "max_turns": null,
+              "max_budget_usd": null
+            },
+            "judge": {
+              "model": "claude-opus-5",
+              "effort": "high",
+              "thinking": {
+                "type": "adaptive"
+              },
+              "max_turns": null,
+              "max_budget_usd": null
+            }
+          },
+          "approval_policy": {
+            "db_write": "require",
+            "db_ddl": "require",
+            "http_non_get": "require",
+            "mcp_default": "require",
+            "file_write": "deny",
+            "shell": "deny"
+          }
+        }
+      },
+      {
+        "id": "output",
+        "position": {
+          "x": 1320.0,
+          "y": 0.0
+        },
+        "type": "output",
+        "data": {
+          "citations": true
+        }
+      },
+      {
+        "id": "router",
+        "position": {
+          "x": 820.0,
+          "y": 0.0
+        },
+        "type": "router",
+        "data": {
+          "model": {
+            "model": "claude-haiku-4-5",
+            "effort": "high",
+            "thinking": {
+              "type": "adaptive"
+            },
+            "max_turns": null,
+            "max_budget_usd": null
+          }
+        }
+      },
+      {
+        "id": "tool:web_search",
+        "position": {
+          "x": 640.0,
+          "y": 192.0
+        },
+        "type": "tool",
+        "data": {
+          "key": "web_search",
+          "config": {
+            "max_uses": 5,
+            "allowed_domains": []
+          },
+          "approval": "auto"
+        }
+      },
+      {
+        "id": "tool:calculator",
+        "position": {
+          "x": 640.0,
+          "y": 96.0
+        },
+        "type": "tool",
+        "data": {
+          "key": "calculator",
+          "config": {},
+          "approval": "auto"
+        }
+      },
+      {
+        "id": "tool:datetime",
+        "position": {
+          "x": 640.0,
+          "y": -192.0
+        },
+        "type": "tool",
+        "data": {
+          "key": "datetime",
+          "config": {},
+          "approval": "auto"
+        }
+      },
+      {
+        "id": "sub:research",
+        "position": {
+          "x": 820.0,
+          "y": -288.0
+        },
+        "type": "subagent",
+        "data": {
+          "role": "research",
+          "model": null,
+          "max_turns": null
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": null,
+        "source": "input",
+        "target": "guardrail"
+      },
+      {
+        "id": null,
+        "source": "memory",
+        "target": "agent"
+      },
+      {
+        "id": null,
+        "source": "agent",
+        "target": "output"
+      },
+      {
+        "id": null,
+        "source": "guardrail",
+        "target": "router"
+      },
+      {
+        "id": null,
+        "source": "router",
+        "target": "agent"
+      },
+      {
+        "id": null,
+        "source": "tool:web_search",
+        "target": "agent"
+      },
+      {
+        "id": null,
+        "source": "tool:web_search",
+        "target": "sub:research"
+      },
+      {
+        "id": null,
+        "source": "tool:calculator",
+        "target": "agent"
+      },
+      {
+        "id": null,
+        "source": "tool:datetime",
+        "target": "agent"
+      },
+      {
+        "id": null,
+        "source": "sub:research",
+        "target": "agent"
+      }
+    ]
+  },
+  "documents": [],
+  "eval_suite": {
+    "name": "Arithmetic is done with the tool",
+    "cases": [
+      {
+        "input": "Calculate 17 * 23",
+        "expected": {
+          "contains": [
+            "391"
+          ],
+          "tools": [
+            "calculator"
+          ]
+        }
+      },
+      {
+        "input": "Calculate 1840 * 0.175",
+        "expected": {
+          "contains": [
+            "322"
+          ],
+          "tools": [
+            "calculator"
+          ]
+        }
+      },
+      {
+        "input": "Calculate 4500 / 12",
+        "expected": {
+          "contains": [
+            "375"
+          ],
+          "tools": [
+            "calculator"
+          ]
+        }
+      }
+    ]
+  }
+}

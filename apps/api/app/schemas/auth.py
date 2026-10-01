@@ -12,6 +12,9 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=200)
     name: str = Field(default="", max_length=200)
+    #: The token from an invite link. Needed when sign-up is by invitation
+    #: (`REGISTRATION=invite`); ignored otherwise.
+    invite_token: str | None = Field(default=None, max_length=200)
 
 
 class LoginRequest(BaseModel):

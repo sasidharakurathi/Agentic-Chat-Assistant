@@ -33,7 +33,11 @@ RUN groupadd --system app && useradd --system --gid app --home /app app
 COPY --from=builder /opt/venv /opt/venv
 COPY --chown=app:app apps/api /app/apps/api
 COPY --chown=app:app docker/entrypoint-api.sh /usr/local/bin/entrypoint-api.sh
-RUN chmod +x /usr/local/bin/entrypoint-api.sh
+# A checkout on Windows can hand this file over with CRLF line endings, and
+# `sh` then looks for a program called `sh` plus a carriage return. Strip
+# them, whatever arrived.
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint-api.sh \
+    && chmod +x /usr/local/bin/entrypoint-api.sh
 
 USER app
 WORKDIR /app/apps/api

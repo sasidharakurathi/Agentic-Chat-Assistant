@@ -53,7 +53,7 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import anyio
 import uvicorn
@@ -67,7 +67,11 @@ from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 from app.mcp.limits import SandboxLimits
-from app.security.redact import strip_secrets
+from app.security.redact import REDACTED, strip_secrets
+
+#: An environment value shorter than this is not treated as a secret to
+#: scrub from output ("1", "true", "info" would blank half of every line).
+MIN_SECRET_CHARS = 6
 
 STDERR_TAIL = 2_000
 #: How long a finished session is kept so its end can still be read.
@@ -122,8 +126,12 @@ def enforced(network: str) -> dict[str, Any]:
 
 class SessionRequest(BaseModel):
     command: str = Field(min_length=1, max_length=500)
-    args: list[str] = Field(default_factory=list, max_length=50)
-    env: dict[str, str] = Field(default_factory=dict)
+    # The same caps the API applies before it calls (`schemas/mcp_server.py`):
+    # the runner doesn't take the API's word for it.
+    args: list[Annotated[str, Field(max_length=8_000)]] = Field(default_factory=list, max_length=50)
+    env: dict[Annotated[str, Field(max_length=100)], Annotated[str, Field(max_length=8_000)]] = (
+        Field(default_factory=dict, max_length=50)
+    )
     limits: SandboxLimits = Field(default_factory=SandboxLimits)
     #: For logs only (the server's name).
     label: str = Field(default="", max_length=80)
@@ -144,6 +152,9 @@ class Session:
     ended_reason: str | None = None
     ended_at: float | None = None
     task: asyncio.Task[None] | None = None
+    #: The values of the server's own environment, to keep out of what it
+    #: says on its way down.
+    env_values: tuple[str, ...] = ()
 
     def touch(self) -> None:
         self.last_used = time.monotonic()
@@ -154,8 +165,13 @@ class Session:
             data = path.read_bytes()[-STDERR_TAIL:]
         except OSError:
             return ""
-        # Servers print what they please, credentials included.
-        return strip_secrets(data.decode("utf-8", errors="replace")).strip()
+        # Servers print what they please, credentials included. Shapes are
+        # caught by `strip_secrets`; a database password has no shape, so the
+        # values this server was started with are removed by value.
+        text = data.decode("utf-8", errors="replace")
+        for value in self.env_values:
+            text = text.replace(value, REDACTED)
+        return strip_secrets(text).strip()
 
 
 def child_environment(workdir: Path, env: dict[str, str]) -> dict[str, str]:
@@ -210,6 +226,14 @@ class Runner:
             limits=req.limits,
             workdir=workdir,
             transport=StreamableHTTPServerTransport(mcp_session_id=sid),
+            # Longest first, so a value that contains another is removed whole.
+            env_values=tuple(
+                sorted(
+                    {v for v in req.env.values() if len(v) >= MIN_SECRET_CHARS},
+                    key=len,
+                    reverse=True,
+                )
+            ),
         )
         self.sessions[sid] = session
         session.task = asyncio.create_task(self._run(session, spawn_parameters(req, workdir)))

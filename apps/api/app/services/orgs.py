@@ -170,6 +170,16 @@ async def create_invite(
     ip: str | None = None,
 ) -> tuple[Invite, str]:
     email = email.strip().lower()
+    # The same rule as a role change (task 6.3): nobody hands out a role
+    # above their own. Without it an admin invited an address of their own
+    # as owner, accepted it, and demoted the founder.
+    actor = await session.scalar(
+        select(Membership).where(Membership.org_id == org_id, Membership.user_id == actor_user_id)
+    )
+    if actor is None or role.rank > actor.role.rank:
+        raise Forbidden(
+            "You cannot invite someone to a role above your own", code="invite_role_not_allowed"
+        )
     already = await session.scalar(
         select(Membership.id)
         .join(User, User.id == Membership.user_id)

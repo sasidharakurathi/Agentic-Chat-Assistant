@@ -17,6 +17,8 @@ image has it).
 from __future__ import annotations
 
 import base64
+import contextlib
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from app.config import settings
@@ -29,6 +31,8 @@ log = get_logger(__name__)
 
 #: The instrumentation scope of the spans Langfuse receives.
 LLM_SCOPE = "assistant_studio.llm"
+#: Spans around background jobs (ingestion, eval runs, summaries).
+JOB_SCOPE = "assistant_studio.jobs"
 
 _state: dict[str, Any] = {"provider": None, "sqlalchemy": False}
 
@@ -160,6 +164,33 @@ def setup_tracing(app: FastAPI | None = None, *, service: str = "assistant-studi
     return True
 
 
+@contextlib.contextmanager
+def span(name: str, **attributes: Any) -> Iterator[None]:
+    """A span around a piece of background work (a worker job), so the
+    database and HTTP spans it causes hang off something that says what the
+    work was. Does nothing when tracing is off. An exception marks the span
+    as failed and is re-raised."""
+    provider = _state["provider"]
+    if provider is None:
+        yield
+        return
+    from opentelemetry.trace import Status, StatusCode
+
+    tracer = provider.get_tracer(JOB_SCOPE)
+    clean = {k: str(v) for k, v in attributes.items() if v is not None}
+    # The SDK would record the exception's message and traceback on the span.
+    # A message can quote a connection string or a request, and spans leave
+    # the process, so only the exception's type goes out.
+    with tracer.start_as_current_span(
+        name, attributes=clean, record_exception=False, set_status_on_exception=False
+    ) as current:
+        try:
+            yield
+        except BaseException as exc:
+            current.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            raise
+
+
 def shutdown_tracing() -> None:
     """Flush what is still batched. A worker or API that exits without this
     loses the last few seconds of spans, which are usually the interesting ones."""
@@ -170,6 +201,7 @@ def shutdown_tracing() -> None:
 
 
 __all__ = [
+    "JOB_SCOPE",
     "LLM_SCOPE",
     "langfuse_enabled",
     "langfuse_endpoint",
@@ -177,5 +209,6 @@ __all__ = [
     "otlp_traces_endpoint",
     "setup_tracing",
     "shutdown_tracing",
+    "span",
     "tracing_configured",
 ]

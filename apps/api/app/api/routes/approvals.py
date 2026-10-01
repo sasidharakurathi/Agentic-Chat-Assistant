@@ -38,8 +38,8 @@ async def resolve(
     session: SessionDep,
 ) -> ApprovalOut:
     row = await svc.get(session, approval_id)
-    # Scoped by org membership rather than by conversation ownership: an admin
-    # reviewing a teammate's pending write is the normal case for this feature.
+    # The person in the conversation decides, or an admin reviewing a
+    # teammate's pending write. Not any member who can read it.
     await svc.assert_can_decide(session, row, user_id=user.id)
     row = await svc.resolve(session, row, decision=body.decision, user_id=user.id)
     return ApprovalOut.model_validate(row)

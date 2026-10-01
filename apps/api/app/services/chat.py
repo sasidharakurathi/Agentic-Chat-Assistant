@@ -9,7 +9,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -50,6 +50,7 @@ from app.models.conversation import (
     ToolCall,
 )
 from app.models.usage import UsageEvent, UsageKind
+from app.observability import metrics
 from app.observability.turn_trace import TurnTrace
 from app.schemas.assistant_config import AssistantConfig
 from app.services import approvals as approvals_svc
@@ -106,6 +107,9 @@ async def list_conversations(
         # Archiving used to leave a conversation right here, so "delete"
         # was undone by the next reload.
         Conversation.status != ConversationStatus.archived,
+        # An eval case's turn is a conversation too (task 6.1), but not one
+        # anybody had: it is reached from its eval result.
+        Conversation.eval_run_id.is_(None),
     )
     if external_user_ref is not None:
         stmt = stmt.where(Conversation.external_user_ref == external_user_ref)
@@ -227,9 +231,35 @@ async def archive(
     await session.commit()
 
 
-async def config_for(session: AsyncSession, conv: Conversation) -> AssistantConfig:
+@dataclass(frozen=True)
+class Unattended:
+    """An eval case's turn (task 6.1): it runs against one chosen version
+    (`None` = the draft), not whatever is published now, and there is nobody
+    to ask, so anything that needs approval is declined."""
+
+    version_id: uuid.UUID | None
+
+
+async def _pinned_config(
+    session: AsyncSession, conv: Conversation, pin: Unattended
+) -> AssistantConfig:
+    if pin.version_id is not None:
+        version = await session.get(AssistantVersion, pin.version_id)
+        if version is None or version.assistant_id != conv.assistant_id:
+            raise NotFound("That version no longer exists")
+        conv.assistant_version_id = version.id
+        return AssistantConfig.model_validate(version.config)
+    assistant = await session.get(Assistant, conv.assistant_id)
+    assert assistant is not None
+    conv.assistant_version_id = None
+    return AssistantConfig.model_validate(assistant.draft_config)
+
+
+async def config_for(
+    session: AsyncSession, conv: Conversation, pin: Unattended | None = None
+) -> AssistantConfig:
     """The config this turn runs with: the assistant's current published
-    version, or its draft while nothing is published.
+    version, or its draft while nothing is published. An eval pins its own.
 
     Read at every turn. Conversations used to keep the version that was live
     when they started, so publishing a fix reached only new conversations and
@@ -238,6 +268,8 @@ async def config_for(session: AsyncSession, conv: Conversation) -> AssistantConf
     that answered it (`runs.version_number`), so a change in behaviour can be
     traced to a publish.
     """
+    if pin is not None:
+        return await _pinned_config(session, conv, pin)
     assistant = await session.get(Assistant, conv.assistant_id)
     assert assistant is not None
     if assistant.current_version_id is not None:
@@ -338,6 +370,22 @@ async def _settle_on_interrupt(
 _slots: dict[int, asyncio.Semaphore] = {}
 
 
+#: Turns running and turns waiting for a slot, for `/metrics` (task 6.5).
+#: Counted here because a semaphore does not say how many are waiting.
+turn_load = {"running": 0, "waiting": 0}
+
+
+async def release(session: AsyncSession) -> None:
+    """End the session's transaction so its connection goes back to the pool.
+
+    The session stays usable and takes a connection again at its next
+    statement. What it loaded stays loaded (`expire_on_commit` is off), so
+    this costs nothing but must only be called where nothing half-written
+    is pending.
+    """
+    await session.commit()
+
+
 def _turn_slots() -> asyncio.Semaphore:
     key = id(asyncio.get_running_loop())
     if key not in _slots:
@@ -346,10 +394,14 @@ def _turn_slots() -> asyncio.Semaphore:
 
 
 async def run_message(
-    session: AsyncSession, *, conversation_id: uuid.UUID, text: str
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+    text: str,
+    unattended: Unattended | None = None,
 ) -> AsyncGenerator[AgentEvent, None]:
     conv = await load(session, conversation_id)
-    config = await config_for(session, conv)
+    config = await config_for(session, conv, unattended)
 
     cap = config.models.main.max_budget_usd
     spent = float(conv.cost_usd)
@@ -375,7 +427,13 @@ async def run_message(
     # Bounded concurrency (plan §4.1): each turn runs a CLI subprocess, so an
     # unbounded burst of messages is an unbounded burst of processes. The
     # setting existed and nothing read it.
+    # Hand the connection back before waiting (task 6.5). The reads above
+    # left a transaction open, and an open transaction keeps its connection:
+    # every message queued for a slot was holding one for up to
+    # AGENT_QUEUE_WAIT_S while doing nothing with it.
+    await release(session)
     slots = _turn_slots()
+    turn_load["waiting"] += 1
     try:
         await asyncio.wait_for(slots.acquire(), timeout=settings.agent_queue_wait_s)
     except TimeoutError:
@@ -384,13 +442,17 @@ async def run_message(
             message="Too many conversations are running right now. Try again in a moment.",
         )
         return
+    finally:
+        turn_load["waiting"] -= 1
+    turn_load["running"] += 1
     try:
         async with contextlib.aclosing(
-            _run_admitted(session, conv, config, text, cap, spent, gate)
+            _run_admitted(session, conv, config, text, cap, spent, gate, unattended is not None)
         ) as events:
             async for ev in events:
                 yield ev
     finally:
+        turn_load["running"] -= 1
         slots.release()
 
 
@@ -415,9 +477,13 @@ def _new_turn(
     remaining: float | None,
     budget_message: str | None,
     routing: router.Routing | None,
+    unattended: bool = False,
 ) -> Turn:
     """The turn's runtime object, with its approval hook and how it was
     routed."""
+
+    async def nobody_to_ask() -> str:
+        return "unattended"
 
     def request_approval(
         tool_name: str,
@@ -427,6 +493,9 @@ def _new_turn(
         *,
         tool_use_id: str | None = None,
     ) -> Awaitable[str]:
+        if unattended:
+            # An eval (task 6.1): no pending row, no waiting, nothing runs.
+            return nobody_to_ask()
         # `turn` is referenced lazily: closures capture the variable, and this
         # is only ever called from inside `turn.stream()`.
         return _raise_approval(
@@ -477,6 +546,7 @@ async def _run_admitted(
     cap: float | None,
     spent: float,
     gate: budgets.Gate,
+    unattended: bool = False,
 ) -> AsyncGenerator[AgentEvent, None]:
     """One turn, once it holds a concurrency slot."""
     user_msg = Message(
@@ -506,7 +576,7 @@ async def _run_admitted(
     remaining, budget_message = budgets.narrower(
         None if cap is None else max(0.0, cap - spent), gate
     )
-    turn = _new_turn(conv, config, text, plan, remaining, budget_message, routing)
+    turn = _new_turn(conv, config, text, plan, remaining, budget_message, routing, unattended)
     started = time.perf_counter()
     # One id for the whole turn: stored on the run row, and bound into every
     # log line written while it runs, including from the driver and tool
@@ -528,6 +598,11 @@ async def _run_admitted(
     # it is streaming (task 1.6).
     stop = turn.interrupt
     interrupts.register(conv.id, stop)
+    # And again for the long part (task 6.5): the model thinks for seconds
+    # and a tool can wait minutes for a person. Nothing below reads or
+    # writes through this session until the turn is finalized, and tools
+    # that need the database open their own short session.
+    await release(session)
     try:
         # `aclosing` so that an interruption closes the turn's own stream
         # *now*, cancelling the driver (and with it the SDK client and any
@@ -634,6 +709,16 @@ async def _session_to_resume(conv: Conversation) -> str | None:
 def _end_trace(tracing: TurnTrace, turn: Turn, started: float) -> None:
     duration_ms = int((time.perf_counter() - started) * 1000)
     tracing.finish(turn.outcome, duration_ms=duration_ms, model_calls=turn.model_calls)
+    o = turn.outcome
+    metrics.TURN_DURATION.observe(duration_ms / 1000, o.status.value)
+    for call in o.tool_calls:
+        took = o.tool_latency_ms.get(str(call.get("id")))
+        if took is not None:
+            metrics.TOOL_DURATION.observe(
+                took / 1000,
+                metrics.short_tool(str(call.get("name", ""))),
+                str(call.get("status") or "unknown"),
+            )
 
 
 def _tool_server(tool_name: str) -> str:
@@ -843,6 +928,7 @@ async def _finalize(
 
 
 __all__ = [
+    "Unattended",
     "archive",
     "config_for",
     "create_conversation",

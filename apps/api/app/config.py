@@ -16,12 +16,14 @@ import warnings
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import ValidationInfo, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["dev", "test", "production"]
 
 _PLACEHOLDER_SECRETS = {"", "change-me", "dev-insecure-change-me", "changeme", "secret"}
+#: The object store password every MinIO install starts with.
+_DEFAULT_S3_SECRETS = {"minioadmin"}
 _KEK_BYTES = 32
 _MIN_JWT_SECRET_LEN = 32
 
@@ -38,6 +40,12 @@ class Settings(BaseSettings):
     app_env: Environment = "dev"
     app_name: str = "Assistant Studio"
     app_base_url: str = "http://localhost:3000"
+    #: Who may create an account (task 6.6). `open`: anyone who can reach
+    #: the server. `invite`: the first account (the owner, on a new
+    #: install), and after that only someone holding an invite link for
+    #: their address. Every account can use the model key, so an
+    #: internet-facing server wants `invite`.
+    registration: Literal["open", "invite"] = "open"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     log_level: str = "INFO"
@@ -53,6 +61,19 @@ class Settings(BaseSettings):
 
     # ── Datastores ───────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://app:app@localhost:5432/app"
+    #: The connection pool (task 6.5), per process. `size` connections are
+    #: kept open; `max_overflow` more may be opened under load and are
+    #: closed when idle. A turn holds one only while it reads or writes,
+    #: not while the model is thinking, so this does not need to match
+    #: AGENT_MAX_CONCURRENCY. Every API and worker process has its own
+    #: pool: the total must stay under Postgres's max_connections (100).
+    db_pool_size: int = Field(default=10, ge=1)
+    db_max_overflow: int = Field(default=20, ge=0)
+    #: How long a request waits for a free connection before failing.
+    db_pool_timeout_s: float = Field(default=10.0, gt=0)
+    #: Connections older than this are replaced, so one a firewall or a
+    #: database restart silently dropped is not handed out for ever.
+    db_pool_recycle_s: int = Field(default=1800, ge=-1)
     redis_url: str = "redis://localhost:6379/0"
 
     # ── Object storage ───────────────────────────────────────
@@ -71,12 +92,35 @@ class Settings(BaseSettings):
     voyage_api_key: str = ""
     #: Offline mode: local embedder/reranker, and no web search (plan §10).
     rag_offline: bool = False
+    #: How many candidates the vector index keeps while it searches
+    #: (pgvector's `hnsw.ef_search`, task 6.5). Higher finds more of the
+    #: true nearest chunks and costs more time. pgvector's own default is
+    #: 40, which is also the most rows a search can return: a search is
+    #: always run with at least its own `top_k_dense`.
+    rag_hnsw_ef_search: int = Field(default=100, ge=10, le=1000)
+    #: Query embeddings kept in memory, per process (task 6.5): the same
+    #: question asked again skips the embedding call. 0 switches it off.
+    rag_query_cache_size: int = Field(default=512, ge=0)
+    rag_query_cache_ttl_s: int = Field(default=600, ge=1)
     #: Most that contextual retrieval may spend indexing one source. Over it
     #: (by estimate, before anything is spent) the source is indexed without
     #: context lines rather than not at all (plan §5.1 step 4).
     ingest_context_budget_usd: float = 1.0
     #: How long one ingestion job may run before the worker stops it.
     ingest_job_timeout_s: int = 3600
+    #: The only folder SQLite database connections may open files from
+    #: (task 6.3). A SQLite connection is a file on this server that the
+    #: API opens, so without a folder to confine it to, any builder could
+    #: read any database file the process can, the platform's own
+    #: included. Empty: SQLite connections are refused in production, and
+    #: allowed anywhere but the platform's own database elsewhere.
+    db_sqlite_dir: str = ""
+    #: Bearer token for `GET /metrics` (task 6.4). The page reports spend
+    #: and names orgs and assistants. Empty: open outside production, and
+    #: switched off in production.
+    metrics_token: str = ""
+    #: Longest an eval run may take (task 6.1): every case is a real turn.
+    eval_job_timeout_s: int = 3600
 
     # ── Agent runtime ────────────────────────────────────────
     agent_max_concurrency: int = 8
@@ -100,6 +144,11 @@ class Settings(BaseSettings):
     schema_cache_ttl_s: int = 86_400
     # auto = real SDK when ANTHROPIC_API_KEY is set (and not APP_ENV=test), else fake
     agent_driver: Literal["auto", "claude", "fake"] = "auto"
+    #: How long a fake-driver turn takes (task 6.5). 0 in normal use. A
+    #: load test sets it to a real turn's length, because what fills the
+    #: turn slots and the pool is turns that last, not turns that are
+    #: over in a millisecond.
+    agent_fake_delay_ms: int = Field(default=0, ge=0)
 
     # ── Rate limiting (task 5.8) ─────────────────────────────
     #: Token buckets in Redis (see `security/ratelimit.py`). Each limit is
@@ -217,6 +266,15 @@ class Settings(BaseSettings):
             problems.append("APP_KEK must be set (base64 of 32 random bytes)")
         if not self.anthropic_api_key:
             problems.append("ANTHROPIC_API_KEY must be set")
+        if self.mcp_allow_insecure_urls:
+            # It also lifts the private-address check (it is for a test
+            # server on localhost), which in production is an open door to
+            # the metadata service and every internal port.
+            problems.append("MCP_ALLOW_INSECURE_URLS is for local development only")
+        if self.mcp_runner_url and not self.mcp_runner_token:
+            problems.append("MCP_RUNNER_TOKEN must be set when MCP_RUNNER_URL is")
+        if self.s3_secret_key in _DEFAULT_S3_SECRETS:
+            problems.append("S3_SECRET_KEY must be changed from its default")
         if self.log_format != "json":
             warnings.warn("LOG_FORMAT should be 'json' in production", stacklevel=2)
         if problems:

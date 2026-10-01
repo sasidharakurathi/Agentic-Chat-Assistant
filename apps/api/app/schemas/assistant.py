@@ -18,6 +18,29 @@ class AssistantCreate(BaseModel):
     description: str = Field(default="", max_length=2000)
 
 
+class AssistantFromSample(BaseModel):
+    """Start from a shipped sample (task 6.7)."""
+
+    sample_id: str = Field(min_length=1, max_length=60)
+    #: The sample's own name when left out.
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class SampleSummary(ApiModel):
+    """A sample assistant, as the gallery shows it."""
+
+    id: str
+    name: str
+    description: str
+    needs: list[str]
+    try_asking: list[str]
+    #: Node types on its canvas, in drawing order: the gallery draws the
+    #: line from these.
+    node_types: list[str]
+    documents: int
+    eval_cases: int
+
+
 class AssistantMetaUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=2000)

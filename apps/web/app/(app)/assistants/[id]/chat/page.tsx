@@ -219,6 +219,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               onTitle={(title) =>
                 setRows((r) => r.map((x) => (x.id === active ? { ...x, title } : x)))
               }
+              onRunning={(running) =>
+                setRows((r) => r.map((x) => (x.id === active ? { ...x, running } : x)))
+              }
             />
           ) : (
             <div className="h-full overflow-y-auto px-4 py-6 md:px-8">

@@ -11,6 +11,7 @@ from app.api.routes import (
     conversations,
     data_sources,
     db_connections,
+    evals,
     health,
     mcp_servers,
     memories,
@@ -34,6 +35,7 @@ api_v1.include_router(mcp_servers.router)
 api_v1.include_router(memories.router)
 api_v1.include_router(approvals.router)
 api_v1.include_router(budgets.router)
+api_v1.include_router(evals.router)
 api_v1.include_router(meta.router)
 
 __all__ = ["api_v1", "root_router"]

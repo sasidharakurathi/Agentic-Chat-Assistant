@@ -4,11 +4,13 @@ from typing import Any, get_args
 
 from fastapi import APIRouter
 
+from app import samples
 from app.agent import claude_api
 from app.agent.models import ALLOWED_MODELS, DEFAULT_MODEL_BY_ROLE
 from app.config import settings
 from app.graph.nodes import NodeType
 from app.graph.validate import ALLOWED_EDGES, SINGLETON_TYPES
+from app.schemas.assistant import SampleSummary
 from app.schemas.assistant_config import config_json_schema, default_config
 
 router = APIRouter(prefix="/meta", tags=["meta"])
@@ -48,3 +50,22 @@ async def get_graph_schema() -> dict[str, Any]:
         "allowed_edges": sorted([source, target] for source, target in ALLOWED_EDGES),
         "singleton_types": sorted(SINGLETON_TYPES),
     }
+
+
+@router.get("/samples", response_model=list[SampleSummary])
+async def list_samples() -> list[SampleSummary]:
+    """The sample assistants shipped with this server (task 6.7). Start one
+    with `POST /assistants:from-sample`."""
+    return [
+        SampleSummary(
+            id=s.id,
+            name=s.name,
+            description=s.description,
+            needs=s.needs,
+            try_asking=s.try_asking,
+            node_types=[n.type for n in s.graph.nodes],
+            documents=len(s.documents),
+            eval_cases=len(s.eval_suite.cases) if s.eval_suite else 0,
+        )
+        for s in samples.all_samples()
+    ]

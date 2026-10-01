@@ -35,6 +35,17 @@ class ConversationSummary(ORMModel):
     token_usage: dict[str, Any]
     created_at: datetime
     last_message_at: datetime | None
+    #: An answer is being written in it right now (QOS-01): it carries on
+    #: whether or not anyone is watching, and can be watched again.
+    running: bool = False
+
+
+class TurnState(ApiModel):
+    """The turn running in a conversation, if any (QOS-01)."""
+
+    #: Attach with `GET /conversations/{id}/turns/{turn_id}/events`. Null
+    #: when nothing is running.
+    turn_id: str | None = None
 
 
 class MessageOut(ORMModel):
@@ -153,6 +164,8 @@ class ConversationDetail(ConversationSummary):
     #: Pass to `GET /conversations/{id}/messages?cursor=` for older messages;
     #: null when `messages` is everything.
     messages_next_cursor: str | None = None
+    #: The turn running now, to attach to; null when none is.
+    turn_id: str | None = None
 
 
 __all__ = [
@@ -168,4 +181,5 @@ __all__ = [
     "TraceApproval",
     "TraceGuardrail",
     "TraceStep",
+    "TurnState",
 ]

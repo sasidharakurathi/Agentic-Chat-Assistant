@@ -98,8 +98,33 @@ BANNED_FUNCTIONS = frozenset(
         "lo_creat",
         "lo_put",
         "lo_from_bytea",
+        # large objects by their older names
+        "lowrite",
+        "loread",
+        # what the server is and how it is set up
+        "current_setting",
+        "inet_server_addr",
+        "inet_server_port",
     }
 )
+
+#: Whole families, refused by prefix (task 6.3). A list of names loses to
+#: the next sibling nobody listed: `lo_import` was banned and `lowrite` was
+#: not, `dblink_exec` and not `dblink_send_query`, `pg_read_file` and not
+#: `pg_stat_reset`. Postgres's `pg_*` functions administer or inspect the
+#: server, `lo_*` read and write large objects, `dblink*` opens connections
+#: to other databases. None of them answers a question about the data.
+BANNED_FUNCTION_FAMILIES = ("pg_", "lo_", "dblink")
+#: The harmless few from those families that a query may really want.
+ALLOWED_FAMILY_FUNCTIONS = frozenset({"pg_typeof", "pg_size_pretty", "pg_column_size"})
+#: Postgres's `table_to_xml`, `query_to_xml_and_xmlschema`, `schema_to_xml`,
+#: `database_to_xml`, `cursor_to_xml`...: each takes a table name or a whole
+#: query **as a string**, so the table checks never see it, and returns the
+#: contents. A denied table was one function call away.
+BANNED_FUNCTION_SUFFIXES = ("_to_xml", "_to_xmlschema", "_to_xml_and_xmlschema")
+#: The schema a name without one resolves to, per engine (MySQL's is the
+#: connected database, which the guard doesn't know).
+DEFAULT_SCHEMAS = {"postgres": "public", "sqlite": "main"}
 
 #: SQLite's table-valued PRAGMA functions (`pragma_table_info(...)`) slip
 #: past the `\bPRAGMA\b` text check, because `_` is a word character and the
@@ -268,11 +293,39 @@ def _check_raw_text(statement: str) -> None:
             raise SqlBlocked(why)
 
 
-def _check_constructs(tree: exp.Expression) -> None:
+def _function_name(func: exp.Expression) -> str:
+    """The name a function call resolves to, lowercased.
+
+    Through the identifier, not `str()`: a quoted name such as
+    `pg_catalog."pg_read_file"` is an Identifier whose text form keeps its
+    quotes, so it never matched the list, while Postgres ran the real
+    function (task 6.3).
+    """
+    this = func.this
+    name = this.name if isinstance(this, exp.Identifier) else str(this or "")
+    return name.strip('"`[] ').lower()
+
+
+def _banned_function(name: str) -> bool:
+    if name in ALLOWED_FAMILY_FUNCTIONS:
+        return False
+    return (
+        name in BANNED_FUNCTIONS
+        or name.startswith(BANNED_FUNCTION_PREFIXES)
+        or name.startswith(BANNED_FUNCTION_FAMILIES)
+        or name.endswith(BANNED_FUNCTION_SUFFIXES)
+    )
+
+
+def _check_constructs(tree: exp.Expression, kind: Kind) -> None:
     for func in tree.find_all(exp.Anonymous):
-        name = str(func.this or "").lower()
-        if name in BANNED_FUNCTIONS or name.startswith(BANNED_FUNCTION_PREFIXES):
+        name = _function_name(func)
+        if _banned_function(name):
             raise SqlBlocked(f"function {name}() is not allowed")
+    if kind == "read" and tree.find(exp.Lock) is not None:
+        # FOR UPDATE / FOR SHARE take row locks: a write's footprint on a
+        # statement that is classified, and auto-approved, as a read.
+        raise SqlBlocked("a read cannot lock rows (FOR UPDATE / FOR SHARE)")
     # sqlglot models some of these as typed nodes rather than Anonymous.
     for node in tree.walk():
         key = getattr(node, "key", "")
@@ -303,15 +356,41 @@ def _is_system_table(full: str, engine: str) -> bool:
     return engine == "sqlite" and bare.startswith("sqlite_")
 
 
+def _listed(full: str, entries: list[str], engine: str, *, strict: bool) -> bool:
+    """Is this table named by a list of `table` or `schema.table` entries?
+
+    The two lists err in opposite directions, because a name without a
+    schema could be any schema's table:
+
+    - **deny** (`strict=False`) matches whenever the table name matches,
+      unless both sides name different schemas. `public.secret` on the list
+      also stops a bare `secret`, which is how it is usually queried.
+    - **allow** (`strict=True`) matches only when the schemas agree, where a
+      missing schema means the engine's default. `orders` on the list does
+      not admit `evil.orders`.
+    """
+    schema, _, bare = full.rpartition(".")
+    default = DEFAULT_SCHEMAS.get(engine, "")
+    for entry in entries:
+        entry_schema, _, entry_bare = entry.rpartition(".")
+        if entry_bare != bare:
+            continue
+        if not strict:
+            if not schema or not entry_schema or schema == entry_schema:
+                return True
+        elif (schema or default) == (entry_schema or default):
+            return True
+    return False
+
+
 def _check_tables(tables: list[str], perms: Permissions, engine: str) -> None:
     for full in tables:
-        bare = full.split(".")[-1]
         if _is_system_table(full, engine):
             raise SqlBlocked(f"{full} is a system catalog and cannot be queried directly")
-        if perms.deny_tables and (bare in perms.deny_tables or full in perms.deny_tables):
+        if perms.deny_tables and _listed(full, perms.deny_tables, engine, strict=False):
             raise SqlBlocked(f"table {full} is denied for this connection")
         # An allow-list, when present, is exhaustive.
-        if perms.allow_tables and not (bare in perms.allow_tables or full in perms.allow_tables):
+        if perms.allow_tables and not _listed(full, perms.allow_tables, engine, strict=True):
             raise SqlBlocked(f"table {full} is not in this connection's allowed tables")
 
 
@@ -380,7 +459,7 @@ def guard(statement: str, *, engine: str, permissions: Permissions) -> GuardResu
     if kind == "ddl" and not permissions.ddl:
         raise SqlBlocked("this connection cannot run schema changes")
 
-    _check_constructs(tree)
+    _check_constructs(tree, kind)
     tables = _referenced_tables(tree)
     _check_tables(tables, permissions, engine)
 

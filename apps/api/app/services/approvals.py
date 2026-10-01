@@ -11,12 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import approval_registry as registry
 from app.agent.approvals import redact
-from app.api.errors import BadRequest, NotFound
+from app.api.errors import BadRequest, Forbidden, NotFound
 from app.db.pagination import PageResult, keyset_page
 from app.db.session import get_sessionmaker
 from app.logging import get_logger
 from app.models.approval import Approval, ApprovalRisk, ApprovalStatus
+from app.models.conversation import Conversation
+from app.models.enums import MemberRole
 from app.models.membership import Membership
+from app.observability import metrics
 
 log = get_logger(__name__)
 
@@ -78,20 +81,34 @@ async def get(session: AsyncSession, approval_id: uuid.UUID) -> Approval:
 async def assert_can_decide(
     session: AsyncSession, approval: Approval, *, user_id: uuid.UUID
 ) -> None:
-    """Only a member of the approval's org may decide it.
+    """Who may decide an approval: the person whose conversation it is, or
+    an admin of its org (task 6.3).
 
     This endpoint converts a refusal into a database write, so it is checked
-    against org membership directly rather than inherited from whatever route
-    happened to load the row. Answering with 404 rather than 403 keeps it from
-    confirming that an approval id exists to someone outside the org.
+    here rather than inherited from whatever route happened to load the row.
+    It used to accept any member of the org: a teammate who can only read a
+    conversation could approve the change it was waiting on. That is the
+    same rule as posting into a conversation (`require_conversation_editor`).
+
+    Someone outside the org gets 404, not 403, so the id confirms nothing.
     """
     member = await session.scalar(
-        select(Membership.id).where(
+        select(Membership).where(
             Membership.org_id == approval.org_id, Membership.user_id == user_id
         )
     )
     if member is None:
         raise NotFound("Approval not found")
+    if member.role.satisfies(MemberRole.admin):
+        return
+    owner = await session.scalar(
+        select(Conversation.created_by).where(Conversation.id == approval.conversation_id)
+    )
+    if owner != user_id:
+        raise Forbidden(
+            "Only the person in this conversation, or an admin, can approve or decline this.",
+            code="not_conversation_owner",
+        )
 
 
 async def resolve(
@@ -119,6 +136,9 @@ async def resolve(
     approval.decided_at = datetime.now(UTC)
     await session.flush()
     await session.commit()
+    if approval.created_at is not None:
+        waited = (approval.decided_at - approval.created_at).total_seconds()
+        metrics.APPROVAL_WAIT.observe(max(0.0, waited), decision)
 
     # Local first (the common case: same worker), then fan out for the case
     # where the waiting turn is on another one.

@@ -43,7 +43,12 @@ async def register(
     body: RegisterRequest, session: SessionDep, request: Request, ip: ClientIP
 ) -> TokenPair:
     user = await auth_service.register(
-        session, email=body.email, password=body.password, name=body.name, ip=ip
+        session,
+        email=body.email,
+        password=body.password,
+        name=body.name,
+        ip=ip,
+        invite_token=body.invite_token,
     )
     tokens = await auth_service.issue_tokens(
         session,

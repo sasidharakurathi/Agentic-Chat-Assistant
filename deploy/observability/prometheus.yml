@@ -1,0 +1,27 @@
+# Prometheus for Assistant Studio (task 6.4). Started by
+# docker-compose.observability.yml; see docs/EXPLAINER.md §12.4.
+#
+# One target: the API's /metrics. It reports what the API process observed
+# (request, stream, turn and tool timings) and what it reads from the
+# database and Redis at scrape time (spend, runs, sources, MCP servers,
+# budgets, the queue), so the worker needs no endpoint of its own.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: assistant-studio-api
+    metrics_path: /metrics
+    # The same value as METRICS_TOKEN in the API's environment. The compose
+    # service writes it to this file at start.
+    authorization:
+      type: Bearer
+      credentials_file: /tmp/metrics_token
+    static_configs:
+      # The API's published port on the host: the same address whether the
+      # API runs in compose (`--profile apps`) or from scripts/dev-api.ps1.
+      - targets: ["host.docker.internal:8000"]

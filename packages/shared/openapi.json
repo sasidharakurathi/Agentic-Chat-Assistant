@@ -611,6 +611,35 @@
         "title": "AssistantDetail",
         "type": "object"
       },
+      "AssistantFromSample": {
+        "description": "Start from a shipped sample (task 6.7).",
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "sample_id": {
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Sample Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sample_id"
+        ],
+        "title": "AssistantFromSample",
+        "type": "object"
+      },
       "AssistantMetaUpdate": {
         "properties": {
           "description": {
@@ -1110,6 +1139,11 @@
             ],
             "title": "Messages Next Cursor"
           },
+          "running": {
+            "default": false,
+            "title": "Running",
+            "type": "boolean"
+          },
           "status": {
             "$ref": "#/components/schemas/ConversationStatus"
           },
@@ -1121,6 +1155,17 @@
             "additionalProperties": true,
             "title": "Token Usage",
             "type": "object"
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Id"
           }
         },
         "required": [
@@ -1134,8 +1179,10 @@
           "token_usage",
           "created_at",
           "last_message_at",
+          "running",
           "messages",
-          "messages_next_cursor"
+          "messages_next_cursor",
+          "turn_id"
         ],
         "title": "ConversationDetail",
         "type": "object"
@@ -1220,6 +1267,11 @@
             ],
             "title": "Last Message At"
           },
+          "running": {
+            "default": false,
+            "title": "Running",
+            "type": "boolean"
+          },
           "status": {
             "$ref": "#/components/schemas/ConversationStatus"
           },
@@ -1243,7 +1295,8 @@
           "cost_usd",
           "token_usage",
           "created_at",
-          "last_message_at"
+          "last_message_at",
+          "running"
         ],
         "title": "ConversationSummary",
         "type": "object"
@@ -2511,6 +2564,889 @@
           "target"
         ],
         "title": "Edge",
+        "type": "object"
+      },
+      "EvalCaseIn": {
+        "properties": {
+          "expected": {
+            "$ref": "#/components/schemas/EvalExpected-Input"
+          },
+          "input": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Input",
+            "type": "string"
+          },
+          "labels": {
+            "$ref": "#/components/schemas/EvalLabels-Input"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          }
+        },
+        "required": [
+          "input"
+        ],
+        "title": "EvalCaseIn",
+        "type": "object"
+      },
+      "EvalCaseOut": {
+        "properties": {
+          "expected": {
+            "$ref": "#/components/schemas/EvalExpected-Output"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "input": {
+            "title": "Input",
+            "type": "string"
+          },
+          "labels": {
+            "$ref": "#/components/schemas/EvalLabels-Output"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "position",
+          "input",
+          "expected",
+          "labels",
+          "metadata"
+        ],
+        "title": "EvalCaseOut",
+        "type": "object"
+      },
+      "EvalCaseResultOut": {
+        "properties": {
+          "conversation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
+          "cost_usd": {
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "duration_ms": {
+            "title": "Duration Ms",
+            "type": "integer"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "eval_case_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eval Case Id"
+          },
+          "expected": {
+            "$ref": "#/components/schemas/EvalExpected-Output"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "input": {
+            "title": "Input",
+            "type": "string"
+          },
+          "output": {
+            "title": "Output",
+            "type": "string"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "scores": {
+            "additionalProperties": true,
+            "title": "Scores",
+            "type": "object"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          }
+        },
+        "required": [
+          "id",
+          "eval_case_id",
+          "position",
+          "input",
+          "expected",
+          "output",
+          "scores",
+          "passed",
+          "error",
+          "cost_usd",
+          "duration_ms",
+          "conversation_id",
+          "run_id",
+          "trace_id"
+        ],
+        "title": "EvalCaseResultOut",
+        "type": "object"
+      },
+      "EvalCasesBulkIn": {
+        "properties": {
+          "cases": {
+            "items": {
+              "$ref": "#/components/schemas/EvalCaseIn"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Cases",
+            "type": "array"
+          },
+          "mode": {
+            "default": "append",
+            "enum": [
+              "append",
+              "replace"
+            ],
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cases"
+        ],
+        "title": "EvalCasesBulkIn",
+        "type": "object"
+      },
+      "EvalExpected-Input": {
+        "description": "What a good answer looks like. Everything is optional: a case with\nnothing here passes whenever the turn finishes.",
+        "properties": {
+          "cites": {
+            "default": false,
+            "title": "Cites",
+            "type": "boolean"
+          },
+          "contains": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Contains",
+            "type": "array"
+          },
+          "not_contains": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Not Contains",
+            "type": "array"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "maxLength": 8000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference"
+          },
+          "refuses": {
+            "default": false,
+            "title": "Refuses",
+            "type": "boolean"
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "title": "EvalExpected",
+        "type": "object"
+      },
+      "EvalExpected-Output": {
+        "description": "What a good answer looks like. Everything is optional: a case with\nnothing here passes whenever the turn finishes.",
+        "properties": {
+          "cites": {
+            "default": false,
+            "title": "Cites",
+            "type": "boolean"
+          },
+          "contains": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Contains",
+            "type": "array"
+          },
+          "not_contains": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Not Contains",
+            "type": "array"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "maxLength": 8000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference"
+          },
+          "refuses": {
+            "default": false,
+            "title": "Refuses",
+            "type": "boolean"
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "reference",
+          "contains",
+          "not_contains",
+          "tools",
+          "cites",
+          "refuses"
+        ],
+        "title": "EvalExpected",
+        "type": "object"
+      },
+      "EvalLabels-Input": {
+        "description": "What retrieval should find for this question. Sources are named by\ntheir title or id: a builder knows their documents, not chunk ids.",
+        "properties": {
+          "relevant_chunk_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200,
+            "title": "Relevant Chunk Ids",
+            "type": "array"
+          },
+          "relevant_sources": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Relevant Sources",
+            "type": "array"
+          }
+        },
+        "title": "EvalLabels",
+        "type": "object"
+      },
+      "EvalLabels-Output": {
+        "description": "What retrieval should find for this question. Sources are named by\ntheir title or id: a builder knows their documents, not chunk ids.",
+        "properties": {
+          "relevant_chunk_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200,
+            "title": "Relevant Chunk Ids",
+            "type": "array"
+          },
+          "relevant_sources": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Relevant Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "relevant_sources",
+          "relevant_chunk_ids"
+        ],
+        "title": "EvalLabels",
+        "type": "object"
+      },
+      "EvalRunDetail": {
+        "properties": {
+          "assistant_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assistant Version Id"
+          },
+          "cost_usd": {
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "done_cases": {
+            "title": "Done Cases",
+            "type": "integer"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "metrics": {
+            "additionalProperties": true,
+            "title": "Metrics",
+            "type": "object"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/EvalCaseResultOut"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "done",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "suite_id": {
+            "format": "uuid",
+            "title": "Suite Id",
+            "type": "string"
+          },
+          "total_cases": {
+            "title": "Total Cases",
+            "type": "integer"
+          },
+          "version_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Number"
+          }
+        },
+        "required": [
+          "id",
+          "suite_id",
+          "status",
+          "assistant_version_id",
+          "version_number",
+          "metrics",
+          "cost_usd",
+          "total_cases",
+          "done_cases",
+          "error",
+          "created_at",
+          "started_at",
+          "finished_at",
+          "results"
+        ],
+        "title": "EvalRunDetail",
+        "type": "object"
+      },
+      "EvalRunIn": {
+        "properties": {
+          "assistant_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assistant Version Id"
+          }
+        },
+        "title": "EvalRunIn",
+        "type": "object"
+      },
+      "EvalRunSummary": {
+        "properties": {
+          "assistant_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assistant Version Id"
+          },
+          "cost_usd": {
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "done_cases": {
+            "title": "Done Cases",
+            "type": "integer"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "metrics": {
+            "additionalProperties": true,
+            "title": "Metrics",
+            "type": "object"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "done",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "suite_id": {
+            "format": "uuid",
+            "title": "Suite Id",
+            "type": "string"
+          },
+          "total_cases": {
+            "title": "Total Cases",
+            "type": "integer"
+          },
+          "version_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Number"
+          }
+        },
+        "required": [
+          "id",
+          "suite_id",
+          "status",
+          "assistant_version_id",
+          "version_number",
+          "metrics",
+          "cost_usd",
+          "total_cases",
+          "done_cases",
+          "error",
+          "created_at",
+          "started_at",
+          "finished_at"
+        ],
+        "title": "EvalRunSummary",
+        "type": "object"
+      },
+      "EvalRunsOut": {
+        "properties": {
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/EvalRunSummary"
+            },
+            "title": "Runs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "runs"
+        ],
+        "title": "EvalRunsOut",
+        "type": "object"
+      },
+      "EvalSuiteConfig-Input": {
+        "description": "How a suite is scored.",
+        "properties": {
+          "judge": {
+            "default": true,
+            "title": "Judge",
+            "type": "boolean"
+          },
+          "pass_score": {
+            "default": 3,
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Pass Score",
+            "type": "integer"
+          }
+        },
+        "title": "EvalSuiteConfig",
+        "type": "object"
+      },
+      "EvalSuiteConfig-Output": {
+        "description": "How a suite is scored.",
+        "properties": {
+          "judge": {
+            "default": true,
+            "title": "Judge",
+            "type": "boolean"
+          },
+          "pass_score": {
+            "default": 3,
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Pass Score",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "judge",
+          "pass_score"
+        ],
+        "title": "EvalSuiteConfig",
+        "type": "object"
+      },
+      "EvalSuiteDetail": {
+        "properties": {
+          "assistant_id": {
+            "format": "uuid",
+            "title": "Assistant Id",
+            "type": "string"
+          },
+          "case_count": {
+            "title": "Case Count",
+            "type": "integer"
+          },
+          "cases": {
+            "items": {
+              "$ref": "#/components/schemas/EvalCaseOut"
+            },
+            "title": "Cases",
+            "type": "array"
+          },
+          "config": {
+            "$ref": "#/components/schemas/EvalSuiteConfig-Output"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "judge_available": {
+            "title": "Judge Available",
+            "type": "boolean"
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvalRunSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "assistant_id",
+          "name",
+          "config",
+          "case_count",
+          "last_run",
+          "created_at",
+          "cases",
+          "judge_available"
+        ],
+        "title": "EvalSuiteDetail",
+        "type": "object"
+      },
+      "EvalSuiteIn": {
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/EvalSuiteConfig-Input"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "EvalSuiteIn",
+        "type": "object"
+      },
+      "EvalSuiteOut": {
+        "properties": {
+          "assistant_id": {
+            "format": "uuid",
+            "title": "Assistant Id",
+            "type": "string"
+          },
+          "case_count": {
+            "title": "Case Count",
+            "type": "integer"
+          },
+          "config": {
+            "$ref": "#/components/schemas/EvalSuiteConfig-Output"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvalRunSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "assistant_id",
+          "name",
+          "config",
+          "case_count",
+          "last_run",
+          "created_at"
+        ],
+        "title": "EvalSuiteOut",
+        "type": "object"
+      },
+      "EvalSuitePatch": {
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvalSuiteConfig-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "EvalSuitePatch",
+        "type": "object"
+      },
+      "EvalSuitesOut": {
+        "properties": {
+          "can_edit": {
+            "title": "Can Edit",
+            "type": "boolean"
+          },
+          "suites": {
+            "items": {
+              "$ref": "#/components/schemas/EvalSuiteOut"
+            },
+            "title": "Suites",
+            "type": "array"
+          }
+        },
+        "required": [
+          "suites",
+          "can_edit"
+        ],
+        "title": "EvalSuitesOut",
         "type": "object"
       },
       "FixOp": {
@@ -6303,6 +7239,18 @@
             "title": "Email",
             "type": "string"
           },
+          "invite_token": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invite Token"
+          },
           "name": {
             "default": "",
             "maxLength": 200,
@@ -6923,6 +7871,64 @@
         "title": "RunStep",
         "type": "object"
       },
+      "SampleSummary": {
+        "description": "A sample assistant, as the gallery shows it.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "documents": {
+            "title": "Documents",
+            "type": "integer"
+          },
+          "eval_cases": {
+            "title": "Eval Cases",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "needs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Needs",
+            "type": "array"
+          },
+          "node_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Node Types",
+            "type": "array"
+          },
+          "try_asking": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Try Asking",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "needs",
+          "try_asking",
+          "node_types",
+          "documents",
+          "eval_cases"
+        ],
+        "title": "SampleSummary",
+        "type": "object"
+      },
       "SandboxLimits": {
         "additionalProperties": false,
         "properties": {
@@ -6942,7 +7948,7 @@
           },
           "max_file_mb": {
             "default": 64,
-            "maximum": 1024.0,
+            "maximum": 256.0,
             "minimum": 1.0,
             "title": "Max File Mb",
             "type": "integer"
@@ -6956,14 +7962,14 @@
           },
           "max_processes": {
             "default": 128,
-            "maximum": 1024.0,
+            "maximum": 256.0,
             "minimum": 4.0,
             "title": "Max Processes",
             "type": "integer"
           },
           "memory_mb": {
             "default": 1024,
-            "maximum": 8192.0,
+            "maximum": 1536.0,
             "minimum": 64.0,
             "title": "Memory Mb",
             "type": "integer"
@@ -7746,6 +8752,27 @@
         "title": "TraceStep",
         "type": "object"
       },
+      "TurnState": {
+        "description": "The turn running in a conversation, if any (QOS-01).",
+        "properties": {
+          "turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Id"
+          }
+        },
+        "required": [
+          "turn_id"
+        ],
+        "title": "TurnState",
+        "type": "object"
+      },
       "UsageRollupResponse": {
         "properties": {
           "group_by": {
@@ -8170,7 +9197,7 @@
   },
   "info": {
     "title": "Assistant Studio API",
-    "version": "0.0.0"
+    "version": "1.0.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -10194,6 +11221,132 @@
         ]
       }
     },
+    "/api/v1/assistants/{assistant_id}/eval-suites": {
+      "get": {
+        "operationId": "list_suites_api_v1_assistants__assistant_id__eval_suites_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalSuitesOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Suites",
+        "tags": [
+          "evals"
+        ]
+      },
+      "post": {
+        "operationId": "create_suite_api_v1_assistants__assistant_id__eval_suites_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assistant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assistant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvalSuiteIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalSuiteDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Suite",
+        "tags": [
+          "evals"
+        ]
+      }
+    },
     "/api/v1/assistants/{assistant_id}/graph:compile": {
       "post": {
         "operationId": "dry_run_compile_api_v1_assistants__assistant_id__graph_compile_post",
@@ -11463,6 +12616,83 @@
         ]
       }
     },
+    "/api/v1/assistants:from-sample": {
+      "post": {
+        "description": "A new draft from a shipped sample (`GET /meta/samples`): its graph,\nits documents queued for indexing, and its eval suite.",
+        "operationId": "create_from_sample_api_v1_assistants_from_sample_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Org-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistantFromSample"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create From Sample",
+        "tags": [
+          "assistants"
+        ]
+      }
+    },
     "/api/v1/auth/login": {
       "post": {
         "operationId": "login_api_v1_auth_login_post",
@@ -12288,6 +13518,153 @@
         ]
       }
     },
+    "/api/v1/conversations/{conversation_id}/turn": {
+      "get": {
+        "description": "The turn running in this conversation, if any (QOS-01). A page that\nopens a conversation asks this, and attaches to the answer being\nwritten instead of showing nothing until it is saved.",
+        "operationId": "get_turn_api_v1_conversations__conversation_id__turn_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnState"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Turn",
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/api/v1/conversations/{conversation_id}/turns/{turn_id}/events": {
+      "get": {
+        "description": "Watch a turn of this conversation: everything it has said so far\n(after `after`, or `Last-Event-ID`), then the rest as it comes, until it\nends. Finished turns stay readable for a few minutes. Anyone who may see\nthe conversation may watch.",
+        "operationId": "watch_turn_api_v1_conversations__conversation_id__turns__turn_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "turn_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Turn Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The id of the last event already seen.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The id of the last event already seen.",
+              "title": "After"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Watch Turn",
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
     "/api/v1/conversations/{conversation_id}:interrupt": {
       "post": {
         "description": "Stop the turn running in this conversation (task 1.6).\n\n202, because the stop is a request: the turn ends on its own stream, which\nthen closes with a normal `done`. It is published as well as tried\nlocally, since the turn may be streaming from a different worker.\nStopping a turn is changing the conversation, so the same rule applies as\nfor posting into it: its creator, or an admin.",
@@ -12345,6 +13722,653 @@
         "summary": "Interrupt Conversation",
         "tags": [
           "conversations"
+        ]
+      }
+    },
+    "/api/v1/eval-runs/{run_id}": {
+      "get": {
+        "description": "A run's metrics and each case's result so far.",
+        "operationId": "get_run_api_v1_eval_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Run",
+        "tags": [
+          "evals"
+        ]
+      }
+    },
+    "/api/v1/eval-runs/{run_id}:cancel": {
+      "post": {
+        "operationId": "cancel_run_api_v1_eval_runs__run_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Run",
+        "tags": [
+          "evals"
+        ]
+      }
+    },
+    "/api/v1/eval-suites/{suite_id}": {
+      "delete": {
+        "description": "The suite, its cases and every run of it.",
+        "operationId": "delete_suite_api_v1_eval_suites__suite_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "suite_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Suite Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Suite",
+        "tags": [
+          "evals"
+        ]
+      },
+      "get": {
+        "operationId": "get_suite_api_v1_eval_suites__suite_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "suite_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Suite Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalSuiteDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Suite",
+        "tags": [
+          "evals"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_suite_api_v1_eval_suites__suite_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "suite_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Suite Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvalSuitePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalSuiteDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Suite",
+        "tags": [
+          "evals"
+        ]
+      }
+    },
+    "/api/v1/eval-suites/{suite_id}/cases/{case_id}": {
+      "delete": {
+        "operationId": "delete_case_api_v1_eval_suites__suite_id__cases__case_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "case_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Case Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "suite_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Suite Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Case",
+        "tags": [
+          "evals"
+        ]
+      },
+      "put": {
+        "operationId": "put_case_api_v1_eval_suites__suite_id__cases__case_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "case_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Case Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "suite_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Suite Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvalCaseIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalCaseOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Case",
+        "tags": [
+          "evals"
+        ]
+      }
+    },
+    "/api/v1/eval-suites/{suite_id}/cases:bulk": {
+      "post": {
+        "description": "Add cases, or replace them all (an import).",
+        "operationId": "add_cases_api_v1_eval_suites__suite_id__cases_bulk_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "suite_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Suite Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvalCasesBulkIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalSuiteDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Cases",
+        "tags": [
+          "evals"
+        ]
+      }
+    },
+    "/api/v1/eval-suites/{suite_id}/runs": {
+      "get": {
+        "description": "The suite's recent runs, newest first.",
+        "operationId": "list_runs_api_v1_eval_suites__suite_id__runs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "suite_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Suite Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Runs",
+        "tags": [
+          "evals"
+        ]
+      },
+      "post": {
+        "description": "Queue a run against a published version, or the draft. Poll\n`GET /eval-runs/{id}` for progress and results.",
+        "operationId": "start_run_api_v1_eval_suites__suite_id__runs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "suite_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Suite Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvalRunIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Run",
+        "tags": [
+          "evals"
         ]
       }
     },
@@ -12596,6 +14620,32 @@
           }
         },
         "summary": "Get Graph Schema",
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "/api/v1/meta/samples": {
+      "get": {
+        "description": "The sample assistants shipped with this server (task 6.7). Start one\nwith `POST /assistants:from-sample`.",
+        "operationId": "list_samples_api_v1_meta_samples_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SampleSummary"
+                  },
+                  "title": "Response List Samples Api V1 Meta Samples Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Samples",
         "tags": [
           "meta"
         ]

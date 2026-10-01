@@ -1,0 +1,315 @@
+{
+  "id": "store-support",
+  "order": 1,
+  "name": "Store support desk",
+  "description": "Answers customers from a shop's own policies and says where each answer came from. It comes with four short policy documents, so it works as soon as they finish indexing.",
+  "needs": [
+    "The background worker, to index its four documents (a few seconds)."
+  ],
+  "try_asking": [
+    "How many days do I have to return something?",
+    "Is support open on Saturday?",
+    "My sofa's fabric tore after 18 months. Is that covered?"
+  ],
+  "graph": {
+    "schema_version": 1,
+    "nodes": [
+      {
+        "id": "input",
+        "position": {
+          "x": 0.0,
+          "y": 0.0
+        },
+        "type": "input",
+        "data": {}
+      },
+      {
+        "id": "guardrail",
+        "position": {
+          "x": 260.0,
+          "y": 0.0
+        },
+        "type": "guardrail",
+        "data": {
+          "rules": [
+            "Only answer questions about Northwind Home's orders, policies and products.",
+            "Never promise a refund, a replacement or a delivery date: state the policy and what happens next.",
+            "Do not ask for card numbers or passwords."
+          ],
+          "pii_redaction": true,
+          "injection_scan": true,
+          "refusal_fallback": true,
+          "untrusted_content_notice": true
+        }
+      },
+      {
+        "id": "memory",
+        "position": {
+          "x": 640.0,
+          "y": 96.0
+        },
+        "type": "memory",
+        "data": {
+          "persist_history": true,
+          "summarize_after_tokens": 120000,
+          "memory_tool": false,
+          "auto_title": true
+        }
+      },
+      {
+        "id": "agent",
+        "position": {
+          "x": 1040.0,
+          "y": 0.0
+        },
+        "type": "agent",
+        "data": {
+          "system_prompt": "You are the support assistant for Northwind Home, an online furniture and appliance shop. Answer from the knowledge base and cite the passage you used. If the knowledge base does not cover a question, say so and offer to pass it to a person. Keep answers short: the answer first, then the detail that matters.",
+          "models": {
+            "router": {
+              "model": "claude-haiku-4-5",
+              "effort": "high",
+              "thinking": {
+                "type": "adaptive"
+              },
+              "max_turns": null,
+              "max_budget_usd": null
+            },
+            "main": {
+              "model": "claude-sonnet-5",
+              "effort": "high",
+              "thinking": {
+                "type": "adaptive"
+              },
+              "max_turns": null,
+              "max_budget_usd": null
+            },
+            "subagent": {
+              "model": "claude-haiku-4-5",
+              "effort": "high",
+              "thinking": {
+                "type": "adaptive"
+              },
+              "max_turns": null,
+              "max_budget_usd": null
+            },
+            "judge": {
+              "model": "claude-opus-5",
+              "effort": "high",
+              "thinking": {
+                "type": "adaptive"
+              },
+              "max_turns": null,
+              "max_budget_usd": null
+            }
+          },
+          "approval_policy": {
+            "db_write": "require",
+            "db_ddl": "require",
+            "http_non_get": "require",
+            "mcp_default": "require",
+            "file_write": "deny",
+            "shell": "deny"
+          }
+        }
+      },
+      {
+        "id": "output",
+        "position": {
+          "x": 1320.0,
+          "y": 0.0
+        },
+        "type": "output",
+        "data": {
+          "citations": true
+        }
+      },
+      {
+        "id": "kb",
+        "position": {
+          "x": 640.0,
+          "y": -96.0
+        },
+        "type": "knowledge_base",
+        "data": {
+          "embedder": "voyage-3-large",
+          "reranker": "voyage-rerank-2.5",
+          "chunking": {
+            "strategy": "recursive",
+            "max_tokens": 800,
+            "overlap": 0.15
+          },
+          "contextual_retrieval": true,
+          "retrieval": {
+            "hybrid": true,
+            "top_k_dense": 40,
+            "top_k_sparse": 40,
+            "rrf_k": 60,
+            "rerank_top_n": 8,
+            "min_score": 0.2,
+            "max_queries": 3
+          },
+          "citations": true
+        }
+      },
+      {
+        "id": "tool:datetime",
+        "position": {
+          "x": 640.0,
+          "y": -192.0
+        },
+        "type": "tool",
+        "data": {
+          "key": "datetime",
+          "config": {},
+          "approval": "auto"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": null,
+        "source": "input",
+        "target": "guardrail"
+      },
+      {
+        "id": null,
+        "source": "memory",
+        "target": "agent"
+      },
+      {
+        "id": null,
+        "source": "agent",
+        "target": "output"
+      },
+      {
+        "id": null,
+        "source": "guardrail",
+        "target": "agent"
+      },
+      {
+        "id": null,
+        "source": "kb",
+        "target": "agent"
+      },
+      {
+        "id": null,
+        "source": "tool:datetime",
+        "target": "agent"
+      }
+    ]
+  },
+  "documents": [
+    {
+      "name": "Refund and returns policy",
+      "text": "Refund and returns policy (Northwind Home)\n\nReturns. You can return any item within 30 days of delivery for a full refund. Items must be unused and in their original packaging. Opened software and gift cards cannot be refunded.\n\nHow long a refund takes. Refunds are processed within 5 business days of the returned item reaching our warehouse. The money goes back to the original payment method; your bank may take a further 3 to 7 days to show it.\n\nExchanges and store credit. If you would rather exchange an item, the replacement ships as soon as the return is scanned at the warehouse. Store credit is issued at once and never expires.\n\nDamaged on arrival. Report damage within 48 hours of delivery, with a photo. We pay the return shipping for anything that arrives damaged or faulty.\n"
+    },
+    {
+      "name": "Support hours and contact",
+      "text": "Support hours and contact (Northwind Home)\n\nCustomer support is open Monday to Friday, 9am to 6pm, and Saturday 10am to 2pm. It is closed on Sundays and public holidays.\n\nLive chat is available during support hours. Email sent to help@northwind-home.example is answered within one business day.\n\nThe showroom is open Tuesday to Sunday, 11am to 8pm.\n"
+    },
+    {
+      "name": "Warranty terms",
+      "text": "Warranty terms (Northwind Home)\n\nEvery appliance carries a 2-year warranty from the date of delivery. Furniture carries a 5-year warranty on its frame and a 1-year warranty on fabric and cushions.\n\nThe warranty covers faults in materials and workmanship. It does not cover normal wear, accidental damage, or damage from using the item outdoors when it is sold for indoor use.\n\nTo make a claim, send the order number and a photo of the fault. We repair the item, replace it, or refund it, in that order of preference. A replaced item keeps the original warranty period; it does not start again.\n"
+    },
+    {
+      "name": "Delivery and shipping",
+      "text": "Delivery and shipping (Northwind Home)\n\nOrders placed before 2pm on a working day ship the same day. Standard delivery is free, and takes 3 to 5 working days. Express delivery costs 9 dollars and takes 1 to 2 working days.\n\nLarge furniture is delivered by a two-person team that carries it to the room you choose. They phone the day before to agree a two-hour window.\n\nWe deliver to every address in the country. We do not ship abroad.\n"
+    }
+  ],
+  "eval_suite": {
+    "name": "Policy answers",
+    "cases": [
+      {
+        "input": "Search the policies: how many days do I have to return an item?",
+        "expected": {
+          "reference": "30 days from delivery, unused and in original packaging.",
+          "contains": [
+            "30 days"
+          ],
+          "tools": [
+            "kb_search"
+          ],
+          "cites": true
+        },
+        "labels": {
+          "relevant_sources": [
+            "Refund and returns policy"
+          ]
+        }
+      },
+      {
+        "input": "Search the policies: how long does a refund take to process?",
+        "expected": {
+          "reference": "Within 5 business days of the item reaching the warehouse.",
+          "contains": [
+            "5 business days"
+          ],
+          "tools": [
+            "kb_search"
+          ],
+          "cites": true
+        },
+        "labels": {
+          "relevant_sources": [
+            "Refund and returns policy"
+          ]
+        }
+      },
+      {
+        "input": "Search the policies: is customer support open on Saturday?",
+        "expected": {
+          "reference": "Yes, Saturday 10am to 2pm.",
+          "contains": [
+            "10am to 2pm"
+          ],
+          "tools": [
+            "kb_search"
+          ],
+          "cites": true
+        },
+        "labels": {
+          "relevant_sources": [
+            "Support hours and contact"
+          ]
+        }
+      },
+      {
+        "input": "Search the policies: how long is the warranty on an appliance?",
+        "expected": {
+          "reference": "2 years from delivery.",
+          "contains": [
+            "2-year"
+          ],
+          "tools": [
+            "kb_search"
+          ],
+          "cites": true
+        },
+        "labels": {
+          "relevant_sources": [
+            "Warranty terms"
+          ]
+        }
+      },
+      {
+        "input": "Search the policies: what does express delivery cost?",
+        "expected": {
+          "reference": "9 dollars, 1 to 2 working days.",
+          "contains": [
+            "9 dollars"
+          ],
+          "tools": [
+            "kb_search"
+          ],
+          "cites": true
+        },
+        "labels": {
+          "relevant_sources": [
+            "Delivery and shipping"
+          ]
+        }
+      }
+    ]
+  }
+}

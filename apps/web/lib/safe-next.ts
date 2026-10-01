@@ -22,3 +22,16 @@ export function safeNext(next: string | null | undefined): string | null {
   // The normalised form, so what we navigate to is exactly what was checked.
   return url.pathname + url.search + url.hash;
 }
+
+/** The invite token in a `?next=` that leads back to an invite link
+ *  (`/invites/<token>`), or null.
+ *
+ *  A server where sign-up is by invitation asks for it when the account is
+ *  created, and someone arriving from an invite link has not accepted it
+ *  yet: they are here to make the account first. */
+export function inviteTokenFrom(next: string | null | undefined): string | null {
+  const safe = safeNext(next);
+  if (!safe) return null;
+  const found = /^\/invites\/([A-Za-z0-9_-]{16,200})\/?(?:[?#]|$)/.exec(safe);
+  return found ? found[1] : null;
+}

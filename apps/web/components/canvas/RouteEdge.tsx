@@ -9,7 +9,7 @@ import {
   type EdgeProps,
 } from "@xyflow/react";
 import { TriangleAlert } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 
 import { prefersReducedMotion, strokeFor, useCanvasView } from "@/components/canvas/canvas-view";
 import type { RouteEdgeData, StationData } from "@/components/canvas/graph-sync";
@@ -34,8 +34,10 @@ function beforeEnd(x: number, y: number, side: Position) {
  *  run" and nothing else: an invalid edge is a 3px dashed red line with a
  *  label plate. A 7px underlay shows hover (and the 7px marker band shows
  *  selection). While a run is shown, lit lines keep their colour and draw
- *  themselves once; unlit lines go grey. */
-export function RouteEdge({
+ *  themselves once; unlit lines go grey. When two versions are compared, a
+ *  line the newer one added sits on a success band, and a line it removed
+ *  is dashed red: it is, exactly, a line that no longer runs. */
+export const RouteEdge = memo(function RouteEdge({
   id,
   sourceX,
   sourceY,
@@ -59,13 +61,16 @@ export function RouteEdge({
   });
   const main = data?.line === "main";
   const problem = data?.problem;
+  const removed = data?.diff === "removed";
+  const added = data?.diff === "added";
   const unlit =
     data?.trace === "dim" || (keyFocus !== null && data !== undefined && keyFocus !== data.family);
-  const colour = problem
-    ? "stroke-destructive"
-    : unlit
-      ? "stroke-line-unlit"
-      : strokeFor(data?.sourceType ?? "");
+  const colour =
+    problem || removed
+      ? "stroke-destructive"
+      : unlit
+        ? "stroke-line-unlit"
+        : strokeFor(data?.sourceType ?? "");
 
   // The one signature moment: opening a run draws its lit route once.
   const line = useRef<SVGPathElement>(null);
@@ -119,7 +124,9 @@ export function RouteEdge({
             main ? "stroke-9" : "stroke-7",
             selected
               ? "stroke-marker opacity-100"
-              : "stroke-line-unlit opacity-0 group-hover:opacity-100",
+              : added
+                ? "stroke-success opacity-100"
+                : "stroke-line-unlit opacity-0 group-hover:opacity-100",
           )}
         />
         <path
@@ -130,8 +137,8 @@ export function RouteEdge({
           className={cn(
             "transition-[stroke] duration-120 ease-out",
             colour,
-            main && !problem ? "stroke-5" : "stroke-3",
-            problem && "[stroke-dasharray:6_4]",
+            main && !problem && !removed ? "stroke-5" : "stroke-3",
+            (problem || removed) && "[stroke-dasharray:6_4]",
           )}
         />
         {interactionWidth > 0 && (
@@ -176,7 +183,7 @@ export function RouteEdge({
       )}
     </>
   );
-}
+});
 
 /** The line drawn while dragging a new connection: 3px in the source
  *  station's colour. The target handle turns success or destructive over a

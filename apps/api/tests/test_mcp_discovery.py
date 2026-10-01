@@ -140,7 +140,7 @@ async def test_every_request_is_checked_and_pinned() -> None:
     )
     async with httpx2.AsyncClient(transport=transport) as client:
         await client.post("https://mcp.example.com/mcp", json={})
-        with pytest.raises(SsrfBlocked, match="private or reserved"):
+        with pytest.raises(SsrfBlocked, match="no public address"):
             await client.post("https://evil.test/mcp", json={})
         with pytest.raises(SsrfBlocked, match="over https"):
             await client.post("http://mcp.example.com/mcp", json={})

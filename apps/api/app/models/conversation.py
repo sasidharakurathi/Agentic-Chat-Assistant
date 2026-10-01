@@ -67,6 +67,11 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, default=0)
     token_usage: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     last_message_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    #: Set on the hidden conversation an eval case runs in (task 6.1). Such a
+    #: conversation never appears in the chat list, and goes with its run.
+    eval_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("eval_runs.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     # ── long conversations (task 5.2, `agent/history.py`) ──
     #: A rolling summary of every message up to `summary_through_at`.
     summary: Mapped[str | None] = mapped_column(Text)

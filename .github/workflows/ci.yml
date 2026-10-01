@@ -46,6 +46,17 @@ jobs:
           DATABASE_URL: sqlite+aiosqlite:///./ci.db
         run: pytest -q -m "not integration"
 
+      # The eval regression gate (task 6.2), again on its own so a red build
+      # says which it was: a 15-case suite on a fixture assistant, with a
+      # canned model and everything else real. Fails when a metric falls
+      # below app/evals/fixtures/regression_baseline.json.
+      - name: Eval regression gate
+        env:
+          APP_ENV: test
+          JWT_SECRET: ci-secret-value-that-is-definitely-long-enough
+          DATABASE_URL: sqlite+aiosqlite:///./ci-gate.db
+        run: pytest -q tests/test_eval_gate.py
+
       # No `|| true`: an advisory against a dependency fails the build. It
       # used to be informational, so a critical CVE never turned CI red.
       - name: pip-audit

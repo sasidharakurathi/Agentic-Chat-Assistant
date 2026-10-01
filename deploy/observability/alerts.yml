@@ -1,0 +1,141 @@
+# Alert rules for Assistant Studio (task 6.4, plan §12).
+#
+# Every metric named here is exported by /metrics: tests/test_metrics.py
+# reads this file and fails if a rule mentions one that isn't.
+#
+# Nothing here pages anyone by itself. Point an Alertmanager at Prometheus
+# (or use Grafana's alerting on the same expressions) to be told.
+
+groups:
+  - name: assistant-studio
+    rules:
+      - alert: ApiDown
+        expr: up{job="assistant-studio-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: The API is not answering /metrics
+          description: >-
+            Prometheus could not scrape the API for 2 minutes. Check that it
+            is running and that METRICS_TOKEN matches on both sides.
+
+      - alert: ApiErrorRate
+        expr: >-
+          sum(rate(assistant_studio_http_requests_total{status="5xx"}[5m]))
+          / sum(rate(assistant_studio_http_requests_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: More than 5% of API requests are failing
+          description: >-
+            {{ $value | humanizePercentage }} of requests returned a 5xx over
+            the last 5 minutes. The API log has the request ids.
+
+      - alert: TurnsFailing
+        expr: >-
+          sum(rate(assistant_studio_runs_total{status="error"}[15m]))
+          / sum(rate(assistant_studio_runs_total[15m])) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than 1 in 10 agent turns is ending in an error
+          description: >-
+            {{ $value | humanizePercentage }} of turns failed over 15 minutes.
+            Usual causes are the model provider being unreachable or a broken
+            tool; Run details on a failed turn says which.
+
+      - alert: BudgetNearlySpent
+        expr: assistant_studio_budget_used_ratio >= 0.8 and assistant_studio_budget_used_ratio < 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A budget is over 80% used
+          description: >-
+            The {{ $labels.period }} budget for {{ $labels.scope }} in org
+            {{ $labels.org_id }} is {{ $value | humanizePercentage }} used.
+            Chats in it now show a warning.
+
+      - alert: BudgetSpent
+        expr: assistant_studio_budget_used_ratio >= 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: A budget is used up
+          description: >-
+            The {{ $labels.period }} budget for {{ $labels.scope }} in org
+            {{ $labels.org_id }} is spent. New messages and paid AI help are
+            refused until it resets or the limit is raised.
+
+      - alert: IngestionFailing
+        expr: >-
+          assistant_studio_data_sources{status="error"}
+          / ignoring(status) sum without(status) (assistant_studio_data_sources) > 0.2
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than 1 in 5 knowledge-base sources failed to index
+          description: >-
+            {{ $value | humanizePercentage }} of sources are in the error
+            state. Each source shows its reason in the Sources tab.
+
+      - alert: IngestionStuck
+        expr: assistant_studio_data_sources{status=~"pending|processing"} > 0 and assistant_studio_queue_depth > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Sources have been waiting to be indexed for 30 minutes
+          description: >-
+            {{ $value }} sources are still {{ $labels.status }} and the queue
+            is not empty. The worker is probably not running.
+
+      - alert: QueueBacklog
+        expr: assistant_studio_queue_depth > 50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Background jobs are piling up
+          description: >-
+            {{ $value }} jobs have been waiting for a worker for 10 minutes
+            (ingestion, eval runs, summaries).
+
+      - alert: McpServerDown
+        expr: assistant_studio_mcp_servers{status="error"} > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: An MCP server is failing its checks
+          description: >-
+            {{ $value }} enabled MCP server(s) failed their last check. The
+            MCP servers tab of the assistant shows which and why.
+
+      - alert: ApprovalsWaiting
+        expr: assistant_studio_approvals_pending > 0
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: Tool calls have been waiting for a person for 15 minutes
+          description: >-
+            {{ $value }} approval(s) are pending. They expire unanswered, and
+            the turn that asked is told they were declined.
+
+      - alert: MetricsIncomplete
+        expr: assistant_studio_scrape_errors == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Some metrics could not be read
+          description: >-
+            The {{ $labels.source }} metrics have been missing for 5 minutes
+            (the database or Redis could not be read). Alerts that depend on
+            them are blind until it recovers.

@@ -212,9 +212,13 @@ class TurnTrace:
         if outcome.status != RunStatus.ok:
             level = "ERROR" if outcome.status == RunStatus.error else "WARNING"
             turn_span.set_attribute("langfuse.observation.level", level)
-            turn_span.set_attribute("langfuse.observation.status_message", outcome.error or "")
+            turn_span.set_attribute(
+                "langfuse.observation.status_message", _text(outcome.error or "", self._pii)
+            )
         if outcome.status == RunStatus.error:
-            turn_span.set_status(Status(StatusCode.ERROR, outcome.error or None))
+            turn_span.set_status(
+                Status(StatusCode.ERROR, _text(outcome.error, self._pii) if outcome.error else None)
+            )
         turn_span.end(end_time=end_ns)
         self._span = None
 

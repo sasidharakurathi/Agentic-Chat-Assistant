@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.rag import DataSourceStatus, DataSourceType
 from app.schemas.common import ApiModel, ORMModel
@@ -14,6 +14,17 @@ class CreateUrlSource(BaseModel):
     type: Literal["url"] = "url"
     name: str = Field(min_length=1, max_length=200)
     url: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("url")
+    @classmethod
+    def _web_address(cls, v: str) -> str:
+        """http(s) only. The fetcher refuses anything else anyway, but the
+        address is also handed back to the browser to open (`content-url`),
+        where `javascript:` would run in the app's own page."""
+        url = v.strip()
+        if not url.lower().startswith(("http://", "https://")):
+            raise ValueError("A web page address must start with http:// or https://")
+        return url
 
 
 class CreateTextSource(BaseModel):

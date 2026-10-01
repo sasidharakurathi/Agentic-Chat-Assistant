@@ -3,6 +3,8 @@
 #   docker compose --profile apps up -d      -> also build + run api + web
 #   docker compose -f docker-compose.yml -f docker-compose.observability.yml --profile observability up -d
 #                                            -> add the optional Langfuse stack (task 1.9)
+#
+# This file is for development. For a server, use docker-compose.prod.yml.
 
 name: assistant-studio
 
@@ -29,6 +31,7 @@ x-api-env: &api-env
   # compose name, not the localhost URL a host-run API uses, so the docker
   # value is its own variable.
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  METRICS_TOKEN: ${METRICS_TOKEN:-}
   LANGFUSE_HOST: ${LANGFUSE_DOCKER_HOST:-${LANGFUSE_HOST:-}}
   LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
   LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
@@ -90,7 +93,9 @@ services:
       retries: 20
 
   minio-init:
-    image: minio/mc:latest
+    # The server image, which carries `mc` too: one image to have, and the
+    # separate minio/mc image is no longer reliably published.
+    image: minio/minio:latest
     depends_on:
       minio:
         condition: service_healthy
@@ -180,9 +185,12 @@ services:
     build:
       context: .
       dockerfile: docker/web.Dockerfile
+      # A build argument, not an environment variable: Next bakes
+      # NEXT_PUBLIC_* into the browser bundle when the image is built, so
+      # setting it on the running container changed nothing.
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     profiles: ["apps"]
-    environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     ports:
       - "${WEB_PORT:-3000}:3000"
     depends_on:

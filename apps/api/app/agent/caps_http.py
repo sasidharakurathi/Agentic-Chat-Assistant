@@ -23,7 +23,14 @@ from typing import Any
 from app.agent.caps import CapabilityTool
 from app.logging import get_logger
 from app.schemas.assistant_config import HttpRequestTool
-from app.security.ssrf import DEFAULT_LIMITS, FetchLimits, FetchResult, SsrfBlocked, safe_request
+from app.security.ssrf import (
+    DEFAULT_LIMITS,
+    FetchLimits,
+    FetchResult,
+    SsrfBlocked,
+    is_compressed,
+    safe_request,
+)
 
 log = get_logger(__name__)
 
@@ -73,6 +80,10 @@ def render(result: FetchResult) -> str:
     lines.append(f"{ctype} · {size}")
     if result.redirects:
         lines.append(f"final URL after {len(result.redirects)} redirect(s): {result.url}")
+    if is_compressed(result.headers):
+        # Asked for uncompressed; never inflated here (see `security/ssrf.py`).
+        lines.append("(the body was sent compressed and was not read)")
+        return "\n".join(lines)
     if not result.body:
         return "\n".join(lines)
     if not _is_text(result.content_type) and result.content_type:

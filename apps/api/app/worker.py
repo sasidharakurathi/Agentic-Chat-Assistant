@@ -21,7 +21,7 @@ from arq.connections import RedisSettings
 from app.config import settings
 from app.db.session import get_sessionmaker
 from app.logging import configure_logging, get_logger
-from app.observability.otel import setup_tracing, shutdown_tracing
+from app.observability.otel import setup_tracing, shutdown_tracing, span
 from app.rag.ingest import ingest_data_source
 from app.services import conversation_memory
 
@@ -47,8 +47,9 @@ async def shutdown(_ctx: dict[str, Any]) -> None:
 
 
 async def ingest_data_source_job(ctx: dict[str, Any], data_source_id: str) -> None:
-    async with get_sessionmaker()() as session:
-        await ingest_data_source(session, uuid.UUID(data_source_id))
+    with span("job.ingest_data_source", data_source_id=data_source_id):
+        async with get_sessionmaker()() as session:
+            await ingest_data_source(session, uuid.UUID(data_source_id))
 
 
 async def refresh_schema_job(ctx: dict[str, Any], connection_id: str) -> None:
@@ -77,7 +78,16 @@ async def summarize_conversation_job(
     ctx: dict[str, Any], conversation_id: str, version: int
 ) -> None:
     """Fold a long conversation's older messages into its summary (task 5.2)."""
-    await conversation_memory.summarize(uuid.UUID(conversation_id), version)
+    with span("job.summarize_conversation", conversation_id=conversation_id):
+        await conversation_memory.summarize(uuid.UUID(conversation_id), version)
+
+
+async def run_eval_job(ctx: dict[str, Any], run_id: str) -> None:
+    """Take an eval suite through the chosen version, case by case (task 6.1)."""
+    from app.evals import runner
+
+    with span("job.eval_run", eval_run_id=run_id):
+        await runner.run(uuid.UUID(run_id))
 
 
 async def mcp_health_sweep(ctx: dict[Any, Any], *_args: Any, **_kwargs: Any) -> None:
@@ -125,6 +135,7 @@ class WorkerSettings:
         func(ingest_data_source_job, timeout=settings.ingest_job_timeout_s),
         refresh_schema_job,
         summarize_conversation_job,
+        func(run_eval_job, timeout=settings.eval_job_timeout_s),
     ]
     cron_jobs: ClassVar = [
         cron(mcp_health_sweep, minute={0, 15, 30, 45}, run_at_startup=False, timeout=600),
@@ -139,5 +150,6 @@ __all__ = [
     "ingest_data_source_job",
     "mcp_health_sweep",
     "refresh_schema_job",
+    "run_eval_job",
     "summarize_conversation_job",
 ]

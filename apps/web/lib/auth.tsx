@@ -19,7 +19,7 @@ import {
   type Me,
   type Org,
 } from "@/lib/api";
-import { safeNext } from "@/lib/safe-next";
+import { inviteTokenFrom, safeNext } from "@/lib/safe-next";
 
 export { safeNext };
 
@@ -99,7 +99,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const register = useCallback(
     async (email: string, password: string, name: string, next?: string | null) => {
-      tokenStore.set(await authApi.register(email, password, name));
+      tokenStore.set(await authApi.register(email, password, name, inviteTokenFrom(next)));
       await afterAuth(next);
     },
     [afterAuth],

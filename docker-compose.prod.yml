@@ -1,0 +1,284 @@
+# Production stack (task 6.6). Self-contained: it does not extend
+# docker-compose.yml, whose defaults (published datastore ports, `app/app`,
+# `minioadmin`) are for a developer's machine.
+#
+#   cp deploy/production.env.example .env.production      # fill it in
+#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+#
+# What is different from the dev stack:
+#   - One way in. Only the proxy publishes ports (80, 443). Postgres, Redis,
+#     MinIO, the API and the web app are reachable only from inside.
+#   - No default secrets. Every `${NAME:?...}` below stops `up` with that
+#     message when the value is missing, and the API refuses to start on the
+#     values it knows to be placeholders (app/config.py, app/preflight.py).
+#   - TLS at the proxy (Caddy): a real certificate for a real domain, its
+#     own local CA for `localhost`.
+#   - The database network has no route out. The containers that must reach
+#     the internet (the API and the worker: the model, embeddings, URL
+#     sources) sit on a second network; the datastores do not.
+#   - Containers run without Linux capabilities or privilege escalation,
+#     restart on failure, and cap their logs.
+#
+# See docs/EXPLAINER.md §12.6 and docs/MANUAL_TESTING.md §12.6.
+
+name: assistant-studio-prod
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-hardened: &hardened
+  restart: unless-stopped
+  logging: *logging
+  security_opt: ["no-new-privileges:true"]
+
+x-api-env: &api-env
+  APP_ENV: production
+  LOG_FORMAT: json
+  APP_BASE_URL: https://${DOMAIN:?set DOMAIN to the host name people will open, e.g. assistant.example.com}
+  CORS_ORIGINS: https://${DOMAIN}
+  # One proxy in front: the client's address is the last X-Forwarded-For hop.
+  TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-1}
+  REGISTRATION: ${REGISTRATION:-invite}
+  DATABASE_URL: postgresql+asyncpg://app:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (letters and digits only - it goes into a URL)}@postgres:5432/app
+  REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD (letters and digits only)}@redis:6379/0
+  S3_ENDPOINT: http://minio:9000
+  # Citation links are opened by the browser, so they are signed for the
+  # public host; the proxy passes `/<bucket>/...` through to MinIO.
+  S3_PUBLIC_ENDPOINT: https://${DOMAIN}
+  S3_BUCKET: ${S3_BUCKET:-assistant-uploads}
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+  APP_KEK: ${APP_KEK:?set APP_KEK}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}
+  # `fake` answers without calling the model: for trying the stack at no cost.
+  AGENT_DRIVER: ${AGENT_DRIVER:-auto}
+  VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+  RAG_OFFLINE: ${RAG_OFFLINE:-0}
+  AGENT_MAX_CONCURRENCY: ${AGENT_MAX_CONCURRENCY:-8}
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+  DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
+  METRICS_TOKEN: ${METRICS_TOKEN:-}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+  MCP_RUNNER_URL: http://mcp-runner:8100
+  MCP_RUNNER_TOKEN: ${MCP_RUNNER_TOKEN:?set MCP_RUNNER_TOKEN}
+
+services:
+  proxy:
+    <<: *hardened
+    image: ${CADDY_IMAGE:-caddy:2}
+    environment:
+      SITE_ADDRESS: ${DOMAIN}
+      S3_BUCKET: ${S3_BUCKET:-assistant-uploads}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./deploy/proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and their keys. Losing this volume means asking for
+      # new certificates, and the issuer limits how often.
+      - caddydata:/data
+      - caddyconfig:/config
+    networks: [edge]
+    # Only what binding ports 80 and 443 needs.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+
+  web:
+    <<: *hardened
+    image: assistant-studio-web:${APP_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+      args:
+        # Baked into the browser bundle at build time: changing DOMAIN
+        # means rebuilding this image. Same origin as the pages, so the
+        # proxy routes /api/* to the API.
+        NEXT_PUBLIC_API_URL: https://${DOMAIN}
+    environment:
+      # Next's standalone server listens on $HOSTNAME, which Docker sets to
+      # the container id.
+      HOSTNAME: 0.0.0.0
+    networks: [edge]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/apps/web/.next/cache
+    mem_limit: ${WEB_MEMORY:-1g}
+    depends_on:
+      - api
+
+  api:
+    <<: *hardened
+    image: assistant-studio-api:${APP_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      <<: *api-env
+    # `edge`: the proxy, and the way out to the model. `data`: the
+    # datastores. `mcp`: the runner.
+    networks: [edge, data, mcp]
+    cap_drop: [ALL]
+    # Each turn starts a CLI subprocess: reap them.
+    init: true
+    pids_limit: ${API_PIDS:-2048}
+    mem_limit: ${API_MEMORY:-4g}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  worker:
+    <<: *hardened
+    image: assistant-studio-api:${APP_VERSION:-latest}
+    command: ["arq", "app.worker.WorkerSettings"]
+    environment:
+      <<: *api-env
+      # The api container migrates and runs the preflight; the worker
+      # starts after it is healthy and does neither.
+      RUN_MIGRATIONS: "0"
+      PREFLIGHT: "0"
+    networks: [edge, data, mcp]
+    cap_drop: [ALL]
+    init: true
+    pids_limit: ${API_PIDS:-2048}
+    mem_limit: ${WORKER_MEMORY:-4g}
+    healthcheck:
+      disable: true
+    depends_on:
+      api:
+        condition: service_healthy
+
+  mcp-runner:
+    <<: *hardened
+    image: assistant-studio-mcp-runner:${APP_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/mcp-runner.Dockerfile
+    environment:
+      MCP_RUNNER_TOKEN: ${MCP_RUNNER_TOKEN}
+      MCP_RUNNER_NETWORK: none
+    # Its only network, and it has no route out (docs/EXPLAINER.md §10.6).
+    networks: [mcp]
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop: [ALL]
+    pids_limit: 512
+    mem_limit: 2g
+    cpus: 2
+
+  postgres:
+    <<: *hardened
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: app
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    networks: [data]
+    shm_size: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    <<: *hardened
+    image: redis:7-alpine
+    # The password on the command line would show in `docker inspect` and
+    # in the process list; from the environment it shows in neither.
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - redisdata:/data
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    <<: *hardened
+    # Pin this to the release you tested (`minio/minio:RELEASE...`).
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+    volumes:
+      - miniodata:/data
+    # `data` for the API; `edge` so the proxy can pass citation links through.
+    networks: [data, edge]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio-init:
+    # The server image, which carries `mc` too. The backup scripts run
+    # their copies through this service (deploy/backup/lib.sh).
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    logging: *logging
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET:-assistant-uploads}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 \"$$S3_ACCESS_KEY\" \"$$S3_SECRET_KEY\" &&
+      mc mb --ignore-existing local/$$S3_BUCKET &&
+      echo 'bucket ready'
+      "
+    networks: [data]
+    restart: "no"
+
+networks:
+  # The proxy's side, and the way out to the internet.
+  edge: {}
+  # The datastores. No route out: nothing on it can call home, and nothing
+  # outside can reach it.
+  data:
+    internal: true
+  # The runner's only network.
+  mcp:
+    internal: true
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  caddydata:
+  caddyconfig:

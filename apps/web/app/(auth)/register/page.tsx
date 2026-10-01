@@ -115,6 +115,9 @@ function RegisterForm() {
 /** What went wrong, and what to do about it. */
 function registerError(err: unknown): string {
   if (err instanceof ApiError) {
+    if (err.code === "registration_by_invite") {
+      return "This server creates accounts by invitation. Ask an admin of your team for an invite link, then open it and choose Create account.";
+    }
     if (err.code === "email_taken") {
       return "An account with that email already exists. Sign in instead, or use another email.";
     }

@@ -16,6 +16,7 @@ from app.config import settings
 from app.datasources import pool as datasource_pool
 from app.logging import configure_logging, get_logger
 from app.observability.otel import setup_tracing, shutdown_tracing
+from app.services import turns
 
 configure_logging(settings.log_level, settings.log_format)
 log = get_logger(__name__)
@@ -36,6 +37,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await approval_registry.start_listener()
     await interrupts.start_listener()
     yield
+    # Turns running on this process (QOS-01) are stopped properly, each
+    # recorded as aborted, rather than dropped with the process.
+    await turns.shutdown()
     await interrupts.stop_listener()
     await approval_registry.stop_listener()
     # Close pooled connections to tenant databases. `close_all` was defined
@@ -61,7 +65,10 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
-        allow_credentials=True,
+        # Sign-in is a bearer header, never a cookie: nothing for the browser
+        # to attach by itself, so a careless CORS_ORIGINS can't be used to
+        # ride a session.
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
         # Retry-After: so the web app can read how long a 429 asks it to wait.

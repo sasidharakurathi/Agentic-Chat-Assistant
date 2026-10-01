@@ -1,10 +1,11 @@
 "use client";
 
 import { Handle, Position, useStore, type Node, type NodeProps } from "@xyflow/react";
+import { memo } from "react";
 
 import { useCanvasView } from "@/components/canvas/canvas-view";
 import type { StationData } from "@/components/canvas/graph-sync";
-import { problemSummary, stationDetail, stationName } from "@/components/canvas/station";
+import { plural, problemSummary, stationDetail, stationName } from "@/components/canvas/station";
 import { Lamp } from "@/components/ui/lamp";
 import { LineBullet, nodeFamily } from "@/components/ui/line-bullet";
 import { formatMs } from "@/lib/run-trace";
@@ -13,14 +14,36 @@ import { cn } from "@/lib/utils";
 /** Below this zoom only the bullet and the name are drawn. */
 const DETAIL_ZOOM = 0.7;
 
+/** A station's part in a comparison of two versions: the word on its tag,
+ *  and the tag's and the plate's colours. The word carries the meaning;
+ *  the colour repeats it. */
+const DIFF = {
+  added: { word: "Added", tag: "bg-success text-success-foreground", plate: "border-success" },
+  removed: {
+    word: "Removed",
+    tag: "bg-destructive text-destructive-foreground",
+    plate: "border-destructive border-dashed",
+  },
+  changed: { word: "Changed", tag: "bg-warning text-warning-foreground", plate: "border-warning" },
+} as const;
+
 /** A station on the canvas (docs/DESIGN.md section 6). A 52px plate, so
  *  handles on one row line up and the main line stays straight: a 24px
  *  line bullet (its stop number on the main line, its glyph elsewhere), the
  *  name, and one line of plain detail. The Agent is the interchange: wider,
  *  with an ink outline and three inputs (left for the main line, top and
- *  bottom for capability lines). Input and Output are termini. */
-export function StudioNode({ data, selected }: NodeProps<Node<StationData>>) {
-  const { node, issues, sourceLabel, trace, stop, off = false, time } = data;
+ *  bottom for capability lines). Input and Output are termini.
+ *
+ *  Memoised: React Flow re-renders a station's wrapper for its own
+ *  reasons (a drag elsewhere, a selection), and the station itself only
+ *  needs drawing again when what it is drawn from changes. With
+ *  `mergeFlowNodes` keeping unchanged `data` objects, that is the one
+ *  station that changed, not all hundred. */
+export const StudioNode = memo(function StudioNode({
+  data,
+  selected,
+}: NodeProps<Node<StationData>>) {
+  const { node, issues, sourceLabel, trace, stop, off = false, time, diff, diffCount } = data;
   const { keyFocus } = useCanvasView();
   const showDetail = useStore((s) => s.transform[2] >= DETAIL_ZOOM);
   const t = node.type;
@@ -35,11 +58,13 @@ export function StudioNode({ data, selected }: NodeProps<Node<StationData>>) {
   // shown run spent here, then the station's own detail.
   const detail = problem
     ? problem
-    : time !== undefined
-      ? formatMs(time)
-      : off && t !== "memory"
-        ? "Switched off"
-        : stationDetail(node, sourceLabel);
+    : diff === "changed" && diffCount
+      ? `${plural(diffCount, "setting", "settings")} changed`
+      : time !== undefined
+        ? formatMs(time)
+        : off && t !== "memory"
+          ? "Switched off"
+          : stationDetail(node, sourceLabel);
   const name = stationName(node, sourceLabel);
   const tooltip = [...errors, ...warnings].join("\n") || undefined;
 
@@ -57,8 +82,20 @@ export function StudioNode({ data, selected }: NodeProps<Node<StationData>>) {
         // "You are here": a marker band outside an ink edge.
         selected && "ring-marker ring-4",
         unlit && !selected && "border-line-unlit",
+        diff && !agent && DIFF[diff].plate,
       )}
     >
+      {diff && (
+        <span
+          aria-hidden
+          className={cn(
+            "text-small absolute -top-2.5 right-2 rounded-sm px-1.5 leading-4 font-medium",
+            DIFF[diff].tag,
+          )}
+        >
+          {DIFF[diff].word}
+        </span>
+      )}
       {(t === "input" || t === "output") && (
         <span
           aria-hidden
@@ -86,6 +123,7 @@ export function StudioNode({ data, selected }: NodeProps<Node<StationData>>) {
           className={cn(
             "font-condensed text-h4 truncate leading-[18px] font-semibold",
             (off || unlit) && "text-muted-foreground",
+            diff === "removed" && "text-muted-foreground line-through",
           )}
         >
           {stop !== undefined && <span className="sr-only">{`${stop}. `}</span>}
@@ -122,4 +160,4 @@ export function StudioNode({ data, selected }: NodeProps<Node<StationData>>) {
       )}
     </div>
   );
-}
+});

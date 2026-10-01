@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -41,6 +42,7 @@ from app.schemas.db_connection import (
     DbTestResult,
 )
 from app.security.crypto import CryptoError, SealedSecret, open_sealed, seal
+from app.security.redact import strip_secrets
 from app.services import audit
 
 log = get_logger(__name__)
@@ -115,11 +117,63 @@ async def _read_password(session: AsyncSession, secret_ref: uuid.UUID | None) ->
         ) from None
 
 
+def _platform_database() -> Path | None:
+    """The platform's own database file, when it runs on SQLite."""
+    url = settings.database_url
+    if not url.startswith("sqlite"):
+        return None
+    name = url.split(":///", 1)[-1].split("?", 1)[0]
+    return Path(name).resolve() if name and name != ":memory:" else None
+
+
+def check_sqlite_path(database: str) -> None:
+    """Refuse a SQLite connection to a file it must not open (task 6.3).
+
+    A SQLite "connection" is a path on this server that the API process
+    opens. Left free, any signed-in user could register one pointing at the
+    platform's own database (every user, password hash and sealed secret)
+    or at a file another org registered.
+
+    - The platform's own database is never allowed.
+    - With `DB_SQLITE_DIR` set, the file must sit inside that folder, after
+      symlinks and `..` are resolved.
+    - Without it, production refuses SQLite connections altogether.
+
+    Checked when a connection is saved and again every time it is used, so
+    a row saved before the rule existed is covered too.
+    """
+    try:
+        path = Path(database).resolve()
+    except (OSError, ValueError) as exc:
+        raise BadRequest("That is not a usable file path.", code="sqlite_path_not_allowed") from exc
+    if path == _platform_database():
+        raise BadRequest(
+            "That file is this server's own database and can't be used as a connection.",
+            code="sqlite_path_not_allowed",
+        )
+    root = settings.db_sqlite_dir.strip()
+    if root:
+        if not path.is_relative_to(Path(root).resolve()):
+            raise BadRequest(
+                "SQLite connections can only open files in the folder this server is "
+                "configured with (DB_SQLITE_DIR).",
+                code="sqlite_path_not_allowed",
+            )
+    elif settings.is_production:
+        raise BadRequest(
+            "SQLite connections are switched off on this server. An operator can allow a "
+            "folder for them with DB_SQLITE_DIR.",
+            code="sqlite_path_not_allowed",
+        )
+
+
 async def connection_info(session: AsyncSession, conn: DbConnection) -> ConnectionInfo:
     """Build the adapter's input, decrypting credentials at the last moment.
 
     This is the only place a sealed connection string is ever opened, and it
     goes straight into the adapter's `options` — never back into the row."""
+    if conn.engine == DbEngine.sqlite:
+        check_sqlite_path(conn.database)
     options = dict(conn.options or {})
     if conn.uri_secret_ref is not None:
         options["uri"] = await _read_password(session, conn.uri_secret_ref)
@@ -146,6 +200,8 @@ async def create(
     user_id: uuid.UUID,
     ip: str | None = None,
 ) -> DbConnection:
+    if body.engine == "sqlite":
+        check_sqlite_path(body.database)
     secret_ref = None
     if body.password:
         secret_ref = await _store_secret(
@@ -250,6 +306,8 @@ async def update(
             code="connection_uri_not_supported",
         )
 
+    if conn.engine == DbEngine.sqlite and data.get("database"):
+        check_sqlite_path(data["database"])
     for field, value in data.items():
         if value is not None:
             setattr(conn, field, value)
@@ -336,7 +394,7 @@ async def test_connection(session: AsyncSession, conn: DbConnection) -> DbTestRe
         await adapter.test(info)
     except DbError as exc:
         conn.status = DbConnectionStatus.error
-        conn.error = str(exc)[:2000]
+        conn.error = strip_secrets(str(exc))[:2000]
         conn.last_checked_at = datetime.now(UTC)
         await session.commit()
         return DbTestResult(ok=False, error=conn.error)
@@ -401,7 +459,7 @@ async def refresh_schema(session: AsyncSession, conn: DbConnection) -> DbSchemaO
         namespaces = await adapter.introspect(info)
     except DbError as exc:
         conn.status = DbConnectionStatus.error
-        conn.error = str(exc)[:2000]
+        conn.error = strip_secrets(str(exc))[:2000]
         await session.commit()
         raise BadRequest(f"introspection failed: {exc}", code="introspection_failed") from exc
 

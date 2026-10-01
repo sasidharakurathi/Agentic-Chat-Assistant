@@ -1,7 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import dynamic from "next/dynamic";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
+import {
+  changesFor,
+  compareGraphs,
+  comparisonSummary,
+  type GraphComparison,
+} from "@/components/canvas/graph-diff";
+import { stationLabel } from "@/components/canvas/graph-sync";
 import { SUBAGENT_ROLE_NAME, TOOL_NAME } from "@/components/canvas/station";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -15,9 +23,17 @@ import {
   assistants,
   type AssistantVersion,
   type DiffEntry,
+  type Graph,
   type VersionDiff,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+
+// The canvas is the largest thing on the page, and History is one tab of
+// eight: loaded when a comparison is first drawn, not with the builder.
+const Canvas = dynamic(() => import("@/components/canvas/Canvas").then((m) => m.Canvas), {
+  ssr: false,
+  loading: () => <Loading what="the comparison" rows={1} rowHeight={120} />,
+});
 
 /** What went wrong, then what to do: the server's message when it gave one. */
 function failed(what: string, err: unknown, todo: string): string {
@@ -35,9 +51,17 @@ const when = (iso: string) =>
  *
  *  The backend has listed versions and diffed them since task 1.2; nothing in
  *  the UI called either. A version is immutable, so this is read-only: pick
- *  two, see the config changes by setting and the graph changes by node
- *  and connection. */
-export function VersionHistory({ assistantId }: { assistantId: string }) {
+ *  two, see the two pipelines as one drawing with what changed marked on it
+ *  (task 6.8), then the same changes as a list, and the config changes by
+ *  setting. */
+export function VersionHistory({
+  assistantId,
+  sourceLabels = {},
+}: {
+  assistantId: string;
+  /** Names for the documents, databases and servers a station points at. */
+  sourceLabels?: Record<string, string>;
+}) {
   const [rows, setRows] = useState<AssistantVersion[]>([]);
   const [more, setMore] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -45,6 +69,9 @@ export function VersionHistory({ assistantId }: { assistantId: string }) {
   const [from, setFrom] = useState<number | null>(null);
   const [to, setTo] = useState<number | null>(null);
   const [diff, setDiff] = useState<VersionDiff | null>(null);
+  // The two versions' graphs, for the drawing. The list and the table need
+  // only the diff, so they show even if these fail to load.
+  const [graphs, setGraphs] = useState<{ from: Graph; to: Graph } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
@@ -84,14 +111,23 @@ export function VersionHistory({ assistantId }: { assistantId: string }) {
   }, [assistantId, more]);
 
   useEffect(() => {
+    setGraphs(null);
     if (from === null || to === null || from === to) {
       setDiff(null);
       return;
     }
     setError(null);
+    let live = true;
+    Promise.all([assistants.version(assistantId, from), assistants.version(assistantId, to)])
+      .then(([a, b]) => {
+        if (live) setGraphs({ from: a.graph, to: b.graph });
+      })
+      .catch(() => {});
     assistants
       .diff(assistantId, from, to)
-      .then(setDiff)
+      .then((d) => {
+        if (live) setDiff(d);
+      })
       .catch((err) =>
         setError(
           failed(
@@ -101,6 +137,9 @@ export function VersionHistory({ assistantId }: { assistantId: string }) {
           ),
         ),
       );
+    return () => {
+      live = false;
+    };
   }, [assistantId, from, to]);
 
   if (!loaded) {
@@ -199,7 +238,7 @@ export function VersionHistory({ assistantId }: { assistantId: string }) {
               Pick two different versions to see what changed.
             </p>
           )}
-          {diff && <DiffView diff={diff} />}
+          {diff && <DiffView diff={diff} graphs={graphs} sourceLabels={sourceLabels} />}
         </section>
       </div>
     </div>
@@ -243,9 +282,72 @@ const OP: Record<
   changed: { variant: "warning", word: "Changed" },
 };
 
-function DiffView({ diff }: { diff: VersionDiff }) {
+const noop = () => {};
+
+/** The two pipelines as one drawing (task 6.8). Read-only: stations can be
+ *  reached and picked, from the keyboard too, and picking one narrows the
+ *  settings table below to that station. */
+function Comparison({
+  comparison,
+  sourceLabels,
+  picked,
+  onPick,
+}: {
+  comparison: GraphComparison;
+  sourceLabels: Record<string, string>;
+  picked: string | null;
+  onPick: (id: string | null) => void;
+}) {
+  const marks = useMemo(
+    () => ({ nodes: comparison.nodes, edges: comparison.edges, counts: comparison.counts }),
+    [comparison],
+  );
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="border-border h-[420px] overflow-hidden rounded-lg border">
+        <Canvas
+          graph={comparison.graph}
+          schema={null}
+          sourceLabels={sourceLabels}
+          selectedId={picked}
+          onSelect={onPick}
+          onNodeMoved={noop}
+          diff={marks}
+          readOnly
+          label="The two versions' pipelines, with what changed marked"
+        />
+      </div>
+      <p className="text-small text-muted-foreground max-w-[70ch]">
+        Tagged stations were added, removed or changed. A line on a green band was added; a dashed
+        red line was removed. Everything in grey is the same in both versions. Pick a changed
+        station to see only its settings below.
+      </p>
+    </div>
+  );
+}
+
+function DiffView({
+  diff,
+  graphs,
+  sourceLabels,
+}: {
+  diff: VersionDiff;
+  graphs: { from: Graph; to: Graph } | null;
+  sourceLabels: Record<string, string>;
+}) {
   const g = diff.graph_diff;
   const name = (id: string) => nodeName(id, g.node_types[id]);
+  const comparison = useMemo(
+    () => (graphs ? compareGraphs(graphs.from, graphs.to, g) : null),
+    [graphs, g],
+  );
+  const [picked, setPicked] = useState<string | null>(null);
+  // A station picked in one comparison means nothing in the next.
+  useEffect(() => setPicked(null), [diff]);
+  const pickedNode = comparison?.graph.nodes.find((n) => n.id === picked) ?? null;
+  const pickedChanges =
+    comparison && pickedNode ? changesFor(g.nodes_changed, pickedNode.id, comparison.graph) : null;
+  const summary = comparison ? comparisonSummary(comparison) : null;
   const noGraphChange =
     g.nodes_added.length +
       g.nodes_removed.length +
@@ -261,17 +363,20 @@ function DiffView({ diff }: { diff: VersionDiff }) {
       </h2>
 
       <section className="flex flex-col gap-3">
-        <SectionHeading level={3} title="Configuration" />
-        {diff.config_diff.length === 0 ? (
-          <p className="text-muted-foreground text-sm">No configuration changes.</p>
-        ) : (
-          <ChangeTable entries={diff.config_diff} />
-        )}
-      </section>
-
-      <section className="flex flex-col gap-3">
-        <SectionHeading level={3} title="Pipeline" />
+        <SectionHeading
+          level={3}
+          title="Pipeline"
+          description={summary ? <span className="num">{summary}</span> : undefined}
+        />
         {noGraphChange && <p className="text-muted-foreground text-sm">No pipeline changes.</p>}
+        {!noGraphChange && comparison && (
+          <Comparison
+            comparison={comparison}
+            sourceLabels={sourceLabels}
+            picked={picked}
+            onPick={setPicked}
+          />
+        )}
         {!noGraphChange && (
           <ul className="border-border border-t text-sm">
             {g.nodes_added.map((id) => (
@@ -296,7 +401,30 @@ function DiffView({ diff }: { diff: VersionDiff }) {
             ))}
           </ul>
         )}
-        {g.nodes_changed.length > 0 && <ChangeTable entries={g.nodes_changed} />}
+        {pickedNode && pickedChanges && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1" role="status">
+            <p className="text-sm">
+              {pickedChanges.length > 0
+                ? `Showing the changed settings of ${stationLabel(pickedNode, sourceLabels)}.`
+                : `${stationLabel(pickedNode, sourceLabels)} has no changed settings.`}
+            </p>
+            <Button variant="link" size="sm" onClick={() => setPicked(null)}>
+              Show all
+            </Button>
+          </div>
+        )}
+        {(pickedChanges ?? g.nodes_changed).length > 0 && (
+          <ChangeTable entries={pickedChanges ?? g.nodes_changed} />
+        )}
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <SectionHeading level={3} title="Configuration" />
+        {diff.config_diff.length === 0 ? (
+          <p className="text-muted-foreground text-sm">No configuration changes.</p>
+        ) : (
+          <ChangeTable entries={diff.config_diff} />
+        )}
       </section>
     </div>
   );

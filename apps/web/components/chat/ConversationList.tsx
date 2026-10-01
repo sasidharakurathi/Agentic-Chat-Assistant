@@ -6,6 +6,7 @@ import { useId, type ReactNode } from "react";
 import { groupByDay } from "@/components/chat/conversation-groups";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Lamp } from "@/components/ui/lamp";
 import { BackLink } from "@/components/ui/page-header";
 import type { Conversation } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -147,6 +148,9 @@ function Row({
             : "text-muted-foreground hover:bg-muted hover:text-foreground",
         )}
       >
+        {c.running && (
+          <Lamp tone="success" live className="mr-2 align-middle" label="Answering now" />
+        )}
         {c.title}
       </button>
       <div

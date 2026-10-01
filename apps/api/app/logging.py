@@ -38,6 +38,12 @@ def configure_logging(level: str = "INFO", fmt: str = "console") -> None:
         _add_request_id,
         timestamper,
         structlog.processors.StackInfoRenderer(),
+        # The traceback becomes a string here, before the scrub (task 6.3).
+        # Left to the renderer it was printed after it, unredacted: the
+        # console's rich traceback even listed each frame's local variables
+        # (a DSN, a request body, a plaintext being sealed), and the JSON
+        # log had no traceback at all, only `"exc_info": true`.
+        structlog.processors.format_exc_info,
         # Last: masks credentials in whatever the processors above merged in
         # (plan §8, logs never carry secrets).
         redact_event,
@@ -46,7 +52,9 @@ def configure_logging(level: str = "INFO", fmt: str = "console") -> None:
     renderer: structlog.typing.Processor = (
         structlog.processors.JSONRenderer()
         if fmt == "json"
-        else structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
+        else structlog.dev.ConsoleRenderer(
+            colors=sys.stderr.isatty(), exception_formatter=structlog.dev.plain_traceback
+        )
     )
 
     structlog.configure(

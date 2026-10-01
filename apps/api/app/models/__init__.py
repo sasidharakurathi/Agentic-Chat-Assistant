@@ -19,6 +19,7 @@ from app.models.conversation import (
     ToolCall,
 )
 from app.models.enums import MemberRole
+from app.models.evals import EvalCase, EvalCaseResult, EvalRun, EvalRunStatus, EvalSuite
 from app.models.integration import (
     DbConnection,
     DbConnectionStatus,
@@ -60,6 +61,11 @@ __all__ = [
     "DbEngine",
     "DbSchemaCache",
     "Document",
+    "EvalCase",
+    "EvalCaseResult",
+    "EvalRun",
+    "EvalRunStatus",
+    "EvalSuite",
     "Invite",
     "McpServer",
     "McpServerStatus",

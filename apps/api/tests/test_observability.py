@@ -266,3 +266,96 @@ async def test_a_disconnected_turn_still_ends_its_span(
     turn = _by_name(spans)["chat.turn"]
     assert turn.attributes["assistant_studio.run.status"] == "aborted"
     assert turn.attributes["langfuse.observation.level"] == "WARNING"
+
+
+# ── trace coverage (task 6.4) ────────────────────────────────
+
+
+@pytest.fixture
+def everything_traced(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """One provider that receives what a collector would: the app's
+    requests, the engine's statements, the turn and the jobs."""
+    from app.db.session import get_engine
+    from app.main import app
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setitem(otel._state, "provider", provider)
+    monkeypatch.setattr(turn_trace, "_tracer", lambda: provider.get_tracer(otel.LLM_SCOPE))
+    FastAPIInstrumentor.instrument_app(app, tracer_provider=provider, excluded_urls="healthz")
+    # Earlier tests already built the app's middleware: rebuild it, traced.
+    app.middleware_stack = None
+    database = SQLAlchemyInstrumentor()
+    database.instrument(engine=get_engine().sync_engine, tracer_provider=provider)
+    yield exporter
+    FastAPIInstrumentor.uninstrument_app(app)
+    app.middleware_stack = None
+    database.uninstrument()
+
+
+async def test_every_kind_of_work_leaves_a_span(
+    client: AsyncClient,
+    org_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    everything_traced: InMemorySpanExporter,
+) -> None:
+    """The plan's list (§12): HTTP, the database, each agent turn, each tool
+    call, and the background jobs. Each kind must be there and hang off the
+    right parent. A kind of work that stops being traced fails here."""
+    from app import worker
+    from opentelemetry.trace import SpanKind
+    from sqlalchemy import text
+
+    exporter = everything_traced
+
+    async def ingest(session: Any, _source_id: uuid.UUID) -> None:
+        await session.execute(text("SELECT 1"))  # the job's own database work
+
+    async def summarize(_conversation_id: uuid.UUID, _version: int) -> None:
+        return None
+
+    monkeypatch.setattr(worker, "ingest_data_source", ingest)
+    monkeypatch.setattr(worker.conversation_memory, "summarize", summarize)
+    aid = await _new_assistant(client, org_headers, {"tools": {"calculator": {"enabled": True}}})
+    cid = await _new_conversation(client, org_headers, aid)
+    await _send(client, org_headers, cid, "please calculate 21 + 21")
+    await worker.ingest_data_source_job({}, str(uuid.uuid4()))
+    await worker.summarize_conversation_job({}, cid, 1)
+    await worker.run_eval_job({}, str(uuid.uuid4()))  # no such run: still a job
+    with pytest.raises(RuntimeError), otel.span("job.broken"):
+        raise RuntimeError("postgres://app:hunter2@db/app refused")
+
+    finished = exporter.get_finished_spans()
+    by_name = {s.name: s for s in finished}
+    names = set(by_name)
+
+    # HTTP: one server span per request, named by its route.
+    server = [s for s in finished if s.kind is SpanKind.SERVER]
+    assert any("/conversations/{conversation_id}/messages" in s.name for s in server), names
+    # The database: client spans.
+    queries = [s for s in finished if s.attributes and s.attributes.get("db.system")]
+    assert len(queries) > 5
+    # The turn, its model call and its tool call.
+    assert {"chat.turn", "claude", "tool:mcp__caps__calculator"} <= names
+    # Background jobs, each with its subject.
+    assert {"job.ingest_data_source", "job.summarize_conversation", "job.eval_run"} <= names
+    assert by_name["job.summarize_conversation"].attributes["conversation_id"] == cid
+    # A job's database work hangs off the job, so a slow ingestion can be
+    # read as one trace.
+    job = by_name["job.ingest_data_source"]
+    assert any(q.parent is not None and q.parent.span_id == job.context.span_id for q in queries)
+    # A job that raises is marked failed, and still ends.
+    broken = by_name["job.broken"]
+    assert broken.status.status_code is StatusCode.ERROR
+    # By its type only: the message (here, a connection string) stays home.
+    assert broken.status.description == "RuntimeError"
+    assert not broken.events
+
+
+def test_a_job_span_costs_nothing_when_tracing_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(otel._state, "provider", None)
+    with otel.span("job.anything", id="x"):
+        pass

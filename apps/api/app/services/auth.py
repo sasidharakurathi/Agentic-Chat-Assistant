@@ -6,11 +6,12 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import cache
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.errors import Conflict, Unauthorized
+from app.api.errors import Conflict, Forbidden, Unauthorized
 from app.config import settings
 from app.logging import get_logger
 from app.models.enums import MemberRole
@@ -49,10 +50,53 @@ async def _unique_org_slug(session: AsyncSession, name: str) -> str:
     return f"{base}-{secrets.token_hex(6)}"
 
 
+async def _may_register(session: AsyncSession, email: str, invite_token: str | None) -> bool:
+    """Sign-up by invitation (task 6.6): the first account on a new install,
+    or the holder of a live invite for this address.
+
+    The token and not only the address: an invite is mailed to someone, and
+    whoever merely knows that an address was invited must not be able to
+    take the account before its owner does.
+    """
+    if settings.registration == "open":
+        return True
+    if await session.scalar(select(User.id).limit(1)) is None:
+        return True
+    if not invite_token:
+        return False
+    # Imported here: `orgs` is the invites' home and imports nothing of ours.
+    from app.models.invite import Invite
+    from app.services.orgs import _hash_token
+
+    invite = await session.scalar(
+        select(Invite).where(Invite.token_hash == _hash_token(invite_token))
+    )
+    return (
+        invite is not None
+        and invite.accepted_at is None
+        and invite.expires_at > datetime.now(UTC)
+        and invite.email == email
+    )
+
+
 async def register(
-    session: AsyncSession, *, email: str, password: str, name: str, ip: str | None = None
+    session: AsyncSession,
+    *,
+    email: str,
+    password: str,
+    name: str,
+    ip: str | None = None,
+    invite_token: str | None = None,
 ) -> User:
     email = email.strip().lower()
+    if not await _may_register(session, email, invite_token):
+        # One answer for no invite, a wrong one, a used one and an expired
+        # one: which of those it was is not the asker's to learn.
+        raise Forbidden(
+            "Sign-up on this server is by invitation. Ask an admin of your team for an "
+            "invite link, and open it to create your account.",
+            code="registration_by_invite",
+        )
     if await session.scalar(select(User.id).where(User.email == email)) is not None:
         raise Conflict("An account with that email already exists", code="email_taken")
 
@@ -91,10 +135,21 @@ async def register(
     return user
 
 
+@cache
+def _decoy_hash() -> str:
+    """A real hash of nothing anyone knows, to verify against when the
+    address has no account."""
+    return hash_password(secrets.token_urlsafe(24))
+
+
 async def authenticate(session: AsyncSession, *, email: str, password: str) -> User:
     email = email.strip().lower()
     user = await session.scalar(select(User).where(User.email == email))
-    if user is None or not verify_password(password, user.password_hash):
+    # An unknown address still costs one password hash (task 6.3). It used
+    # to return at once, so the response time said whether an account
+    # exists.
+    hashed = user.password_hash if user is not None else _decoy_hash()
+    if not verify_password(password, hashed) or user is None:
         raise Unauthorized("Invalid email or password", code="invalid_credentials")
     if not user.is_active:
         raise Unauthorized("Account is disabled", code="account_disabled")
@@ -158,8 +213,19 @@ async def rotate_refresh_token(
     if row.expires_at <= datetime.now(UTC):
         raise Unauthorized("Refresh token expired", code="refresh_expired")
 
-    row.used_at = datetime.now(UTC)
-    await session.flush()
+    # Claimed in one conditional UPDATE (task 6.3). Reading `used_at` and
+    # then writing it let two requests with the same token both pass the
+    # check above and both get a new pair.
+    claimed = await session.execute(
+        update(RefreshToken)
+        .where(RefreshToken.id == row.id, RefreshToken.used_at.is_(None))
+        .values(used_at=datetime.now(UTC))
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:  # type: ignore[attr-defined]
+        await _revoke_family(session, row.family_id, reason="reuse_detected")
+        await session.commit()
+        raise Unauthorized("Refresh token already used", code="refresh_reused")
     return await issue_tokens(
         session, user_id=row.user_id, family_id=row.family_id, user_agent=user_agent, ip=ip
     )

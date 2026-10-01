@@ -70,11 +70,68 @@ export function mergeFlowNodes<T extends Node>(
   next: T[],
   selectedId: string | null,
 ): T[] {
-  const measured = new Map(prev.map((n) => [n.id, n.measured]));
+  const before = new Map(prev.map((n) => [n.id, n]));
   return next.map((n) => {
-    const size = measured.get(n.id);
-    return { ...n, selected: n.id === selectedId, ...(size ? { measured: size } : {}) };
+    const old = before.get(n.id);
+    const selected = n.id === selectedId;
+    // Nothing about this station changed: hand React Flow the object it
+    // already has, and it skips the station entirely. Without this every
+    // graph update (a save, a selection) re-rendered every station, which
+    // at a hundred of them is a visible pause (task 6.8).
+    if (old && Boolean(old.selected) === selected && sameDrawing(old, n)) return old as T;
+    const size = old?.measured;
+    return { ...n, selected, ...(size ? { measured: size } : {}) };
   });
+}
+
+/** The same for lines: an unchanged line keeps its object (and whether it
+ *  is selected); a changed one takes the new object. */
+export function mergeFlowEdges<T extends Edge>(prev: Edge[], next: T[]): T[] {
+  const before = new Map(prev.map((e) => [e.id, e]));
+  return next.map((e) => {
+    const old = before.get(e.id);
+    if (!old) return e;
+    if (sameDrawing(old, e)) return old as T;
+    return old.selected ? { ...e, selected: true } : e;
+  });
+}
+
+/** What a station or a line is drawn from, as one string, remembered per
+ *  object: two objects with the same string draw the same thing. Selection
+ *  and the measured size are React Flow's, and left out. */
+const drawings = new WeakMap<object, string>();
+const REACT_FLOWS_OWN = ["selected", "measured", "dragging"];
+
+function drawing(item: Node | Edge): string {
+  let text = drawings.get(item);
+  if (text === undefined) {
+    const rest: Record<string, unknown> = { ...item };
+    for (const key of REACT_FLOWS_OWN) delete rest[key];
+    text = JSON.stringify(rest);
+    drawings.set(item, text);
+  }
+  return text;
+}
+
+const sameDrawing = (a: Node | Edge, b: Node | Edge) => drawing(a) === drawing(b);
+
+/** The order a keyboard or a screen reader meets the stations in: the main
+ *  line first, stop by stop, then everything else column by column and top
+ *  to bottom, which is how the diagram reads. React Flow puts stations in
+ *  the page in the order it is given them, so without this Tab followed the
+ *  order they happened to be added in. */
+export function readingOrder(graph: Graph): string[] {
+  const stops = mainLineStops(graph);
+  return [...graph.nodes]
+    .sort((a, b) => {
+      const sa = stops.get(a.id);
+      const sb = stops.get(b.id);
+      if (sa !== undefined || sb !== undefined) {
+        return (sa ?? Infinity) - (sb ?? Infinity);
+      }
+      return a.position.x - b.position.x || a.position.y - b.position.y || a.id.localeCompare(b.id);
+    })
+    .map((n) => n.id);
 }
 
 /** Main-line station types, in route order. Every other type is a
@@ -135,6 +192,20 @@ export type StationData = StudioNodeData & {
   off?: boolean;
   /** Time the shown run spent here, in ms, when the trace has it. */
   time?: number;
+  /** How this station differs between two versions being compared. */
+  diff?: DiffMark;
+  /** How many of its settings changed, for a `changed` station. */
+  diffCount?: number;
+};
+
+/** A station's or a line's part in a comparison of two versions. */
+export type DiffMark = "added" | "removed" | "changed";
+export type LineDiffMark = "added" | "removed";
+
+const DIFF_WORD: Record<DiffMark, string> = {
+  added: "added in the newer version",
+  removed: "removed in the newer version",
+  changed: "changed between the versions",
 };
 
 /** What a line draws with (`RouteEdge`). */
@@ -151,6 +222,8 @@ export type RouteEdgeData = {
   trace?: "lit" | "dim";
   /** Changes when a run opens, so the lit route draws itself once. */
   drawKey?: string | null;
+  /** Added or removed between two versions being compared. */
+  diff?: LineDiffMark;
 };
 
 export type FlowOptions = {
@@ -160,6 +233,15 @@ export type FlowOptions = {
   times?: ReadonlyMap<string, number>;
   /** An id for the run being shown; the lit route draws once per id. */
   drawKey?: string | null;
+  /** Two versions being compared (task 6.8): what differs is marked, and
+   *  everything that did not change is drawn unlit so the change stands out. */
+  diff?: {
+    nodes: ReadonlyMap<string, DiffMark>;
+    /** Keyed `source>target`. */
+    edges: ReadonlyMap<string, LineDiffMark>;
+    /** Node id -> how many of its settings changed. */
+    counts?: ReadonlyMap<string, number>;
+  };
 };
 
 export function toFlow(
@@ -171,11 +253,23 @@ export function toFlow(
   highlight: Set<string> | null = null,
   options: FlowOptions = {},
 ) {
-  const trace = (id: string) => (highlight ? (highlight.has(id) ? "lit" : "dim") : undefined);
+  const diff = options.diff;
+  const trace = (id: string) =>
+    highlight
+      ? highlight.has(id)
+        ? "lit"
+        : "dim"
+      : diff
+        ? diff.nodes.has(id)
+          ? "lit"
+          : "dim"
+        : undefined;
   const stops = mainLineStops(graph);
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const off = (n: GraphNode) => Boolean(options.switchedOff?.has(n.id)) || switchedOffByData(n);
-  const nodes: Node<StationData>[] = graph.nodes.map((n) => ({
+  const order = new Map(readingOrder(graph).map((id, i) => [id, i]));
+  const inOrder = [...graph.nodes].sort((a, b) => order.get(a.id)! - order.get(b.id)!);
+  const nodes: Node<StationData>[] = inOrder.map((n) => ({
     id: n.id,
     type: "studio",
     position: n.position,
@@ -187,7 +281,9 @@ export function toFlow(
       stop: stops.get(n.id),
       issues: issues.nodes.get(n.id),
       off: off(n),
-      dim: trace(n.id) === "dim",
+      // In a comparison "unlit" means unchanged, which needs no words.
+      dim: !diff && trace(n.id) === "dim",
+      diff: diff?.nodes.get(n.id),
     }),
     data: {
       node: n,
@@ -196,6 +292,8 @@ export function toFlow(
       stop: stops.get(n.id),
       off: off(n),
       time: highlight?.has(n.id) ? options.times?.get(n.id) : undefined,
+      diff: diff?.nodes.get(n.id),
+      diffCount: diff?.counts?.get(n.id),
       // These kinds carry only an id in the graph; the label comes from the
       // assistant's live sources, connections and servers. Resolving
       // `data_source` but not `database` is how a correctly configured
@@ -218,7 +316,12 @@ export function toFlow(
     const target = byId.get(e.target);
     const sourceType = source?.type ?? "";
     const main = MAIN_LINE_TYPES.has(sourceType) && MAIN_LINE_TYPES.has(target?.type ?? "");
-    const lit = highlight ? highlight.has(e.source) && highlight.has(e.target) : undefined;
+    const mark = diff?.edges.get(edgeKey(e.source, e.target));
+    const lit = highlight
+      ? highlight.has(e.source) && highlight.has(e.target)
+      : diff
+        ? mark !== undefined
+        : undefined;
     const writes = source ? canChangeData(source) : false;
     return {
       id: e.id ?? `e-${e.source}-${e.target}-${i}`,
@@ -232,6 +335,7 @@ export function toFlow(
         }`,
         writes && !problems ? "can change data" : null,
         problems ? `won't run: ${problems[0]}` : null,
+        mark ? DIFF_WORD[mark] : null,
       ]
         .filter(Boolean)
         .join(", "),
@@ -250,6 +354,7 @@ export function toFlow(
         writes,
         trace: lit === undefined ? undefined : lit ? "lit" : "dim",
         drawKey: options.drawKey ?? null,
+        diff: mark,
       },
     };
   });
@@ -279,7 +384,15 @@ export function nodeAriaLabel(
     issues,
     off = false,
     dim = false,
-  }: { label: string; stop?: number; issues?: NodeIssues; off?: boolean; dim?: boolean },
+    diff,
+  }: {
+    label: string;
+    stop?: number;
+    issues?: NodeIssues;
+    off?: boolean;
+    dim?: boolean;
+    diff?: DiffMark;
+  },
 ): string {
   const kind = NODE_LABEL[node.type] ?? node.type;
   const errors = issues?.errors.length ?? 0;
@@ -290,6 +403,7 @@ export function nodeAriaLabel(
     stop !== undefined ? `step ${stop} of the pipeline` : null,
     off ? "switched off" : null,
     dim ? "not used in this run" : null,
+    diff ? DIFF_WORD[diff] : null,
     errors + warnings > 0
       ? `${problemSummary(errors, warnings)}: ${issues!.errors[0] ?? issues!.warnings[0]}`
       : null,
@@ -324,6 +438,51 @@ export function wiredInto(
       const detail = n.type === "tool" ? String(n.data.key ?? "") : sourceLabels[ref];
       return detail ? `${NODE_LABEL[n.type] ?? n.type}: ${detail}` : (NODE_LABEL[n.type] ?? n.type);
     });
+}
+
+/** A station's lines as lists, for the drawer (task 6.8): a way to see,
+ *  make and remove connections without a pointer. */
+export type StationConnections = {
+  id: string;
+  outgoing: { id: string; label: string }[];
+  incoming: { id: string; label: string }[];
+  /** What this station may be connected to and is not yet. */
+  targets: { id: string; label: string }[];
+};
+
+/** `allowedEdges` are the validator's own pairs of node types
+ *  (`GET /meta/graph-schema`): the same rule the canvas applies to a drag.
+ *  Without them (still loading) nothing is offered, since a list cannot
+ *  show "not allowed" the way a refused drag does. */
+export function connectionsOf(
+  graph: Graph,
+  nodeId: string,
+  allowedEdges: readonly (readonly [string, string])[] | null,
+  sourceLabels: Record<string, string> = {},
+): StationConnections | null {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const self = byId.get(nodeId);
+  if (!self) return null;
+  const named = (id: string) => {
+    const n = byId.get(id);
+    return { id, label: n ? stationLabel(n, sourceLabels) : "a removed node" };
+  };
+  const order = new Map(readingOrder(graph).map((id, i) => [id, i]));
+  const inOrder = (a: { id: string }, b: { id: string }) =>
+    (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0);
+  const outgoing = graph.edges.filter((e) => e.source === nodeId).map((e) => named(e.target));
+  const incoming = graph.edges.filter((e) => e.target === nodeId).map((e) => named(e.source));
+  const wired = new Set(outgoing.map((o) => o.id));
+  const allowed = new Set((allowedEdges ?? []).map(([a, b]) => `${a}>${b}`));
+  const targets = graph.nodes
+    .filter((n) => n.id !== nodeId && !wired.has(n.id) && allowed.has(`${self.type}>${n.type}`))
+    .map((n) => named(n.id));
+  return {
+    id: nodeId,
+    outgoing: outgoing.sort(inOrder),
+    incoming: incoming.sort(inOrder),
+    targets: targets.sort(inOrder),
+  };
 }
 
 const CAPABILITY_TYPES = new Set(["knowledge_base", "database", "tool", "mcp_server"]);

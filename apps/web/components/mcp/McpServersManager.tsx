@@ -887,16 +887,16 @@ function RunnerBanner({ status }: { status: McpRunnerStatus }) {
 }
 
 const LIMIT_FIELDS: { key: keyof Limits; label: string; unit: string; hint: string }[] = [
-  { key: "memory_mb", label: "Memory", unit: "MB", hint: "64 to 8192" },
+  { key: "memory_mb", label: "Memory", unit: "MB", hint: "64 to 1536" },
   {
     key: "cpu_seconds",
     label: "CPU time",
     unit: "seconds",
     hint: "Total over a session, 5 to 7200",
   },
-  { key: "max_processes", label: "Processes", unit: "", hint: "Including threads, 4 to 1024" },
+  { key: "max_processes", label: "Processes", unit: "", hint: "Including threads, 4 to 256" },
   { key: "max_open_files", label: "Open files", unit: "", hint: "16 to 4096" },
-  { key: "max_file_mb", label: "Largest file", unit: "MB", hint: "1 to 1024" },
+  { key: "max_file_mb", label: "Largest file", unit: "MB", hint: "1 to 256" },
   { key: "wall_clock_s", label: "Session length", unit: "seconds", hint: "10 to 86400" },
   { key: "idle_timeout_s", label: "Idle timeout", unit: "seconds", hint: "10 to 3600" },
 ];

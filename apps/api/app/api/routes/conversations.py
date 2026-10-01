@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import contextlib
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Request, status
+from fastapi import APIRouter, Path, Query, Request, status
 from fastapi.responses import StreamingResponse
 
 from app.agent import interrupts
-from app.agent.events import ErrorEvent, sse_frame
 from app.api import ratelimit
 from app.api.deps import (
     AssistantCtx,
@@ -20,11 +19,11 @@ from app.api.deps import (
     PageQuery,
     SessionDep,
 )
-from app.api.errors import Conflict
+from app.api.errors import Conflict, Forbidden, NotFound
 from app.config import settings
-from app.db.session import get_sessionmaker
 from app.logging import get_logger
 from app.models.conversation import ConversationStatus
+from app.observability import metrics
 from app.schemas.common import Message, Page
 from app.schemas.conversation import (
     ConversationCreate,
@@ -36,8 +35,9 @@ from app.schemas.conversation import (
     RunDetail,
     RunOut,
     RunStep,
+    TurnState,
 )
-from app.services import chat, trace
+from app.services import chat, trace, turns
 
 router = APIRouter(tags=["conversations"])
 log = get_logger(__name__)
@@ -51,6 +51,15 @@ log = get_logger(__name__)
 async def create_conversation(
     body: ConversationCreate, ctx: AssistantCtx, session: SessionDep
 ) -> ConversationSummary:
+    # A conversation started *as* an end user reads and writes that user's
+    # memory (task 6.3). Reading it directly is for editors
+    # (`routes/memories.py`), so starting one is too: a member could
+    # otherwise name any end user and ask the assistant what it remembers.
+    if body.external_user_ref is not None and not ctx.can_edit:
+        raise Forbidden(
+            "Only this assistant's editors can start a conversation on behalf of an end user",
+            code="not_assistant_editor",
+        )
     conv = await chat.create_conversation(
         session,
         assistant=ctx.assistant,
@@ -77,8 +86,12 @@ async def list_conversations(
         cursor=page.cursor,
         external_user_ref=external_user_ref,
     )
+    running = await turns.running_among([c.id for c in rows.items])
     return Page(
-        items=[ConversationSummary.model_validate(c) for c in rows.items],
+        items=[
+            ConversationSummary.model_validate(c).model_copy(update={"running": c.id in running})
+            for c in rows.items
+        ],
         next_cursor=rows.next_cursor,
     )
 
@@ -92,10 +105,13 @@ DETAIL_MESSAGES = 50
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
 async def get_conversation(ctx: ConversationCtx, session: SessionDep) -> ConversationDetail:
     page = await chat.list_messages(session, ctx.conversation.id, limit=DETAIL_MESSAGES)
+    turn_id = await turns.running_turn(ctx.conversation.id)
+    summary = ConversationSummary.model_validate(ctx.conversation).model_dump()
     return ConversationDetail(
-        **ConversationSummary.model_validate(ctx.conversation).model_dump(),
+        **{**summary, "running": turn_id is not None},
         messages=[MessageOut.model_validate(m) for m in page.items],
         messages_next_cursor=page.next_cursor,
+        turn_id=turn_id,
     )
 
 
@@ -183,7 +199,11 @@ async def interrupt_conversation(ctx: ConversationEditorCtx) -> Message:
 
 @router.post("/conversations/{conversation_id}/messages")
 async def post_message(
-    body: MessageIn, ctx: ConversationEditorCtx, request: Request, ip: ClientIP
+    body: MessageIn,
+    ctx: ConversationEditorCtx,
+    session: SessionDep,
+    request: Request,
+    ip: ClientIP,
 ) -> StreamingResponse:
     if ctx.conversation.status is ConversationStatus.archived:
         # Refused before the stream opens, so it is a real 409 rather than an
@@ -193,33 +213,71 @@ async def post_message(
     # real 429 (task 5.8): per person, and per org across its members.
     await ratelimit.enforce("chat_user", str(ctx.membership.user_id), settings.rate_limit_chat_user)
     await ratelimit.enforce("chat_org", str(ctx.conversation.org_id), settings.rate_limit_chat_org)
-    conversation_id = ctx.conversation.id
-    text = body.text
+    # The request's own session did its work (who is asking, may they). It
+    # is closed only when the response ends, which for a stream is the whole
+    # turn: without this, every open chat held a second idle connection.
+    await chat.release(session)
+    # The turn runs on the server from here on (QOS-01): this response only
+    # watches it. Leaving (a reload, another conversation, a dropped
+    # network) no longer ends it; Stop does.
+    try:
+        turn_id = await turns.start(ctx.conversation.id, body.text)
+    except turns.TurnInProgress:
+        raise Conflict(
+            "An answer is still being written in this conversation. "
+            "Wait for it, or stop it, then send your message.",
+            code="turn_in_progress",
+        ) from None
+    return _watch(ctx.conversation.id, turn_id, after=None)
+
+
+def _watch(conversation_id: uuid.UUID, turn_id: str, *, after: str | None) -> StreamingResponse:
+    """A turn's events as server-sent events, from after `after` (or the
+    start) until it ends. Each carries its id, to pass back as `after` (or
+    `Last-Event-ID`) when watching again."""
 
     async def gen() -> AsyncIterator[str]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as s:
-            try:
-                # `aclosing`: on a disconnect the turn is closed *here*, while
-                # its session is still open, so it can record itself as
-                # aborted. Without it the abandoned generator is finalised
-                # later by the GC — after this session has already closed.
-                async with contextlib.aclosing(
-                    chat.run_message(s, conversation_id=conversation_id, text=text)
-                ) as events:
-                    async for event in events:
-                        if await request.is_disconnected():
-                            log.info(
-                                "sse_client_disconnected", conversation_id=str(conversation_id)
-                            )
-                            break
-                        yield sse_frame(event)
-            except Exception as exc:
-                log.exception("sse_stream_failed", conversation_id=str(conversation_id))
-                yield sse_frame(ErrorEvent(code="internal_error", message=str(exc)))
+        opened = time.perf_counter()
+        try:
+            async for event_id, frame in turns.follow(conversation_id, turn_id, after):
+                yield f"id: {event_id}\n{frame}"
+        finally:
+            # However it ended: the turn finished, or the watcher left.
+            metrics.STREAM_DURATION.observe(time.perf_counter() - opened)
 
     return StreamingResponse(
         gen(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Turn-Id": turn_id,
+        },
     )
+
+
+@router.get("/conversations/{conversation_id}/turn", response_model=TurnState)
+async def get_turn(ctx: ConversationCtx) -> TurnState:
+    """The turn running in this conversation, if any (QOS-01). A page that
+    opens a conversation asks this, and attaches to the answer being
+    written instead of showing nothing until it is saved."""
+    return TurnState(turn_id=await turns.running_turn(ctx.conversation.id))
+
+
+@router.get("/conversations/{conversation_id}/turns/{turn_id}/events")
+async def watch_turn(
+    turn_id: Annotated[str, Path(pattern=r"^[0-9a-f]{32}$")],
+    ctx: ConversationCtx,
+    request: Request,
+    after: Annotated[
+        str | None, Query(max_length=40, description="The id of the last event already seen.")
+    ] = None,
+) -> StreamingResponse:
+    """Watch a turn of this conversation: everything it has said so far
+    (after `after`, or `Last-Event-ID`), then the rest as it comes, until it
+    ends. Finished turns stay readable for a few minutes. Anyone who may see
+    the conversation may watch."""
+    if not await turns.known(ctx.conversation.id, turn_id):
+        raise NotFound("No such turn in this conversation", code="turn_not_found")
+    since = after or request.headers.get("last-event-id") or None
+    return _watch(ctx.conversation.id, turn_id, after=since)
