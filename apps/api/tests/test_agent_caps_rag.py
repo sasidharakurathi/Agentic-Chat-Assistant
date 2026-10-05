@@ -200,3 +200,39 @@ async def test_kb_list_sources_shows_counts_and_respects_the_allow_list(
     assert f"id={sid}" in text and "1 doc, 1 chunk" in text
     hidden = await build_kb_list_sources_tool(seeded_assistant.id, [str(uuid.uuid4())]).handler({})
     assert "No indexed" in hidden["content"][0]["text"]
+
+
+# ── chunks loaded again by id, for a citation reused from an earlier turn ──
+
+
+async def test_chunks_by_id_loads_a_chunk_with_its_source(
+    seeded_assistant: Assistant, pg: AsyncSession
+) -> None:
+    from app.models.rag import Chunk
+    from app.rag.retrieve import chunks_by_id
+    from sqlalchemy import select
+
+    chunk_id = (
+        await pg.execute(select(Chunk.id).where(Chunk.assistant_id == seeded_assistant.id))
+    ).scalar_one()
+    (found,) = await chunks_by_id(
+        pg, assistant_id=seeded_assistant.id, chunk_ids=[str(chunk_id), "not-a-uuid"]
+    )
+    assert found.chunk_id == chunk_id
+    assert found.title == "Handbook"
+    assert found.source_type == "text"
+    assert found.data_source_id is not None
+    assert "five business days" in found.content
+
+
+async def test_chunks_by_id_never_returns_another_assistants_chunk(
+    seeded_assistant: Assistant, pg: AsyncSession
+) -> None:
+    from app.models.rag import Chunk
+    from app.rag.retrieve import chunks_by_id
+    from sqlalchemy import select
+
+    chunk_id = (
+        await pg.execute(select(Chunk.id).where(Chunk.assistant_id == seeded_assistant.id))
+    ).scalar_one()
+    assert await chunks_by_id(pg, assistant_id=uuid.uuid4(), chunk_ids=[str(chunk_id)]) == []

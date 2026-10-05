@@ -169,35 +169,70 @@ class CitationRegistry:
             out.append(marker)
         return out
 
+    def carried_over(self, text: str) -> dict[int, str]:
+        """Markers the answer cites from an *earlier* turn: marker -> chunk id.
+
+        The model's context is resumed across turns, so a follow-up can be
+        answered from passages a previous turn already searched, reusing that
+        turn's markers without searching again. Those markers are still
+        unambiguous, because numbers are never reused within a conversation,
+        and this registry's state still says which chunk each one is. Only
+        the chunk itself (its text, its source) was not loaded this turn: the
+        caller loads these and hands them to `recall`.
+        """
+        by_marker = {marker: chunk_id for chunk_id, marker in self._markers.items()}
+        out: dict[int, str] = {}
+        for marker, _, _ in self._cited(text):
+            if marker not in self._entries and marker in by_marker:
+                out[marker] = by_marker[marker]
+        return out
+
+    def recall(self, chunks: list[RetrievedChunk]) -> None:
+        """Hold chunks from earlier turns under the markers they were given.
+
+        A chunk this conversation never numbered is ignored: recalling can
+        only restore a marker to its own chunk, never point one elsewhere.
+        """
+        for chunk in chunks:
+            marker = self._markers.get(str(chunk.chunk_id))
+            if marker is not None and marker not in self._entries:
+                self._entries[marker] = chunk
+
     def resolve(self, text: str) -> list[Citation]:
         """Every registered chunk the answer actually cited, first use first.
 
         ``text`` must be the exact string that gets persisted as the message
         content — the recorded spans are offsets into it.
         """
-        masked = _CODE.sub(lambda m: " " * len(m.group(0)), text)
         spans: dict[int, list[list[int]]] = {}
         order: list[int] = []
+        for marker, start, end in self._cited(text):
+            if marker not in self._entries:
+                # Hallucinated, or from a turn this registry no longer holds
+                # (and `recall` could not restore). Dropped on purpose —
+                # resolving it to whatever sits at that index now is how you
+                # get a wrong citation, which is worse than showing none.
+                continue
+            if marker not in spans:
+                spans[marker] = []
+                order.append(marker)
+            spans[marker].append([start, end])
+        return [self._citation(m, spans[m]) for m in order]
+
+    @staticmethod
+    def _cited(text: str) -> list[tuple[int, int, int]]:
+        """Every ``[n]`` in the answer outside code: (marker, start, end)."""
+        masked = _CODE.sub(lambda m: " " * len(m.group(0)), text)
+        out: list[tuple[int, int, int]] = []
         for run in _RUN.finditer(masked):
             for group in _GROUP_RE.finditer(run.group(0)):
                 start = run.start() + group.start()
                 end = run.start() + group.end()
                 for raw_part in re.split(r"[,;]", group.group(0).strip("[]")):
                     part = raw_part.strip()
-                    if not part.isdigit():
-                        continue
-                    marker = int(part)
-                    if marker not in self._entries:
-                        # Hallucinated, or from a turn this registry no longer
-                        # holds. Dropped on purpose — resolving it to whatever
-                        # sits at that index now is how you get a wrong
-                        # citation, which is worse than showing none.
-                        continue
-                    if marker not in spans:
-                        spans[marker] = []
-                        order.append(marker)
-                    spans[marker].append([start, end])
-        return [self._citation(m, spans[m]) for m in order]
+                    if part.isdigit():
+                        out.append((int(part), start, end))
+        return out
 
     def _citation(self, marker: int, spans: list[list[int]]) -> Citation:
         chunk = self._entries[marker]

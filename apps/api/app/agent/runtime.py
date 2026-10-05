@@ -42,6 +42,7 @@ from app.logging import get_logger
 from app.models.conversation import RunStatus
 from app.models.integration import DbConnection
 from app.rag import usage as rag_usage
+from app.rag.retrieve import chunks_by_id
 from app.schemas.assistant_config import AssistantConfig
 
 log = get_logger(__name__)
@@ -574,6 +575,25 @@ class Turn:
         if self.registry is None:
             return []
         return self.registry.resolve(text)
+
+    async def recall_citations(self, assistant_id: uuid.UUID, text: str) -> None:
+        """Before `resolve_citations`: load the chunks behind markers the
+        answer reuses from an earlier turn (answered from passages already in
+        the resumed context, with no new search), so they resolve too instead
+        of showing as dead ``[n]`` text. See `CitationRegistry.carried_over`.
+
+        Its own short-lived session, like the kb tools': a failure here must
+        never touch the transaction that saves the answer."""
+        if self.registry is None:
+            return
+        carried = self.registry.carried_over(text)
+        if not carried:
+            return
+        async with get_sessionmaker()() as session:
+            chunks = await chunks_by_id(
+                session, assistant_id=assistant_id, chunk_ids=list(carried.values())
+            )
+        self.registry.recall(chunks)
 
     def citation_state(self) -> dict | None:
         return self.registry.dump() if self.registry is not None else None

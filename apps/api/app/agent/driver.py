@@ -667,11 +667,14 @@ class _UsageLedger:
             cached_share = cached
             self.cache_billed.add(message_id)
         cost = _estimate_cost(model, d_in + cached_share, d_out)
-        self.tokens_in += d_in
+        # Cache tokens count as input read, once per call like their cost:
+        # with prompt caching most of a turn's input is cached, and leaving
+        # it out reported "2 in" for an answer that read thousands.
+        self.tokens_in += d_in + cached_share
         self.tokens_out += d_out
         self.cost_usd += cost
         return UsageEvent(
-            tokens_in=d_in,
+            tokens_in=d_in + cached_share,
             tokens_out=d_out,
             cost_usd=cost,
             model_calls=1 if new_call and main else 0,
@@ -688,7 +691,7 @@ class _UsageLedger:
         return UsageEvent(
             # Tokens never go below what was already reported; cost may be
             # corrected downwards (see the cache-token note above).
-            tokens_in=max(0, int(usage.get("input_tokens", 0)) - self.tokens_in),
+            tokens_in=max(0, _input_read(usage) - self.tokens_in),
             tokens_out=max(0, int(usage.get("output_tokens", 0)) - self.tokens_out),
             cost_usd=round(total_cost - self.cost_usd, 6),
             sdk_session_id=message.session_id,
@@ -699,6 +702,15 @@ class _UsageLedger:
             stop_reason=getattr(message, "stop_reason", None),
             models=sorted(getattr(message, "model_usage", None) or {}),
         )
+
+
+def _input_read(usage: dict[str, Any]) -> int:
+    """All the input a turn's model calls read: uncached, written to the
+    cache and read from it. `input_tokens` alone is only the uncached part."""
+    return sum(
+        int(usage.get(k) or 0)
+        for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+    )
 
 
 @dataclass

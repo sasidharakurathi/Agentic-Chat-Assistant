@@ -141,3 +141,6 @@ CLAUDE.local.md
 *.pid
 *.seed
 *.pid.lock
+
+brag-output/
+brag-output-*/

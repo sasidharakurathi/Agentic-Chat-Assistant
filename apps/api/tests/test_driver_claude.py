@@ -280,3 +280,56 @@ def test_the_result_settles_totals_to_the_sdks_own_figures() -> None:
     assert sum(e.tokens_in for e in emitted) == 2500
     assert sum(e.tokens_out for e in emitted) == 500
     assert sum(e.cost_usd for e in emitted) == pytest.approx(0.0421)
+
+
+# ── cached input is input read ───────────────────────────────
+#
+# With prompt caching most of a turn's input is served from the cache, and
+# the usage reports it apart from `input_tokens`. Counting `input_tokens`
+# alone showed "2 in" for an answer that read thousands of tokens (found in
+# the first test drive against the real model).
+
+
+def _cached(message_id: str, tokens_in: int, cache_read: int, cache_write: int, out: int):
+    return AssistantMessage(
+        content=[TextBlock(text="x")],
+        model="claude-sonnet-5",
+        message_id=message_id,
+        usage={
+            "input_tokens": tokens_in,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_write,
+            "output_tokens": out,
+        },
+    )
+
+
+def test_cached_input_counts_as_input_read_once() -> None:
+    ledger = _UsageLedger()
+    (spend,) = _usage(_events_for(_cached("m1", 2, 2400, 300, 369), set(), ledger))
+    assert (spend.tokens_in, spend.tokens_out) == (2702, 369)
+    # The CLI repeating the same response adds nothing.
+    assert _usage(_events_for(_cached("m1", 2, 2400, 300, 369), set(), ledger)) == []
+    assert ledger.tokens_in == 2702
+
+
+def test_the_result_settles_input_including_the_cache() -> None:
+    ledger = _UsageLedger()
+    result = _result_msg(2, 369, 0.0151)
+    result.usage.update({"cache_read_input_tokens": 2400, "cache_creation_input_tokens": 300})
+    emitted = [
+        *_usage(_events_for(_cached("m1", 2, 2400, 300, 369), set(), ledger)),
+        *_usage(_events_for(result, set(), ledger)),
+    ]
+    assert sum(e.tokens_in for e in emitted) == 2702
+    assert sum(e.tokens_out for e in emitted) == 369
+    assert sum(e.cost_usd for e in emitted) == pytest.approx(0.0151)
+
+
+def test_a_result_alone_counts_its_cached_input() -> None:
+    """No per-call messages seen (the CLI sent only the result): the settle
+    step is all there is, and it must count the cache too."""
+    result = _result_msg(2, 369, 0.0151)
+    result.usage.update({"cache_read_input_tokens": 2400, "cache_creation_input_tokens": 300})
+    (event,) = _usage(_events_for(result, set(), _UsageLedger()))
+    assert (event.tokens_in, event.tokens_out) == (2702, 369)

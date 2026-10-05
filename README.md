@@ -11,6 +11,7 @@ and run on the **Anthropic Agent SDK (Python)**.
   of what exists and why. **Start here if you're picking this up.**
 - Architecture decisions: [`docs/adr/`](docs/adr/)
 - Database access, safely: [`docs/DATABASE_ACCESS.md`](docs/DATABASE_ACCESS.md)
+- **Trying all of it, end to end: [`docs/TEST_DRIVE.md`](docs/TEST_DRIVE.md)** (the production stack, the real model)
 - Manual testing, with test data: [`docs/MANUAL_TESTING.md`](docs/MANUAL_TESTING.md) (`.\scripts\seed-testdata.ps1` loads the data)
 - **Using it: [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)**. **Running it: [`docs/OPERATIONS.md`](docs/OPERATIONS.md)**
 - What it defends against, and what is still open: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)

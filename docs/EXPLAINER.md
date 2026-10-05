@@ -7167,3 +7167,54 @@ a computer.
   with its words after it; at the end every part fully shown. With the
   browser's reduced motion on, all 76 reveal parts show at once.
 - Web typecheck, lint, Prettier and the 217 web tests pass.
+
+## 15. Found in the test drive (real model, production stack)
+
+The first hands-on pass through `docs/TEST_DRIVE.md`, against the real
+model on the production stack. Each finding is in the bug tracker.
+
+### A citation reused from an earlier turn was dead text (BUG-18)
+
+Seen: in the sample support desk, "Explain the whole returns process step
+by step" was answered correctly, every claim marked [1], but [1] opened
+nothing and there was no Sources list. Run details said "Answered straight
+from the model, with no tools".
+
+Why: it was the third message of a conversation whose first had searched
+the knowledge base. The model's context is resumed across turns, so it
+answered from those passages, with no new search, reusing the first
+answer's [1]. Markers are numbered once per conversation and never reused
+(§2.9), and the conversation keeps which chunk each one is. But a turn
+only *loaded* the chunks its own searches returned, and a marker without a
+loaded chunk is dropped on purpose (a guessed citation is worse than none).
+
+Fix: `CitationRegistry.carried_over` names the markers an answer cites
+that this turn did not load but the conversation numbered earlier;
+`Turn.recall_citations` loads those chunks again by id
+(`rag.retrieve.chunks_by_id`, only this assistant's chunks) in a session of
+its own, and `recall` holds each under the marker it already had. Then
+`resolve` runs as before. Recalling can only restore a marker to its own
+chunk, never point one elsewhere; an invented marker, a chunk deleted
+since, or a failed lookup still leaves the citation out and keeps the
+answer.
+
+### Run details showed "2 in" for an answer that read thousands (BUG-19)
+
+With prompt caching most of a turn's input is served from the cache, and
+the usage reports that apart from `input_tokens`. The cost already
+included it; the token count did not. Both the per-call count and the
+end-of-turn settle now count input read as uncached plus cache written plus
+cache read (`_input_read` in `agent/driver.py`). Only the display and the
+usage rows change; cost and budgets were already right.
+
+### Verified
+
+- Unit: `test_citations.py` (4 new: carried over, only earlier markers,
+  recall cannot repoint, code is not a citation); `test_chat_citations.py`
+  (2 new, through the real endpoint: a later turn's [1] resolves with no
+  new search, looked up for this assistant only; a failed lookup costs the
+  citation, not the answer); `test_driver_claude.py` (3 new: cached input
+  per call, at settle, and a result alone).
+- Integration (Postgres): `test_agent_caps_rag.py` (2 new: a chunk loaded
+  by id with its source; never another assistant's).
+- Mutation: 7 of 7 caught.

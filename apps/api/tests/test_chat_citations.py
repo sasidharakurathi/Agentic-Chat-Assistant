@@ -223,3 +223,69 @@ async def test_a_budget_abort_still_resolves_citations(
     detail = (await client.get(f"/api/v1/conversations/{cid}", headers=org_headers)).json()
     msg = [m for m in detail["messages"] if m["role"] == "assistant"][-1]
     assert [b for b in msg["blocks"] if b.get("type") == "citation"]
+
+
+# ── a later turn citing an earlier turn's passages ───────────
+#
+# Found in the first test drive on the real model: a follow-up answered from
+# the passages already in the conversation, with no new search, reused [1]
+# from the first answer. The [1] showed as dead text. The stand-in driver
+# echoes the message, so a message containing "[1]" is that answer.
+
+
+async def test_a_marker_from_an_earlier_turn_resolves_without_a_new_search(
+    client: AsyncClient,
+    org_headers: dict[str, str],
+    fake_kb: list[list[RetrievedChunk]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aid = await _rag_assistant(client, org_headers)
+    cid = await _conversation(client, org_headers, aid)
+    refund = fake_kb[0][0]
+    await _send(client, org_headers, cid, "please search the kb: refunds?")
+
+    asked: list[tuple[str, list[str]]] = []
+
+    async def fake_chunks_by_id(_session, *, assistant_id, chunk_ids):
+        asked.append((str(assistant_id), list(chunk_ids)))
+        return [c for c in fake_kb[0] if str(c.chunk_id) in chunk_ids]
+
+    monkeypatch.setattr("app.agent.runtime.chunks_by_id", fake_chunks_by_id)
+    events = await _send(client, org_headers, cid, "So refunds take five days [1]?")
+    kinds = [e["type"] for e in events]
+    assert kinds[-1] == "done" and "error" not in kinds
+    assert "tool_call" not in kinds, "no new search this turn"
+
+    (cite,) = _citations(events)
+    assert (cite["marker"], cite["title"]) == (1, "Refund Policy")
+    assert cite["chunk_id"] == str(refund.chunk_id)
+    # Looked up for this assistant, and only the chunk behind [1].
+    assert asked == [(aid, [str(refund.chunk_id)])]
+
+    detail = (await client.get(f"/api/v1/conversations/{cid}", headers=org_headers)).json()
+    last = [m for m in detail["messages"] if m["role"] == "assistant"][-1]
+    assert [b["marker"] for b in last["blocks"] if b.get("type") == "citation"] == [1]
+
+
+async def test_a_failed_recall_costs_the_citation_not_the_answer(
+    client: AsyncClient,
+    org_headers: dict[str, str],
+    fake_kb: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aid = await _rag_assistant(client, org_headers)
+    cid = await _conversation(client, org_headers, aid)
+    await _send(client, org_headers, cid, "please search the kb: refunds?")
+
+    async def broken(*_a: object, **_k: object) -> list[RetrievedChunk]:
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr("app.agent.runtime.chunks_by_id", broken)
+    events = await _send(client, org_headers, cid, "So refunds take five days [1]?")
+    kinds = [e["type"] for e in events]
+    assert kinds[-1] == "done" and "error" not in kinds
+    assert _citations(events) == []
+
+    detail = (await client.get(f"/api/v1/conversations/{cid}", headers=org_headers)).json()
+    last = [m for m in detail["messages"] if m["role"] == "assistant"][-1]
+    assert "five days [1]" in last["content"]

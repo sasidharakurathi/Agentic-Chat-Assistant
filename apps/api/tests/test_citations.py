@@ -79,6 +79,56 @@ def test_a_chunk_cited_in_an_earlier_turn_still_resolves_in_a_later_one() -> Non
     assert resolved[0].chunk_id == str(first.chunk_id)
 
 
+def test_a_marker_reused_without_a_new_search_is_carried_over() -> None:
+    """Found in the first test drive on the real model: turn 3 was answered
+    entirely from turn 1's passages, no search at all, citing [1]. The [1]
+    showed as dead text, because this turn's registry had loaded no chunk.
+    `carried_over` names the chunk the conversation gave that marker."""
+    first = chunk("Refund Policy")
+    turn1 = CitationRegistry()
+    turn1.register([first, chunk("Warranty")])
+
+    turn3 = CitationRegistry(turn1.dump())
+    text = "Return within 30 days [1]. Store credit never expires [1]."
+    assert turn3.resolve(text) == [], "nothing loaded yet: dropped, not guessed"
+    assert turn3.carried_over(text) == {1: str(first.chunk_id)}
+
+    turn3.recall([first])
+    (cited,) = turn3.resolve(text)
+    assert (cited.marker, cited.title, cited.chunk_id) == (1, "Refund Policy", str(first.chunk_id))
+    assert len(cited.spans) == 2
+
+
+def test_only_markers_this_turn_did_not_load_are_carried_over() -> None:
+    old, new = chunk("Old"), chunk("New")
+    turn1 = CitationRegistry()
+    turn1.register([old])
+    turn2 = CitationRegistry(turn1.dump())
+    turn2.register([new])  # [2], loaded this turn
+    # [2] is this turn's own; [7] was never handed out (invented).
+    assert turn2.carried_over("a [1], b [2], c [7]") == {1: str(old.chunk_id)}
+
+
+def test_recall_cannot_point_a_marker_at_another_chunk() -> None:
+    """Recalling restores a marker to its own chunk only: a chunk the
+    conversation never numbered is ignored, whatever it is handed."""
+    first = chunk("Refund Policy")
+    turn1 = CitationRegistry()
+    turn1.register([first])
+    turn2 = CitationRegistry(turn1.dump())
+    turn2.recall([chunk("Stranger")])
+    assert turn2.resolve("Thirty days [1].") == []
+    turn2.recall([first])
+    assert [c.title for c in turn2.resolve("Thirty days [1].")] == ["Refund Policy"]
+
+
+def test_markers_in_code_are_not_carried_over() -> None:
+    turn1 = CitationRegistry()
+    turn1.register([chunk("A")])
+    turn2 = CitationRegistry(turn1.dump())
+    assert turn2.carried_over("Use `rows[1]` here.") == {}
+
+
 def test_dump_is_bounded_but_keeps_the_newest_markers() -> None:
     from app.agent.citations import MAX_TRACKED
 

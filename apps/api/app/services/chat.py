@@ -752,6 +752,7 @@ async def _finalize(
     # offsets are offsets into *this*, and `.strip()` would shift them.
     content = o.text.strip()
     try:
+        await turn.recall_citations(conv.assistant_id, content)
         o.citations = turn.resolve_citations(content)
     except Exception:
         # Never let citation resolution cost the user an answer they already

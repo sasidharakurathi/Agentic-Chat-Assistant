@@ -115,6 +115,43 @@ async def _attach_source_metadata(
     return results
 
 
+async def chunks_by_id(
+    session: AsyncSession, *, assistant_id: uuid.UUID, chunk_ids: list[str]
+) -> list[RetrievedChunk]:
+    """Chunks an earlier search returned, loaded again by id, for citations
+    an answer reuses from a previous turn (`CitationRegistry.carried_over`).
+    Only this assistant's chunks; one deleted since is simply not found.
+    The original score is not kept, so it reads 0."""
+    ids = []
+    for raw in chunk_ids:
+        try:
+            ids.append(uuid.UUID(str(raw)))
+        except ValueError:
+            continue
+    if not ids:
+        return []
+    rows = (
+        await session.execute(
+            select(Chunk).where(Chunk.id.in_(ids), Chunk.assistant_id == assistant_id)
+        )
+    ).scalars()
+    hits = [
+        (
+            ScoredChunk(
+                id=c.id,
+                document_id=c.document_id,
+                content=c.content,
+                score=0.0,
+                metadata=dict(c.chunk_metadata or {}),
+                ordinal=c.ordinal,
+            ),
+            0.0,
+        )
+        for c in rows
+    ]
+    return await _attach_source_metadata(session, hits)
+
+
 async def retrieve(
     session: AsyncSession,
     *,
