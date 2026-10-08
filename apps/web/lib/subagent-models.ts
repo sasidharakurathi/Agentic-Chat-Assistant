@@ -53,9 +53,15 @@ export function selectedModel(own: Spec | undefined, shared: Spec): string {
   return own && !followsShared(own, shared) ? str(own.model) : "";
 }
 
-/** A model id in plain words: "claude-haiku-4-5" reads "Haiku 4.5". Ids that
- *  don't follow that shape are shown as they are. */
+/** The families an assistant can name instead of one model (Phase 7a.6):
+ *  each runs as that family's current model, which the operator repoints. */
+const FAMILIES = new Set(["haiku", "sonnet", "opus", "fable"]);
+
+/** A model id in plain words: "claude-haiku-4-5" reads "Haiku 4.5", and the
+ *  alias "sonnet" reads "Sonnet (latest)". Ids that don't follow that shape
+ *  are shown as they are. */
 export function modelName(id: string): string {
+  if (FAMILIES.has(id)) return `${id.charAt(0).toUpperCase()}${id.slice(1)} (latest)`;
   const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(id);
   if (!m) return id;
   const family = m[1].charAt(0).toUpperCase() + m[1].slice(1);

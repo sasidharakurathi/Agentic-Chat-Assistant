@@ -5,11 +5,15 @@ import type { NextConfig } from "next";
  *  (clickjacking an Approve button), must not guess a response's type, and
  *  must not send its address (which names assistants and conversations) to
  *  sites it links to. A script policy needs per-request nonces in Next and
- *  is not set here. */
+ *  is not set here.
+ *
+ *  `img-src` (Phase 7a.2): images load only from this site, so text a model
+ *  was steered into writing cannot make the browser fetch another address
+ *  (the renderer already refuses to load them; this is the second wall). */
 const SECURITY_HEADERS = [
   {
     key: "Content-Security-Policy",
-    value: "frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
+    value: "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; img-src 'self' data: blob:",
   },
   { key: "X-Frame-Options", value: "DENY" },
   { key: "X-Content-Type-Options", value: "nosniff" },

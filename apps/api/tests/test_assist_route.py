@@ -121,7 +121,7 @@ async def test_a_model_draft_names_the_wiring_and_goes_on_the_ledger(
         "system_prompt": "You are Shop Helper.",
         "rules": ["Be kind."],
         "source": "model",
-        "model": "claude-sonnet-5",
+        "model": "claude-sonnet-5-5",
         "cost_usd": pytest.approx(900 * 2 / 1e6 + 400 * 10 / 1e6),
     }
     prompt = claude_stub.prompt(paid.stub.requests[0])
@@ -130,7 +130,7 @@ async def test_a_model_draft_names_the_wiring_and_goes_on_the_ledger(
     assert "You are a bot." in prompt
 
     (row,) = await _usage(aid)
-    assert (row.model, row.tokens_in, row.tokens_out) == ("claude-sonnet-5", 900, 400)
+    assert (row.model, row.tokens_in, row.tokens_out) == ("claude-sonnet-5-5", 900, 400)
 
 
 async def test_a_refusal_is_a_clear_422_and_still_on_the_ledger(

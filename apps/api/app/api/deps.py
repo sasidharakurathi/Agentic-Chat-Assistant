@@ -3,7 +3,10 @@
 Each context below, once it has verified the caller belongs to the org it is
 about to act in, binds that org to the request's session
 (`app.db.tenancy.bind_org`); from then on every ORM query the request makes
-is limited to that org's rows, whether or not it filters by org itself."""
+is limited to that org's rows, whether or not it filters by org itself.
+
+Each also applies the Studio floor (`app.security.access`, Phase 7a.3):
+the membership must hold a role that may use the Studio at all."""
 
 from __future__ import annotations
 
@@ -13,7 +16,6 @@ from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import Depends, Header, Path, Query, Request
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import ratelimit
@@ -26,6 +28,7 @@ from app.models.conversation import Conversation
 from app.models.enums import MemberRole
 from app.models.membership import Membership
 from app.models.user import User
+from app.security.access import member_of
 from app.security.tokens import TokenError, decode_access_token
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -60,6 +63,7 @@ ClientIP = Annotated[str | None, Depends(client_ip)]
 
 async def get_current_user(
     session: SessionDep,
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> User:
     if not authorization or not authorization.lower().startswith("bearer "):
@@ -73,6 +77,8 @@ async def get_current_user(
     user = await session.get(User, claims.user_id)
     if user is None or not user.is_active:
         raise Unauthorized("User not found or inactive", code="invalid_token")
+    # For the access log line (Phase 7a.8): who made the request.
+    request.state.user_id = str(user.id)
     await ratelimit.enforce("user", str(user.id), settings.rate_limit_user)
     return user
 
@@ -104,12 +110,8 @@ async def get_org_membership(
     user: CurrentUser,
     org_id: Annotated[uuid.UUID, Path()],
 ) -> Membership:
-    membership = await session.scalar(
-        select(Membership).where(Membership.org_id == org_id, Membership.user_id == user.id)
-    )
-    if membership is None:
-        # Don't disclose whether the org exists.
-        raise NotFound("Organization not found")
+    # Not found for outsiders: don't disclose whether the org exists.
+    membership = await member_of(session, org_id, user.id, missing="Organization not found")
     bind_org(session, org_id)
     return membership
 
@@ -138,11 +140,7 @@ async def active_membership(
 ) -> Membership:
     if x_org_id is None:
         raise BadRequest("Missing X-Org-Id header", code="org_required")
-    membership = await session.scalar(
-        select(Membership).where(Membership.org_id == x_org_id, Membership.user_id == user.id)
-    )
-    if membership is None:
-        raise NotFound("Organization not found")
+    membership = await member_of(session, x_org_id, user.id, missing="Organization not found")
     bind_org(session, x_org_id)
     return membership
 
@@ -174,13 +172,8 @@ async def get_assistant_context(
     assistant = await session.get(Assistant, assistant_id)
     if assistant is None:
         raise NotFound("Assistant not found")
-    membership = await session.scalar(
-        select(Membership).where(
-            Membership.org_id == assistant.org_id, Membership.user_id == user.id
-        )
-    )
-    if membership is None:
-        raise NotFound("Assistant not found")  # don't leak cross-tenant existence
+    # Not found for outsiders: don't leak cross-tenant existence.
+    membership = await member_of(session, assistant.org_id, user.id, missing="Assistant not found")
     bind_org(session, assistant.org_id)
     return AssistantContext(assistant=assistant, membership=membership)
 
@@ -218,11 +211,7 @@ async def get_conversation_context(
     conv = await session.get(Conversation, conversation_id)
     if conv is None:
         raise NotFound("Conversation not found")
-    membership = await session.scalar(
-        select(Membership).where(Membership.org_id == conv.org_id, Membership.user_id == user.id)
-    )
-    if membership is None:
-        raise NotFound("Conversation not found")
+    membership = await member_of(session, conv.org_id, user.id, missing="Conversation not found")
     assistant = await session.get(Assistant, conv.assistant_id)
     if assistant is None:
         raise NotFound("Conversation not found")
@@ -233,26 +222,29 @@ async def get_conversation_context(
 ConversationCtx = Annotated[ConversationContext, Depends(get_conversation_context)]
 
 
-async def require_conversation_editor(
+async def require_conversation_starter(
     ctx: ConversationCtx, user: CurrentUser
 ) -> ConversationContext:
-    """Mutating a conversation — renaming, archiving, or posting into it —
-    belongs to whoever started it, or an admin.
+    """Posting into a conversation, stopping its answer, renaming or
+    archiving it: only the person who started it.
 
-    Reading stays org-wide; that part was never the problem. But any member
-    could rename or archive a teammate's conversation, or post into it and
-    run the agent (with its database tools) inside someone else's thread.
-    Conversations with no recorded creator are left to admins.
+    Admins too used to pass here (task 6.3). But a message runs the agent as
+    the conversation's owner: their memory, and soon their identity for
+    "my tickets" lookups and requests (plan D8). An admin posting into an
+    employee's thread would act in that employee's name, and could then
+    approve the write their own message caused. Admins may read any
+    conversation (plan D5); reading is not a licence to act (Phase 7a.4).
+    A conversation with no recorded starter can be read, not changed.
     """
-    if ctx.conversation.created_by == user.id or ctx.membership.role.satisfies(MemberRole.admin):
+    if ctx.conversation.created_by is not None and ctx.conversation.created_by == user.id:
         return ctx
     raise Forbidden(
-        "Only the person who started this conversation, or an admin, can change it",
+        "Only the person who started this conversation can reply in it or change it",
         code="not_conversation_owner",
     )
 
 
-ConversationEditorCtx = Annotated[ConversationContext, Depends(require_conversation_editor)]
+ConversationStarterCtx = Annotated[ConversationContext, Depends(require_conversation_starter)]
 
 
 __all__ = [
@@ -262,7 +254,7 @@ __all__ = [
     "ClientIP",
     "ConversationContext",
     "ConversationCtx",
-    "ConversationEditorCtx",
+    "ConversationStarterCtx",
     "CurrentUser",
     "EditableAssistantCtx",
     "OrgMembership",
@@ -278,6 +270,6 @@ __all__ = [
     "per_ip_limit",
     "per_user_limit",
     "require_assistant_editor",
-    "require_conversation_editor",
+    "require_conversation_starter",
     "require_role",
 ]

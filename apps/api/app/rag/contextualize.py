@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from anthropic import AsyncAnthropic
 
 from app.agent import claude_api
-from app.agent.models import CONTEXTUALIZE_MODEL, PRICE_PER_MTOK
+from app.agent.models import CONTEXTUALIZE_MODEL, price_per_mtok, resolve_model
 from app.config import settings
 from app.logging import get_logger
 
@@ -141,7 +141,7 @@ class HaikuContextualizer:
         calls = len(self._groups(chunks))
         tokens_in = (calls * doc_chars + sum(len(c) for c in chunks)) / 4
         tokens_out = _EST_OUT_TOKENS_PER_CHUNK * len(chunks)
-        rate_in, rate_out = PRICE_PER_MTOK.get(self.model, (0.0, 0.0))
+        rate_in, rate_out = price_per_mtok(self.model)
         return round(rate_in * tokens_in / 1e6 + rate_out * tokens_out / 1e6, 6)
 
     async def _batch(
@@ -153,7 +153,7 @@ class HaikuContextualizer:
         async with self._sem:
             try:
                 response = await api.messages.create(
-                    model=self.model,
+                    model=resolve_model(self.model),
                     max_tokens=150 * len(group),
                     messages=[
                         {
@@ -190,7 +190,7 @@ class HaikuContextualizer:
         tokens_in = sum(r[1] for r in results)
         tokens_out = sum(r[2] for r in results)
         failed = sum(len(g) for g, r in zip(groups, results, strict=True) if r[3])
-        rate_in, rate_out = PRICE_PER_MTOK.get(self.model, (0.0, 0.0))
+        rate_in, rate_out = price_per_mtok(self.model)
         cost = round(rate_in * tokens_in / 1e6 + rate_out * tokens_out / 1e6, 6)
         return ContextResult(
             prefixes=prefixes,

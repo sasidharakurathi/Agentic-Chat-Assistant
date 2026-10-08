@@ -35,9 +35,9 @@ def test_keys_and_names_are_unique() -> None:
 
 
 async def test_the_catalog_is_served_without_values(
-    client: AsyncClient, auth_headers: dict[str, str]
+    client: AsyncClient, org_headers: dict[str, str]
 ) -> None:
-    r = await client.get("/api/v1/mcp-presets", headers=auth_headers)
+    r = await client.get("/api/v1/mcp-presets", headers=org_headers)
     assert r.status_code == 200, r.text
     github = next(p for p in r.json() if p["key"] == "github")
     assert github["headers"][0]["name"] == "Authorization"

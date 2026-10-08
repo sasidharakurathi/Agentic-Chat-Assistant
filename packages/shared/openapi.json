@@ -368,7 +368,8 @@
           "pending",
           "approved",
           "denied",
-          "expired"
+          "expired",
+          "cancelled"
         ],
         "title": "ApprovalStatus",
         "type": "string"
@@ -1093,6 +1094,18 @@
             "title": "Created At",
             "type": "string"
           },
+          "created_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
           "external_user_ref": {
             "anyOf": [
               {
@@ -1174,6 +1187,7 @@
           "assistant_version_id",
           "title",
           "external_user_ref",
+          "created_by",
           "status",
           "cost_usd",
           "token_usage",
@@ -1239,6 +1253,18 @@
             "title": "Created At",
             "type": "string"
           },
+          "created_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
           "external_user_ref": {
             "anyOf": [
               {
@@ -1291,6 +1317,7 @@
           "assistant_version_id",
           "title",
           "external_user_ref",
+          "created_by",
           "status",
           "cost_usd",
           "token_usage",
@@ -14480,6 +14507,23 @@
         "parameters": [
           {
             "in": "header",
+            "name": "x-org-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Org-Id"
+            }
+          },
+          {
+            "in": "header",
             "name": "authorization",
             "required": false,
             "schema": {
@@ -14532,6 +14576,23 @@
         "description": "Whether local-command (stdio) servers can run, and how well they are\ncontained, so the MCP tab can say so instead of letting a partial\nsandbox pass as a full one.",
         "operationId": "runner_status_api_v1_mcp_runner_get",
         "parameters": [
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Org-Id"
+            }
+          },
           {
             "in": "header",
             "name": "authorization",

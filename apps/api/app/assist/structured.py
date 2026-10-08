@@ -25,6 +25,7 @@ from anthropic.types.beta import BetaMessage
 from pydantic import BaseModel, ValidationError
 
 from app.agent import claude_api
+from app.agent.models import SERVER_FALLBACK_MODELS, resolve_model
 from app.schemas.assistant_config import AssistantConfig
 
 T = TypeVar("T", bound=BaseModel)
@@ -32,8 +33,6 @@ T = TypeVar("T", bound=BaseModel)
 #: Room for the answer; it is billed by what is written, not by this.
 MAX_TOKENS = 16_000
 TIMEOUT_S = 120.0
-#: Models that take the server-side refusal fallback (see models.py).
-_FALLBACK_CAPABLE = frozenset({"claude-opus-5"})
 
 
 @dataclass
@@ -68,7 +67,8 @@ async def ask(
 ) -> tuple[T, Spend]:
     """`model`: the assistant's main model unless another is given (the
     router's, task 5.10)."""
-    model = model or config.models.main.model
+    # An alias never leaves the platform (agent/models.py).
+    model = resolve_model(model or config.models.main.model)
     request: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
@@ -78,7 +78,7 @@ async def ask(
     }
     response: Message | BetaMessage
     async with claude_api.client(timeout_s) as api:
-        if model in _FALLBACK_CAPABLE and config.guardrails.refusal_fallback:
+        if model in SERVER_FALLBACK_MODELS and config.guardrails.refusal_fallback:
             response = await api.beta.messages.create(
                 **request, betas=["server-side-fallback-2026-07-01"], fallbacks="default"
             )

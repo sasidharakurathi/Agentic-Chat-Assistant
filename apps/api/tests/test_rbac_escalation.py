@@ -9,7 +9,8 @@ into any other member's conversation, with no audit entry.
 The rule now lives in the service, where both the actor and the target are
 visible: you cannot grant a role above your own, you cannot change someone
 ranked at or above you (owners excepted), and anyone may lower their own
-role. Conversation mutations belong to their creator, or an admin.
+role. Conversation mutations belong to their creator alone: admins read
+other people's conversations but cannot post into or change them (7a.4).
 """
 
 from __future__ import annotations
@@ -163,7 +164,7 @@ async def test_a_member_cannot_touch_a_teammates_conversation(client: AsyncClien
     assert (rename.status_code, archive.status_code, post.status_code) == (403, 403, 403)
 
 
-async def test_the_creator_and_admins_can(client: AsyncClient) -> None:
+async def test_only_the_creator_can(client: AsyncClient) -> None:
     t = await _team(client)
     cid = await _conversation_of(client, t, t.member)
     mine = await client.patch(
@@ -172,7 +173,41 @@ async def test_the_creator_and_admins_can(client: AsyncClient) -> None:
     theirs = await client.patch(
         f"/api/v1/conversations/{cid}", json={"title": "Reviewed"}, headers=t.h(t.admin)
     )
-    assert (mine.status_code, theirs.status_code) == (200, 200)
+    assert (mine.status_code, theirs.status_code) == (200, 403)
+
+
+async def test_admins_read_a_teammates_conversation_but_cannot_act_in_it(
+    client: AsyncClient,
+) -> None:
+    """Phase 7a.4: a message runs the agent as the conversation's owner (their
+    memory, and soon their identity), so an admin posting into it would act
+    in their name. Reading stays open to admins; acting does not."""
+    t = await _team(client)
+    cid = await _conversation_of(client, t, t.member)
+    url = f"/api/v1/conversations/{cid}"
+    for admin in (t.admin, t.owner):
+        h = t.h(admin)
+        for read in (url, f"{url}/messages", f"{url}/runs", f"{url}/approvals", f"{url}/turn"):
+            assert (await client.get(read, headers=h)).status_code == 200, read
+        acts = [
+            await client.post(f"{url}/messages", json={"text": "hi"}, headers=h),
+            await client.post(f"{url}:interrupt", headers=h),
+            await client.patch(url, json={"title": "Reviewed"}, headers=h),
+            await client.delete(url, headers=h),
+        ]
+        assert [r.status_code for r in acts] == [403] * 4
+        assert {r.json()["error"]["code"] for r in acts} == {"not_conversation_owner"}
+    after = (await client.get(url, headers=t.h(t.member))).json()
+    assert after["status"] != "archived" and after["title"] != "Reviewed"
+    assert after["messages"] == [], "no admin message reached it"
+
+
+async def test_a_conversation_says_who_started_it(client: AsyncClient) -> None:
+    """The web app shows a read-only view to everyone else (Phase 7a.4)."""
+    t = await _team(client)
+    cid = await _conversation_of(client, t, t.member)
+    got = (await client.get(f"/api/v1/conversations/{cid}", headers=t.h(t.admin))).json()
+    assert got["created_by"] == t.member.user_id
 
 
 async def test_reading_a_teammates_conversation_is_unchanged(client: AsyncClient) -> None:
@@ -186,8 +221,8 @@ async def test_reading_a_teammates_conversation_is_unchanged(client: AsyncClient
 async def test_rename_and_archive_are_audited(client: AsyncClient) -> None:
     t = await _team(client)
     cid = await _conversation_of(client, t, t.member)
-    await client.patch(f"/api/v1/conversations/{cid}", json={"title": "Q3"}, headers=t.h(t.admin))
-    await client.delete(f"/api/v1/conversations/{cid}", headers=t.h(t.admin))
+    await client.patch(f"/api/v1/conversations/{cid}", json={"title": "Q3"}, headers=t.h(t.member))
+    await client.delete(f"/api/v1/conversations/{cid}", headers=t.h(t.member))
     log = (await client.get(f"/api/v1/orgs/{t.org_id}/audit-log", headers=t.owner.headers)).json()[
         "items"
     ]

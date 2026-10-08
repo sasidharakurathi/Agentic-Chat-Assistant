@@ -74,6 +74,27 @@ def test_a_failed_model_call_on_a_message_becomes_a_typed_error() -> None:
     assert not [e for e in _events_for(sub, denied=set()) if isinstance(e, ErrorEvent)]
 
 
+def test_a_model_the_runtime_is_too_old_for_says_so() -> None:
+    """Measured (Phase 7a.6): the API refused Opus 5.5 from the bundled CLI
+    2.1.258, and the CLI labelled it `unknown`, which read "Something went
+    wrong. Try again". Trying again can't help; an administrator can."""
+    from claude_agent_sdk import TextBlock
+
+    said = (
+        "API Error: 400 Claude Code 2.1.258 does not support this model; version 2.1.280 or "
+        "newer is required. Run 'claude update', or update the Claude desktop app, then try again."
+    )
+    msg = AssistantMessage(
+        content=[TextBlock(text=said)], model="<synthetic>", message_id="m3", error="unknown"
+    )
+    (event,) = [e for e in _events_for(msg, denied=set()) if isinstance(e, ErrorEvent)]
+    assert (event.code, event.retryable) == ("model_unsupported", False)
+    assert "administrator" in event.message
+    plain = AssistantMessage(content=[], model="m", message_id="m4", error="unknown")
+    (event,) = [e for e in _events_for(plain, denied=set()) if isinstance(e, ErrorEvent)]
+    assert event.code == "agent_error", "other unknown failures are unchanged"
+
+
 def test_the_final_report_says_why_it_stopped_and_who_answered() -> None:
     result = ResultMessage(
         subtype="success",

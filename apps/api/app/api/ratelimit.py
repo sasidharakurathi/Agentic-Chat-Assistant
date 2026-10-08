@@ -30,6 +30,8 @@ _MESSAGES = {
     "user": "Too many requests.",
     "auth": "Too many sign-in attempts from this address.",
     "login": "Too many sign-in attempts for this account.",
+    "refresh": "This session is being refreshed too often.",
+    "refresh_ip": "Too many session refreshes from this address.",
     "chat_user": "You're sending messages too quickly.",
     "chat_org": "This organisation is sending messages too quickly.",
     "assist": "Too many requests to the AI helpers.",

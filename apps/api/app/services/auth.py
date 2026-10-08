@@ -5,7 +5,7 @@ from __future__ import annotations
 import secrets
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import cache
 
 from sqlalchemy import select, update
@@ -205,6 +205,11 @@ async def rotate_refresh_token(
         raise Unauthorized("Refresh token not recognized", code="invalid_refresh")
 
     if not row.is_active:
+        if await _retry_after_lost_reply(session, row):
+            log.info("refresh_retry_accepted", user_id=str(row.user_id), family=str(row.family_id))
+            return await issue_tokens(
+                session, user_id=row.user_id, family_id=row.family_id, user_agent=user_agent, ip=ip
+            )
         await _revoke_family(session, row.family_id, reason="reuse_detected")
         log.warning("refresh_reuse_detected", user_id=str(row.user_id), family=str(row.family_id))
         await session.commit()
@@ -229,6 +234,47 @@ async def rotate_refresh_token(
     return await issue_tokens(
         session, user_id=row.user_id, family_id=row.family_id, user_agent=user_agent, ip=ip
     )
+
+
+async def _retry_after_lost_reply(session: AsyncSession, row: RefreshToken) -> bool:
+    """Whether a used token presented again is a retry whose reply was lost
+    (Phase 7a.8), and if so, retire the pair that reply carried.
+
+    On a weak connection the rotation succeeds on the server and its reply
+    never arrives, so the phone tries again with the token it still has.
+    That used to read as theft and revoke the whole session. It is a retry
+    when: the token was used within the grace window, its session is not
+    revoked, and nothing newer in the session has been used since (the
+    pair from the lost reply is unused, so it never reached anyone). Then
+    that unused pair is revoked and the caller gets a new one in the same
+    session. Anything else is still reuse: the session is revoked.
+    """
+    grace = settings.refresh_reuse_grace_s
+    if not grace or row.revoked_at is not None or row.used_at is None:
+        return False
+    now = datetime.now(UTC)
+    if now - row.used_at > timedelta(seconds=grace):
+        return False
+    moved_on = await session.scalar(
+        select(RefreshToken.id).where(
+            RefreshToken.family_id == row.family_id,
+            RefreshToken.used_at.is_not(None),
+            RefreshToken.used_at > row.used_at,
+        )
+    )
+    if moved_on is not None:
+        return False
+    await session.execute(
+        update(RefreshToken)
+        .where(
+            RefreshToken.family_id == row.family_id,
+            RefreshToken.used_at.is_(None),
+            RefreshToken.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    return True
 
 
 async def _revoke_family(session: AsyncSession, family_id: uuid.UUID, *, reason: str) -> None:

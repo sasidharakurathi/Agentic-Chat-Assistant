@@ -235,19 +235,19 @@ async def test_an_unreachable_runner_is_explained(monkeypatch: pytest.MonkeyPatc
 
 async def test_the_builder_can_see_how_contained_servers_are(
     client: httpx.AsyncClient,
-    auth_headers: dict[str, str],
+    org_headers: dict[str, str],
     runner: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.config import settings
 
     monkeypatch.setattr(settings, "mcp_runner_url", runner)
-    body = (await client.get("/api/v1/mcp-runner", headers=auth_headers)).json()
+    body = (await client.get("/api/v1/mcp-runner", headers=org_headers)).json()
     assert body["reachable"] is True
     assert "clean environment" in body["applied"]
     assert body["full_sandbox"] is (os.name == "posix")
 
     monkeypatch.setattr(settings, "mcp_runner_url", "")
-    off = (await client.get("/api/v1/mcp-runner", headers=auth_headers)).json()
+    off = (await client.get("/api/v1/mcp-runner", headers=org_headers)).json()
     assert off["reachable"] is False and "MCP_RUNNER_URL" in off["error"]
     assert (await client.get("/api/v1/mcp-runner")).status_code == 401

@@ -80,7 +80,10 @@ export function ApprovalCard({
       await approvals.resolve(approval.approval_id, decision);
       onDecided(decision);
     } catch (err) {
-      if (err instanceof ApiError && err.code === "approval_not_pending" && onGone) {
+      // Already decided, or past its expiry (Phase 7a.7): either way it is
+      // closed, and the card goes.
+      const closed = ["approval_not_pending", "approval_expired"];
+      if (err instanceof ApiError && closed.includes(err.code) && onGone) {
         onGone(err.message);
         return;
       }

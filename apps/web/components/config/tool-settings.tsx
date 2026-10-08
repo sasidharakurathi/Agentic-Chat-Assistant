@@ -180,7 +180,7 @@ export function HttpRequestSettings({
       <DomainsField
         value={domains}
         onCommit={(d) => onChange({ allowed_domains: d })}
-        hint="Separate sites with commas. Leave empty to allow any public site. Private and internal addresses are always blocked."
+        hint="Separate sites with commas. Only these sites and their subdomains can be reached: with none listed, every request is refused. Private and internal addresses are always blocked."
       />
       <ApprovalSelect
         label="Requests that change something"

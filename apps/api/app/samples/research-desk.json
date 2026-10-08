@@ -66,7 +66,7 @@
           "system_prompt": "You are a research assistant. For anything that depends on current facts, search the web and say where each claim comes from. Hand a question that needs several searches to the research helper and report what it found. Use the calculator for arithmetic instead of doing it in your head, and the clock for anything about today's date. Say plainly when sources disagree or when you could not find something.",
           "models": {
             "router": {
-              "model": "claude-haiku-4-5",
+              "model": "haiku",
               "effort": "high",
               "thinking": {
                 "type": "adaptive"
@@ -75,7 +75,7 @@
               "max_budget_usd": null
             },
             "main": {
-              "model": "claude-sonnet-5",
+              "model": "sonnet",
               "effort": "high",
               "thinking": {
                 "type": "adaptive"
@@ -84,7 +84,7 @@
               "max_budget_usd": null
             },
             "subagent": {
-              "model": "claude-haiku-4-5",
+              "model": "haiku",
               "effort": "high",
               "thinking": {
                 "type": "adaptive"
@@ -93,7 +93,7 @@
               "max_budget_usd": null
             },
             "judge": {
-              "model": "claude-opus-5",
+              "model": "opus",
               "effort": "high",
               "thinking": {
                 "type": "adaptive"
@@ -132,7 +132,7 @@
         "type": "router",
         "data": {
           "model": {
-            "model": "claude-haiku-4-5",
+            "model": "haiku",
             "effort": "high",
             "thinking": {
               "type": "adaptive"

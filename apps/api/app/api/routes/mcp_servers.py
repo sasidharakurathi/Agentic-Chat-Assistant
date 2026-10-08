@@ -7,10 +7,10 @@ import uuid
 from fastapi import APIRouter, status
 
 from app.api.deps import (
+    ActiveMembership,
     AssistantContext,
     AssistantCtx,
     ClientIP,
-    CurrentUser,
     EditableAssistantCtx,
     PageQuery,
     SessionDep,
@@ -138,7 +138,7 @@ async def discover_tools(
 
 
 @router.get("/mcp-presets", response_model=list[McpPresetOut])
-async def list_presets(_user: CurrentUser) -> list[McpPresetOut]:
+async def list_presets(_m: ActiveMembership) -> list[McpPresetOut]:
     """A short catalog of well-known MCP servers, to fill the Add form with
     (task 4.8). Secrets are named, never supplied."""
     return [
@@ -161,7 +161,7 @@ async def list_presets(_user: CurrentUser) -> list[McpPresetOut]:
 
 
 @router.get("/mcp-runner", response_model=McpRunnerStatus)
-async def runner_status(_user: CurrentUser) -> McpRunnerStatus:
+async def runner_status(_m: ActiveMembership) -> McpRunnerStatus:
     """Whether local-command (stdio) servers can run, and how well they are
     contained, so the MCP tab can say so instead of letting a partial
     sandbox pass as a full one."""

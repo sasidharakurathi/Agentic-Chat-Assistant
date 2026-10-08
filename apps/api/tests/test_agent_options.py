@@ -24,7 +24,7 @@ def test_default_spec_exposes_no_tools() -> None:
     spec = build_runtime_spec(default_config())
     assert spec.enabled_tools == []
     assert spec.caps_tools == []
-    assert spec.model == "claude-sonnet-5"
+    assert spec.model == "claude-sonnet-5-5", "the alias, resolved"
 
 
 def test_enabling_caps_adds_qualified_tool_names() -> None:

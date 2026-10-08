@@ -12,7 +12,9 @@ license = { text = "Proprietary" }
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
-    "claude-agent-sdk>=0.2.150",
+    # Exact: it carries the Claude CLI, so a new release can change how
+    # turns, tools and permissions behave under approved versions (7a.6).
+    "claude-agent-sdk==0.2.164",
     # Direct Messages API calls outside agent turns (agent/claude_api.py)
     "anthropic>=1.9,<2",
     "pydantic>=2.9",
@@ -42,7 +44,9 @@ dependencies = [
     "trafilatura>=1.12",
     # Phase 3 — database integrations
     "cryptography>=43.0",   # AESGCM envelope encryption for stored credentials
-    "sqlglot>=25.0",        # SQL parsing/classification for the query guard
+    # Exact: it decides whether a statement reads or writes, the line
+    # approvals are drawn on; bump only with the guard's tests (7a.6).
+    "sqlglot==30.18.0",
     "aiomysql>=0.2",
     "motor>=3.6",
 ]

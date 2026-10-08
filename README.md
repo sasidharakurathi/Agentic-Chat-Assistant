@@ -119,7 +119,8 @@ docker compose up -d postgres redis minio
 
 python -m venv .venv
 .venv/bin/python -m pip install -U pip
-.venv/bin/python -m pip install -e "apps/api[dev,observability]"
+.venv/bin/python -m pip install -c apps/api/constraints.txt -e "apps/api[dev,observability]" \
+  --extra-index-url https://download.pytorch.org/whl/cpu
 cp .env.example .env
 
 .venv/bin/python -m alembic -c apps/api/alembic.ini upgrade head

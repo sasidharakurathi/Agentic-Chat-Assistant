@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from app.agent import claude_api
-from app.agent.models import TITLE_MODEL
+from app.agent.models import TITLE_MODEL, resolve_model
 
 #: The title every conversation starts with, and the one auto-titling
 #: replaces. A conversation someone has renamed is never retitled.
@@ -72,7 +72,7 @@ _PROMPT = (
 
 
 class HaikuTitler:
-    name = TITLE_MODEL
+    name = resolve_model(TITLE_MODEL)
 
     async def title(self, first_message: str) -> Title:
         done = await claude_api.complete(

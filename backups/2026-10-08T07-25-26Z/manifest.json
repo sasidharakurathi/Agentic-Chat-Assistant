@@ -1,0 +1,9 @@
+{
+  "created_at": "2026-10-08T07-25-26Z",
+  "database": "app",
+  "schema_revision": "2e9a99664235",
+  "bucket": "assistant-uploads",
+  "objects": 0,
+  "db_dump_bytes": 126303,
+  "db_dump_sha256": "ae261e534d921290a28713504d31380d54a5938be6bd99bc3d84a110391f634a"
+}

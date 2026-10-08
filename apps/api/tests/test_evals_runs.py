@@ -621,10 +621,11 @@ async def test_the_judge_grades_each_answer_and_its_cost_is_recorded(
     assert "hello 0" in claude_stub.prompt(stub.requests[0]), "the judge saw the answer"
 
     # Three calls were billed (the refusal too), on the judge's model.
-    call = 1000 * 5 / 1e6 + 100 * 25 / 1e6
+    # The judge's default is "opus", which runs as Opus 5.5 ($4 / $20).
+    call = 1000 * 4 / 1e6 + 100 * 20 / 1e6
     async with get_sessionmaker()() as s:
         judged = (
-            await s.scalars(select(UsageEvent).where(UsageEvent.model == "claude-opus-5"))
+            await s.scalars(select(UsageEvent).where(UsageEvent.model == "claude-opus-5-5"))
         ).all()
         turns = await s.scalar(
             select(func.sum(Conversation.cost_usd)).where(Conversation.eval_run_id.is_not(None))

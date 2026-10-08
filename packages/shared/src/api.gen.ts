@@ -1487,7 +1487,7 @@ export interface components {
          * ApprovalStatus
          * @enum {string}
          */
-        ApprovalStatus: "pending" | "approved" | "denied" | "expired";
+        ApprovalStatus: "pending" | "approved" | "denied" | "expired" | "cancelled";
         /** AssistantConfig */
         "AssistantConfig-Input": {
             approval_policy?: components["schemas"]["ApprovalPolicy-Input"];
@@ -1773,6 +1773,8 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /** Created By */
+            created_by: string | null;
             /** External User Ref */
             external_user_ref: string | null;
             /**
@@ -1827,6 +1829,8 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /** Created By */
+            created_by: string | null;
             /** External User Ref */
             external_user_ref: string | null;
             /**
@@ -7735,6 +7739,7 @@ export interface operations {
             query?: never;
             header?: {
                 authorization?: string | null;
+                "x-org-id"?: string | null;
             };
             path?: never;
             cookie?: never;
@@ -7766,6 +7771,7 @@ export interface operations {
             query?: never;
             header?: {
                 authorization?: string | null;
+                "x-org-id"?: string | null;
             };
             path?: never;
             cookie?: never;

@@ -219,9 +219,16 @@ async def test_presigned_urls_are_signed_against_the_browser_reachable_host(
     s3.get_s3_presign_client.cache_clear()
     s3.get_s3_client.cache_clear()
     try:
-        url = await s3.presigned_get_url("data-sources/x/y/handbook.pdf")
+        url = await s3.presigned_get_url(
+            "data-sources/x/y/handbook.pdf",
+            content_type="application/pdf",
+            disposition='inline; filename="handbook.pdf"',
+        )
         assert urlparse(url).netloc == "localhost:9000"
         assert "X-Amz-Signature" in url
+        # The type and disposition are signed into the link (Phase 7a.1).
+        assert "response-content-type=application%2Fpdf" in url
+        assert "response-content-disposition=inline" in url
     finally:
         s3.get_s3_presign_client.cache_clear()
         s3.get_s3_client.cache_clear()
@@ -261,6 +268,141 @@ async def test_content_url_for_a_file_actually_fetches_the_object(
         fetched = await raw.get(body["url"])
     assert fetched.status_code == 200, fetched.text
     assert fetched.content == content
+
+
+# ── uploaded files never run as the app (Phase 7a.1) ─────────
+#
+# Found in the gap review: the object was stored with the browser's type and
+# the link served it on the app's own origin, so an HTML file with a script
+# ran as the app when a citation was opened. These go through real MinIO,
+# because only the store's answer proves the signed overrides are honoured.
+
+SCRIPT_PAGE = (
+    b"<html><body><script>alert(localStorage['as.access'])</script>VPN guide</body></html>"
+)
+
+
+async def _upload(
+    client: AsyncClient, headers: dict[str, str], aid: str, name: str, body: bytes, ctype: str
+):
+    return await client.post(
+        f"/api/v1/assistants/{aid}/data-sources/upload",
+        files={"file": (name, body, ctype)},
+        headers=headers,
+    )
+
+
+async def _follow_link(client: AsyncClient, headers: dict[str, str], aid: str, sid: str):
+    from httpx import AsyncClient as RawClient
+
+    link = await client.get(
+        f"/api/v1/assistants/{aid}/data-sources/{sid}/content-url", headers=headers
+    )
+    async with RawClient(timeout=10.0) as raw:
+        return await raw.get(link.json()["url"])
+
+
+@pytest.mark.integration
+async def test_an_html_upload_is_served_as_plain_text(
+    client: AsyncClient, org_headers: dict[str, str], db_session: AsyncSession
+) -> None:
+    from app.models.rag import DataSource
+
+    aid = await _new_assistant(client, org_headers)
+    created = await _upload(client, org_headers, aid, "vpn.html", SCRIPT_PAGE, "text/html")
+    assert created.status_code == 201, created.text
+    # Stored as what it is, so ingest still parses it as HTML.
+    source = await db_session.get(DataSource, uuid.UUID(created.json()["id"]))
+    assert source is not None and source.config["content_type"] == "text/html"
+
+    fetched = await _follow_link(client, org_headers, aid, created.json()["id"])
+    assert fetched.status_code == 200
+    assert fetched.headers["content-type"].startswith("text/plain")
+    assert fetched.headers["content-disposition"].startswith("inline")
+    assert fetched.content == SCRIPT_PAGE
+
+
+@pytest.mark.integration
+async def test_a_false_type_claim_changes_nothing(
+    client: AsyncClient, org_headers: dict[str, str]
+) -> None:
+    """The attack as a builder would try it: HTML bytes claiming to be a PDF,
+    under a PDF name. The bytes decide; the link serves plain text."""
+    aid = await _new_assistant(client, org_headers)
+    created = await _upload(client, org_headers, aid, "policy.pdf", SCRIPT_PAGE, "application/pdf")
+    assert created.status_code == 201, created.text
+    # The object itself carries the server's type, not the claim.
+    from app.config import settings
+    from app.storage import get_s3_client
+
+    listed = get_s3_client().list_objects_v2(
+        Bucket=settings.s3_bucket, Prefix=f"data-sources/{aid}/{created.json()['id']}/"
+    )
+    key = listed["Contents"][0]["Key"]
+    head = get_s3_client().head_object(Bucket=settings.s3_bucket, Key=key)
+    assert head["ContentType"] == "text/plain"
+    fetched = await _follow_link(client, org_headers, aid, created.json()["id"])
+    assert fetched.headers["content-type"].startswith("text/plain")
+
+
+@pytest.mark.integration
+async def test_a_word_file_downloads_and_a_pdf_opens(
+    client: AsyncClient, org_headers: dict[str, str]
+) -> None:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("word/document.xml", "<w:document/>")
+    aid = await _new_assistant(client, org_headers)
+    docx = await _upload(
+        client, org_headers, aid, "Leave policy é.docx", buf.getvalue(), "application/octet-stream"
+    )
+    pdf = await _upload(
+        client, org_headers, aid, "handbook.pdf", b"%PDF-1.4\n%%EOF", "application/octet-stream"
+    )
+    assert docx.status_code == pdf.status_code == 201
+
+    got_docx = await _follow_link(client, org_headers, aid, docx.json()["id"])
+    assert got_docx.headers["content-disposition"].startswith("attachment")
+    assert (
+        "filename*=UTF-8''Leave%20policy%20%C3%A9.docx" in got_docx.headers["content-disposition"]
+    )
+    got_pdf = await _follow_link(client, org_headers, aid, pdf.json()["id"])
+    assert got_pdf.headers["content-type"] == "application/pdf"
+    assert got_pdf.headers["content-disposition"].startswith("inline")
+
+
+@pytest.mark.integration
+async def test_a_file_stored_before_the_fix_is_served_safely(
+    client: AsyncClient, org_headers: dict[str, str], db_session: AsyncSession
+) -> None:
+    """Rows written by the old code hold whatever the browser claimed. The link
+    must not trust it: simulate one by writing the old type back."""
+    from app.models.rag import DataSource
+    from app.storage import put_object
+
+    aid = await _new_assistant(client, org_headers)
+    created = await _upload(client, org_headers, aid, "old.html", SCRIPT_PAGE, "text/html")
+    source = await db_session.get(DataSource, uuid.UUID(created.json()["id"]))
+    assert source is not None and source.object_key
+    await put_object(source.object_key, SCRIPT_PAGE, "text/html")  # the old storage
+    fetched = await _follow_link(client, org_headers, aid, created.json()["id"])
+    assert fetched.headers["content-type"].startswith("text/plain")
+
+
+@pytest.mark.integration
+async def test_a_binary_that_is_no_supported_format_is_refused(
+    client: AsyncClient, org_headers: dict[str, str]
+) -> None:
+    aid = await _new_assistant(client, org_headers)
+    resp = await _upload(
+        client, org_headers, aid, "tool.exe", b"MZ\x90\x00\x03\x00\x00\x00", "text/plain"
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "unsupported_file_type"
+    assert "PDF, Word" in resp.json()["error"]["message"]
 
 
 # ── counts for the sources UI (task 2.12) ────────────────────

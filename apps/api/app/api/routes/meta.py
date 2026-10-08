@@ -6,7 +6,7 @@ from fastapi import APIRouter
 
 from app import samples
 from app.agent import claude_api
-from app.agent.models import ALLOWED_MODELS, DEFAULT_MODEL_BY_ROLE
+from app.agent.models import DEFAULT_MODEL_BY_ROLE, MODEL_ALIASES, PINNED_MODELS, aliases
 from app.config import settings
 from app.graph.nodes import NodeType
 from app.graph.validate import ALLOWED_EDGES, SINGLETON_TYPES
@@ -23,7 +23,12 @@ async def get_config_schema() -> dict[str, Any]:
     return {
         "schema": config_json_schema(),
         "default": default_config().model_dump(mode="json"),
-        "allowed_models": sorted(ALLOWED_MODELS),
+        # What a builder may pick, aliases first (Phase 7a.6): "sonnet" follows
+        # the family; "claude-sonnet-5-5" stays exactly that model. A retired id
+        # still validates (an old version keeps working) but is not offered.
+        "allowed_models": [*MODEL_ALIASES, *sorted(PINNED_MODELS)],
+        # Which model each alias runs as today, for the labels.
+        "model_aliases": aliases(),
         "default_model_by_role": DEFAULT_MODEL_BY_ROLE,
         # Offline mode (RAG_OFFLINE=1) switches web search off instance-wide,
         # whatever an assistant's config says; the panels say so.

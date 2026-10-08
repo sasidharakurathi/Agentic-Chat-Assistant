@@ -7,6 +7,7 @@ turn discovering that.
 
 from __future__ import annotations
 
+from app.agent.models import resolve_model
 from app.agent.options import build_runtime_spec, compose_system_prompt
 from app.agent.subagents import RETRIEVAL_TOOLS, build_subagent_specs
 from app.schemas.assistant_config import default_config
@@ -33,7 +34,7 @@ def test_enabled_with_a_knowledge_base_produces_the_retrieval_spec() -> None:
     assert spec.max_turns == 6
     # Cheap model per the plan — the whole point is keeping the expensive one
     # out of the search loop.
-    assert spec.model == default_config().models.subagent.model
+    assert spec.model == resolve_model(default_config().models.subagent.model)
 
 
 def test_enabled_without_a_knowledge_base_produces_nothing() -> None:

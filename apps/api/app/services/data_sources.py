@@ -21,6 +21,12 @@ from app.queue import enqueue_ingest
 from app.schemas.data_source import ContentUrl, DataSourceSummary, IngestProgress
 from app.services import audit
 from app.storage import delete_object, presigned_get_url, put_object
+from app.storage.file_types import (
+    UnsupportedUpload,
+    classify_upload,
+    content_disposition,
+    serve_kind,
+)
 
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 
@@ -135,6 +141,12 @@ async def create_upload(
             f"File exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit",
             code="file_too_large",
         )
+    # The server decides what the file is; the browser's type is only a
+    # tie-break between text formats (storage/file_types.py).
+    try:
+        kind = classify_upload(filename, content, content_type)
+    except UnsupportedUpload as exc:
+        raise BadRequest(str(exc), code="unsupported_file_type") from exc
 
     source = DataSource(
         assistant_id=assistant.id,
@@ -144,13 +156,13 @@ async def create_upload(
         bytes=len(content),
         checksum=hashlib.sha256(content).hexdigest(),
         status=DataSourceStatus.pending,
-        config={"content_type": content_type},
+        config={"content_type": kind.mime},
     )
     session.add(source)
     await session.flush()
 
     key = _object_key(assistant.id, source.id, filename)
-    await put_object(key, content, content_type or "application/octet-stream")
+    await put_object(key, content, kind.mime)
     source.object_key = key
 
     await audit.record(
@@ -291,7 +303,13 @@ async def content_url(source: DataSource) -> ContentUrl:
     rather than returning a link that goes nowhere.
     """
     if source.type == DataSourceType.file and source.object_key:
-        url = await presigned_get_url(source.object_key, expires_in=CONTENT_URL_TTL)
+        kind = serve_kind(source.name, str((source.config or {}).get("content_type", "")))
+        url = await presigned_get_url(
+            source.object_key,
+            content_type=kind.serve_type,
+            disposition=content_disposition(kind, source.name),
+            expires_in=CONTENT_URL_TTL,
+        )
         return ContentUrl(url=url, expires_in=CONTENT_URL_TTL, kind="file")
     if source.type == DataSourceType.url and source.uri:
         return ContentUrl(url=source.uri, expires_in=0, kind="url")

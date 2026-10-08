@@ -3,6 +3,7 @@
 import { Archive, Pencil, Plus } from "lucide-react";
 import { useId, type ReactNode } from "react";
 
+import { canAct } from "@/components/chat/conversation-access";
 import { groupByDay } from "@/components/chat/conversation-groups";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -15,12 +16,14 @@ import { cn } from "@/lib/utils";
  *  back link to the assistant's settings, New chat, then the conversations
  *  grouped Today, Yesterday and Earlier. The open one has the muted fill,
  *  the marker bar and `aria-current`. Rename and Archive show on hover, on
- *  focus and always on the open row (and always on touch screens). Used in
- *  the side column and, below 768px, in a sheet. */
+ *  focus and always on the open row (and always on touch screens), on the
+ *  conversations the signed-in user started. Used in the side column and,
+ *  below 768px, in a sheet. */
 export function ConversationList({
   assistantId,
   name,
   rows,
+  userId,
   active,
   more,
   loadingMore = false,
@@ -35,6 +38,8 @@ export function ConversationList({
   assistantId: string;
   name: string;
   rows: Conversation[];
+  /** The signed-in user: only conversations they started can be changed. */
+  userId: string | null;
   active: string | null;
   more: boolean;
   loadingMore?: boolean;
@@ -87,6 +92,7 @@ export function ConversationList({
                     key={c.id}
                     c={c}
                     active={c.id === active}
+                    canChange={canAct(c, userId)}
                     onSelect={onSelect}
                     onRename={onRename}
                     onArchive={onArchive}
@@ -118,12 +124,16 @@ export function ConversationList({
 function Row({
   c,
   active,
+  canChange,
   onSelect,
   onRename,
   onArchive,
 }: {
   c: Conversation;
   active: boolean;
+  /** Started by the signed-in user. Anyone else's opens read-only, with no
+   *  Rename or Archive (Phase 7a.4). */
+  canChange: boolean;
   onSelect: (id: string) => void;
   onRename: (c: Conversation) => void;
   onArchive: (c: Conversation) => void;
@@ -142,9 +152,12 @@ function Row({
         aria-current={active ? "true" : undefined}
         title={c.title}
         className={cn(
-          "focus-visible:ring-ring h-9 min-w-0 flex-1 truncate rounded-md pr-3 pl-3 text-left transition-colors duration-120 ease-out group-focus-within:pr-[68px] group-hover:pr-[68px] focus-visible:ring-2 focus-visible:outline-none pointer-coarse:pr-[68px]",
+          "focus-visible:ring-ring h-9 min-w-0 flex-1 truncate rounded-md pr-3 pl-3 text-left transition-colors duration-120 ease-out focus-visible:ring-2 focus-visible:outline-none",
+          // Room for Rename and Archive, only where they show.
+          canChange &&
+            "group-focus-within:pr-[68px] group-hover:pr-[68px] pointer-coarse:pr-[68px]",
           active
-            ? "bg-muted text-foreground pr-[68px] font-semibold"
+            ? cn("bg-muted text-foreground font-semibold", canChange && "pr-[68px]")
             : "text-muted-foreground hover:bg-muted hover:text-foreground",
         )}
       >
@@ -153,35 +166,51 @@ function Row({
         )}
         {c.title}
       </button>
-      <div
-        className={cn(
-          "absolute right-1 flex items-center gap-0.5 transition-opacity duration-120 ease-out",
-          active
-            ? "opacity-100"
-            : "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100",
-        )}
-      >
-        <Button
-          variant="ghost"
-          size="icon"
-          className="hover:bg-background size-7"
-          aria-label={`Rename ${c.title}`}
-          title="Rename"
-          onClick={() => onRename(c)}
-        >
-          <Pencil aria-hidden className="size-3.5" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="hover:bg-background hover:text-destructive size-7"
-          aria-label={`Archive ${c.title}`}
-          title="Archive"
-          onClick={() => onArchive(c)}
-        >
-          <Archive aria-hidden className="size-3.5" />
-        </Button>
-      </div>
+      {canChange && <RowActions c={c} active={active} onRename={onRename} onArchive={onArchive} />}
     </li>
+  );
+}
+
+function RowActions({
+  c,
+  active,
+  onRename,
+  onArchive,
+}: {
+  c: Conversation;
+  active: boolean;
+  onRename: (c: Conversation) => void;
+  onArchive: (c: Conversation) => void;
+}) {
+  return (
+    <div
+      className={cn(
+        "absolute right-1 flex items-center gap-0.5 transition-opacity duration-120 ease-out",
+        active
+          ? "opacity-100"
+          : "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100",
+      )}
+    >
+      <Button
+        variant="ghost"
+        size="icon"
+        className="hover:bg-background size-7"
+        aria-label={`Rename ${c.title}`}
+        title="Rename"
+        onClick={() => onRename(c)}
+      >
+        <Pencil aria-hidden className="size-3.5" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="hover:bg-background hover:text-destructive size-7"
+        aria-label={`Archive ${c.title}`}
+        title="Archive"
+        onClick={() => onArchive(c)}
+      >
+        <Archive aria-hidden className="size-3.5" />
+      </Button>
+    </div>
   );
 }

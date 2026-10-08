@@ -47,6 +47,9 @@ export function approvalLine(a: NonNullable<TraceStep["approval"]>): string {
   if (a.status === "approved") return `Approved by ${a.decided_by ?? "someone"}${after}`;
   if (a.status === "denied") return `Denied by ${a.decided_by ?? "someone"}${after}`;
   if (a.status === "expired") return `No answer: declined${after}`;
+  // Approved, but the answer had stopped first: nothing ran (Phase 7a.7).
+  if (a.status === "cancelled")
+    return `Approved by ${a.decided_by ?? "someone"}${after}, but the answer had stopped: nothing ran`;
   return "Waiting for someone to answer";
 }
 

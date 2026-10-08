@@ -75,8 +75,27 @@ services:
       timeout: 3s
       retries: 20
 
+  # Chainguard's MinIO runs as uid 65532, not root (Phase 7a.6). A volume
+  # written by the old minio/minio image is root's, so hand it over once,
+  # before the server starts; a volume that is already 65532's is left alone.
+  minio-owner:
+    image: cgr.dev/chainguard/minio@sha256:e7ca559d9f7c0b5f24f5f669bb92f40f3ca88d56273b808bf3a7c116c17d2ffa
+    user: "0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    volumes:
+      - miniodata:/data
+    entrypoint: ["/bin/sh", "-c", "[ \"$$(stat -c %u /data)\" = 65532 ] || chown -R 65532:65532 /data"]
+    restart: "no"
+
   minio:
-    image: minio/minio:latest
+    # Chainguard's build, rebuilt from source daily (Phase 7a.6): MinIO no
+    # longer publishes images and its code is archived. Pinned by digest;
+    # it carries `mc` and a shell, which the bucket job and backups use.
+    image: cgr.dev/chainguard/minio@sha256:e7ca559d9f7c0b5f24f5f669bb92f40f3ca88d56273b808bf3a7c116c17d2ffa
+    depends_on:
+      minio-owner:
+        condition: service_completed_successfully
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
@@ -93,9 +112,8 @@ services:
       retries: 20
 
   minio-init:
-    # The server image, which carries `mc` too: one image to have, and the
-    # separate minio/mc image is no longer reliably published.
-    image: minio/minio:latest
+    # The server image, which carries `mc` too: one image to have and pin.
+    image: cgr.dev/chainguard/minio@sha256:e7ca559d9f7c0b5f24f5f669bb92f40f3ca88d56273b808bf3a7c116c17d2ffa
     depends_on:
       minio:
         condition: service_healthy
@@ -118,6 +136,10 @@ services:
       - "${API_PORT:-8000}:8000"
     # `default` for the datastores and the web; `mcp` to reach the runner.
     networks: [default, mcp]
+    # The CLI's transcripts and working directories, shared with the
+    # worker (Phase 7a.5).
+    volumes:
+      - agentstate:/var/lib/assistant-studio
     depends_on:
       postgres:
         condition: service_healthy
@@ -144,6 +166,8 @@ services:
       <<: *api-env
       RUN_MIGRATIONS: "0"
     networks: [default, mcp]
+    volumes:
+      - agentstate:/var/lib/assistant-studio
     depends_on:
       postgres:
         condition: service_healthy
@@ -240,6 +264,7 @@ networks:
     internal: true
 
 volumes:
+  agentstate:
   mysqldata:
   mongodata:
   pgdata:

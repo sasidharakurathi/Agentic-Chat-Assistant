@@ -26,7 +26,7 @@ import sys
 import warnings
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 Level = Literal["ok", "warn", "fail", "skip"]
 
@@ -131,6 +131,74 @@ def review(settings, report: Report) -> None:  # type: ignore[no-untyped-def]
         )
 
 
+def review_models(settings, report: Report) -> None:  # type: ignore[no-untyped-def]
+    """MODEL_ALIASES may only repoint a known alias at a pinned model id
+    (Phase 7a.6): a typo would send every assistant on that alias to a model
+    the API does not know."""
+    from app.agent.models import MODEL_ALIASES, PINNED_MODELS
+
+    for alias, target in settings.model_aliases.items():
+        if alias not in MODEL_ALIASES:
+            report.add(
+                "fail",
+                "MODEL_ALIASES",
+                f"{alias!r} is not an alias; the aliases are {sorted(MODEL_ALIASES)}",
+            )
+        elif target not in PINNED_MODELS:
+            report.add(
+                "fail",
+                "MODEL_ALIASES",
+                f"{alias!r} points at {target!r}, which is not a model this release knows",
+            )
+
+
+def _models_named(config: dict[str, Any]) -> set[str]:
+    """Every model name in a stored config: the four roles and each
+    subagent's own."""
+    roles = config.get("models") or {}
+    own = (config.get("subagents") or {}).get("models") or {}
+    return {
+        spec["model"]
+        for spec in [*roles.values(), *own.values()]
+        if isinstance(spec, dict) and isinstance(spec.get("model"), str)
+    }
+
+
+async def _models_in_use() -> str:
+    """Saved versions that pin a model on its way out (Phase 7a.6). Not a
+    failure: a deprecated model still answers, and a retired one runs as its
+    replacement. It is the operator's cue to move those assistants."""
+    from sqlalchemy import select
+    from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
+
+    from app.agent.models import DEPRECATED_MODELS, RETIRED_MODELS
+    from app.db.session import get_sessionmaker
+    from app.models.assistant import AssistantVersion
+
+    try:
+        async with get_sessionmaker()() as session:
+            configs = (await session.scalars(select(AssistantVersion.config))).all()
+    except (ProgrammingError, OperationalError, DBAPIError):
+        return "skip: no versions table yet (first start)"
+    named: dict[str, int] = {}
+    for config in configs:
+        for model in _models_named(config):
+            if model in DEPRECATED_MODELS or model in RETIRED_MODELS:
+                named[model] = named.get(model, 0) + 1
+    if not named:
+        return ""
+    parts = [
+        f"{model} in {count} version(s), "
+        + (
+            f"retired, running as {RETIRED_MODELS[model]}"
+            if model in RETIRED_MODELS
+            else f"retires {DEPRECATED_MODELS[model]}"
+        )
+        for model, count in sorted(named.items())
+    ]
+    raise RuntimeError("; ".join(parts) + ". Move them to an alias such as 'sonnet'")
+
+
 async def _database() -> str:
     from sqlalchemy import text
 
@@ -207,6 +275,7 @@ CHECKS: dict[str, tuple[Callable[[], Awaitable[str]], bool]] = {
     "agent CLI": (_agent_cli, True),
     "redis": (_redis, False),
     "object storage": (_storage, False),
+    "models in use": (_models_in_use, False),
 }
 
 
@@ -234,6 +303,7 @@ async def run() -> Report:
     if settings is None:
         return report
     review(settings, report)
+    review_models(settings, report)
     await probe(report)
     return report
 

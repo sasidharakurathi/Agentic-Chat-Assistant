@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, status
-from sqlalchemy import select
 
 from app import queue
 from app.agent import claude_api
@@ -49,6 +48,7 @@ from app.schemas.evals import (
     EvalSuitePatch,
     EvalSuitesOut,
 )
+from app.security.access import member_of
 from app.services import evals as svc
 
 router = APIRouter(tags=["evals"])
@@ -79,11 +79,9 @@ async def _context(session: SessionDep, user: CurrentUser, suite: EvalSuite | No
     orgs: whether a suite exists elsewhere is not theirs to learn."""
     if suite is None:
         raise NotFound("Eval suite not found")
-    membership = await session.scalar(
-        select(Membership).where(Membership.org_id == suite.org_id, Membership.user_id == user.id)
-    )
+    membership = await member_of(session, suite.org_id, user.id, missing="Eval suite not found")
     assistant = await session.get(Assistant, suite.assistant_id)
-    if membership is None or assistant is None:
+    if assistant is None:
         raise NotFound("Eval suite not found")
     bind_org(session, suite.org_id)
     return SuiteContext(suite=suite, assistant=assistant, membership=membership)

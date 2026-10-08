@@ -139,13 +139,17 @@ async def test_the_model_writes_for_this_assistant(model: Any) -> None:
     assert draft.spend.cost_usd == pytest.approx(900 * 2 / 1e6 + 400 * 10 / 1e6)
 
 
-async def test_opus_5_opts_into_the_server_side_fallback(model: Any) -> None:
-    config = _config(models={"main": {"model": "claude-opus-5"}})
+@pytest.mark.parametrize("name", ["claude-opus-5", "claude-opus-5-5", "opus"])
+async def test_opus_opts_into_the_server_side_fallback(model: Any, name: str) -> None:
+    """Opus 5 and 5.5 take it (7a.6); "opus" is sent as the id it runs as."""
+    config = _config(models={"main": {"model": name}})
     await generate(config, name="A", description="Helps.")
     (request,) = model.stub.requests
     assert request.url.params["beta"] == "true"
     assert request.headers["anthropic-beta"] == "server-side-fallback-2026-07-01"
-    assert claude_stub.body(request)["fallbacks"] == "default"
+    body = claude_stub.body(request)
+    assert body["fallbacks"] == "default"
+    assert body["model"].startswith("claude-opus-"), "never the alias"
 
 
 async def test_no_fallback_when_the_assistant_turns_it_off(model: Any) -> None:
@@ -167,7 +171,7 @@ async def test_a_refusal_is_reported_with_what_it_cost(model: Any) -> None:
     with pytest.raises(PromptFailed) as failed:
         await generate(AssistantConfig(), name="A", description="Helps.")
     assert failed.value.reason == "refused"
-    assert (failed.value.spend.model, failed.value.spend.tokens_in) == ("claude-sonnet-5", 700)
+    assert (failed.value.spend.model, failed.value.spend.tokens_in) == ("claude-sonnet-5-5", 700)
     assert failed.value.spend.cost_usd > 0
 
 

@@ -3,7 +3,7 @@
  * Tokens live in localStorage; the active org id is attached as X-Org-Id.
  */
 
-import { createRefresher } from "@/lib/session";
+import { createAuthedFetch, createRefresher } from "@/lib/session";
 import type { Schemas } from "@assistant-studio/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -120,14 +120,15 @@ const refreshSession = createRefresher({
   locks: typeof navigator !== "undefined" && "locks" in navigator ? navigator.locks : null,
 });
 
-/** `fetch` with the current access token, refreshed and retried once on a
- *  401 (see `lib/session.ts`). `init` is a function so the retry is built
- *  with the new token. */
-async function authedFetch(url: string, init: (token: string | null) => RequestInit) {
-  const res = await fetch(url, init(tokenStore.access));
-  if (res.status !== 401 || !tokenStore.refresh) return res;
-  return (await refreshSession()) ? fetch(url, init(tokenStore.access)) : res;
-}
+/** `fetch` with the access token, refreshed once on a 401 (lib/session.ts). */
+const authedFetch = createAuthedFetch({
+  tokens: tokenStore,
+  refresh: refreshSession,
+  offline: () =>
+    new ApiError(0, {
+      error: { code: "offline", message: "Can't reach the server right now. Trying again." },
+    }),
+});
 
 async function request<T>(path: string, opts: Opts = {}): Promise<T> {
   const build = (token: string | null): RequestInit => {
@@ -360,6 +361,8 @@ export const meta = {
       schema: unknown;
       default: AssistantConfig;
       allowed_models: string[];
+      /** Which model each alias ("sonnet") runs as today (Phase 7a.6). */
+      model_aliases?: Record<string, string>;
       /** RAG_OFFLINE=1: web search is off on this instance. */
       offline?: boolean;
       /** AI helpers call the real model and bill for it (else a free stand-in). */

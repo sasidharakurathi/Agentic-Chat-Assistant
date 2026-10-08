@@ -320,6 +320,24 @@ async def running_among(conversation_ids: list[uuid.UUID]) -> set[uuid.UUID]:
     return running | {cid for cid, v in zip(rest, values, strict=True) if v}
 
 
+async def live_anywhere(conversation_ids: list[uuid.UUID]) -> set[uuid.UUID] | None:
+    """Which of these have a turn running in *any* process, or None when
+    that can't be known (Phase 7a.7). Unlike `running_among`, which answers
+    for a page and may guess, this is for deciding that a turn is dead: with
+    no shared log (tests, or no Redis) another process's turns are invisible,
+    and a lookup that fails proves nothing."""
+    if _primary() is _memory:
+        return None
+    if not conversation_ids:
+        return set()
+    try:
+        values = await get_redis().mget([_live_key(str(cid)) for cid in conversation_ids])
+    except Exception as exc:
+        log.warning("turn_lookup_failed", error=type(exc).__name__)
+        return None
+    return {cid for cid, v in zip(conversation_ids, values, strict=True) if v}
+
+
 # ── running one ─────────────────────────────────────────────
 
 #: The tasks running turns in this process. Held so they are not collected
@@ -450,6 +468,7 @@ __all__ = [
     "TurnInProgress",
     "follow",
     "known",
+    "live_anywhere",
     "running_among",
     "running_here",
     "running_turn",

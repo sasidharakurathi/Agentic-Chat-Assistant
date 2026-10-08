@@ -65,7 +65,8 @@ type Spend = { cost: number; tokensIn: number; tokensOut: number };
  *  title and what it has cost, the turns in a centred column (your messages
  *  as muted plates on the right, answers as unboxed reading text with their
  *  tool steps, sources and run details), and the composer, which carries
- *  the running lamp and Stop while an answer is being written. */
+ *  the running lamp and Stop while an answer is being written. Someone
+ *  else's conversation (`readOnly`) has no composer: a note says why. */
 export function ChatThread({
   conversationId,
   assistantId,
@@ -77,6 +78,7 @@ export function ChatThread({
   onArchive,
   onTitle,
   onRunning,
+  readOnly = false,
 }: {
   conversationId: string;
   assistantId: string;
@@ -93,6 +95,9 @@ export function ChatThread({
   onArchive?: () => void;
   /** An answer started or stopped being written here: for the list's lamp. */
   onRunning?: (running: boolean) => void;
+  /** Started by someone else: it can be read, not replied in, stopped or
+   *  renamed (Phase 7a.4). */
+  readOnly?: boolean;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [live, setLive] = useState<Live | null>(null);
@@ -693,176 +698,192 @@ export function ChatThread({
         </div>
       </div>
 
-      <div className="border-border bg-background shrink-0 border-t px-4 pt-3 pb-3 md:px-6">
-        <div className="relative mx-auto w-full max-w-[72ch]">
-          {suggestions.length > 0 && (
-            <ul
-              id={listId}
-              role="listbox"
-              aria-label="Commands"
-              className="bg-card border-border shadow-float animate-float-in absolute inset-x-0 bottom-full z-20 mb-2 max-h-[50vh] overflow-y-auto rounded-lg border p-1"
-            >
-              {suggestions.map((c) => (
-                <li
-                  key={c.name}
-                  id={`${listId}-${c.name}`}
-                  role="option"
-                  aria-selected={c === selected}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    pick(c);
-                  }}
-                  className={cn(
-                    "flex min-h-9 cursor-pointer flex-wrap items-baseline gap-x-2 gap-y-0.5 rounded-md px-2.5 py-1.5",
-                    c === selected ? "bg-muted" : "hover:bg-muted",
-                  )}
-                >
-                  <span className="text-code font-mono">/{c.name}</span>
-                  {c.args && (
-                    <span className="text-code text-muted-foreground font-mono">{c.args}</span>
-                  )}
-                  <span className="text-small text-muted-foreground sm:ml-auto">
-                    {c.description}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-          {showHelp && (
-            <section
-              aria-labelledby={helpTitleId}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  setShowHelp(false);
-                  textareaRef.current?.focus();
-                }
-              }}
-              className="bg-card border-border shadow-float animate-float-in absolute inset-x-0 bottom-full z-20 mb-2 max-h-[60vh] overflow-y-auto rounded-lg border p-4"
-            >
-              <div className="mb-3 flex items-center justify-between gap-2">
-                <h2 id={helpTitleId} className="text-h4 font-semibold">
-                  Commands
-                </h2>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setShowHelp(false);
-                    textareaRef.current?.focus();
-                  }}
-                >
-                  Close
-                </Button>
-              </div>
-              <dl className="grid gap-x-4 gap-y-1.5 sm:grid-cols-[auto_1fr]">
-                {SLASH_COMMANDS.map((c) => (
-                  <Fragment key={c.name}>
-                    <dt className="text-code font-mono">
-                      /{c.name}
-                      {c.args ? ` ${c.args}` : ""}
-                    </dt>
-                    <dd className="text-muted-foreground mb-1.5 sm:mb-0">{c.description}</dd>
-                  </Fragment>
-                ))}
-              </dl>
-              <p className="text-small text-muted-foreground mt-3">
-                Start a message with // to send text that begins with a slash.
-              </p>
-            </section>
-          )}
-
-          <label htmlFor={composerId} className="sr-only">
-            Message {who}
-          </label>
-          <div className="flex items-end gap-2">
-            <textarea
-              ref={textareaRef}
-              id={composerId}
-              rows={1}
-              placeholder={`Message ${who}`}
-              aria-describedby={hintId}
-              // A text box with a command list: announced as a combobox, so
-              // the open list and the highlighted command are read out.
-              role="combobox"
-              aria-expanded={suggestions.length > 0}
-              aria-autocomplete="list"
-              aria-controls={suggestions.length > 0 ? listId : undefined}
-              aria-activedescendant={selected ? `${listId}-${selected.name}` : undefined}
-              className={cn(
-                fieldClasses,
-                "block max-h-48 min-h-11 resize-none px-3 py-[11px] leading-[20px]",
-              )}
-              value={input}
-              onChange={(e) => {
-                setInput(e.target.value);
-                setMenuIndex(0);
-                setMenuDismissed(false);
-                setShowHelp(false);
-              }}
-              onKeyDown={(e) => {
-                if (suggestions.length > 0 && selected) {
-                  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                    e.preventDefault();
-                    const step = e.key === "ArrowDown" ? 1 : -1;
-                    setMenuIndex((i) => (i + step + suggestions.length) % suggestions.length);
-                    return;
-                  }
-                  if (e.key === "Tab") {
-                    e.preventDefault();
-                    setInput(`/${selected.name}${selected.needsArg ? " " : ""}`);
-                    return;
-                  }
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    pick(selected);
-                    return;
-                  }
-                  if (e.key === "Escape") {
-                    setMenuDismissed(true);
-                    return;
-                  }
-                }
-                if (e.key === "Escape") setShowHelp(false);
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  submit();
-                }
-              }}
-            />
-            {sending ? (
-              // A stop *request*: the turn ends on its own stream, which then
-              // closes normally, so the partial answer stays on screen.
-              <Button
-                variant="outline"
-                size="lg"
-                className="px-4"
-                onClick={() => void stop()}
-                disabled={stopping}
-              >
-                {stopping ? "Stopping…" : "Stop"}
-              </Button>
-            ) : (
-              <Button size="lg" className="px-5" onClick={() => submit()} disabled={!input.trim()}>
-                Send
-              </Button>
-            )}
-          </div>
-          <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
-            {/* One live region, always in the page: a region inserted along
-                with its text is often not read out. */}
-            <p role="status">
-              {sending ? (
-                <RunningBadge label={stopping ? "Stopping…" : "Answering…"} />
-              ) : finished ? (
-                <span className="sr-only">{finished}</span>
-              ) : null}
+      {readOnly ? (
+        <div className="border-border bg-background shrink-0 border-t px-4 py-3 md:px-6">
+          <div className="mx-auto flex w-full max-w-[72ch] flex-wrap items-center justify-between gap-x-4 gap-y-1">
+            <p className="text-small text-muted-foreground">
+              Only the person who started this conversation can reply in it.
             </p>
-            <p id={hintId} className="text-small text-muted-foreground">
-              Enter sends. Shift+Enter adds a line. Type / for commands.
-            </p>
+            <p role="status">{sending ? <RunningBadge label="Answering…" /> : null}</p>
           </div>
         </div>
-      </div>
+      ) : (
+        <div className="border-border bg-background shrink-0 border-t px-4 pt-3 pb-3 md:px-6">
+          <div className="relative mx-auto w-full max-w-[72ch]">
+            {suggestions.length > 0 && (
+              <ul
+                id={listId}
+                role="listbox"
+                aria-label="Commands"
+                className="bg-card border-border shadow-float animate-float-in absolute inset-x-0 bottom-full z-20 mb-2 max-h-[50vh] overflow-y-auto rounded-lg border p-1"
+              >
+                {suggestions.map((c) => (
+                  <li
+                    key={c.name}
+                    id={`${listId}-${c.name}`}
+                    role="option"
+                    aria-selected={c === selected}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      pick(c);
+                    }}
+                    className={cn(
+                      "flex min-h-9 cursor-pointer flex-wrap items-baseline gap-x-2 gap-y-0.5 rounded-md px-2.5 py-1.5",
+                      c === selected ? "bg-muted" : "hover:bg-muted",
+                    )}
+                  >
+                    <span className="text-code font-mono">/{c.name}</span>
+                    {c.args && (
+                      <span className="text-code text-muted-foreground font-mono">{c.args}</span>
+                    )}
+                    <span className="text-small text-muted-foreground sm:ml-auto">
+                      {c.description}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {showHelp && (
+              <section
+                aria-labelledby={helpTitleId}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setShowHelp(false);
+                    textareaRef.current?.focus();
+                  }
+                }}
+                className="bg-card border-border shadow-float animate-float-in absolute inset-x-0 bottom-full z-20 mb-2 max-h-[60vh] overflow-y-auto rounded-lg border p-4"
+              >
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <h2 id={helpTitleId} className="text-h4 font-semibold">
+                    Commands
+                  </h2>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setShowHelp(false);
+                      textareaRef.current?.focus();
+                    }}
+                  >
+                    Close
+                  </Button>
+                </div>
+                <dl className="grid gap-x-4 gap-y-1.5 sm:grid-cols-[auto_1fr]">
+                  {SLASH_COMMANDS.map((c) => (
+                    <Fragment key={c.name}>
+                      <dt className="text-code font-mono">
+                        /{c.name}
+                        {c.args ? ` ${c.args}` : ""}
+                      </dt>
+                      <dd className="text-muted-foreground mb-1.5 sm:mb-0">{c.description}</dd>
+                    </Fragment>
+                  ))}
+                </dl>
+                <p className="text-small text-muted-foreground mt-3">
+                  Start a message with // to send text that begins with a slash.
+                </p>
+              </section>
+            )}
+
+            <label htmlFor={composerId} className="sr-only">
+              Message {who}
+            </label>
+            <div className="flex items-end gap-2">
+              <textarea
+                ref={textareaRef}
+                id={composerId}
+                rows={1}
+                placeholder={`Message ${who}`}
+                aria-describedby={hintId}
+                // A text box with a command list: announced as a combobox, so
+                // the open list and the highlighted command are read out.
+                role="combobox"
+                aria-expanded={suggestions.length > 0}
+                aria-autocomplete="list"
+                aria-controls={suggestions.length > 0 ? listId : undefined}
+                aria-activedescendant={selected ? `${listId}-${selected.name}` : undefined}
+                className={cn(
+                  fieldClasses,
+                  "block max-h-48 min-h-11 resize-none px-3 py-[11px] leading-[20px]",
+                )}
+                value={input}
+                onChange={(e) => {
+                  setInput(e.target.value);
+                  setMenuIndex(0);
+                  setMenuDismissed(false);
+                  setShowHelp(false);
+                }}
+                onKeyDown={(e) => {
+                  if (suggestions.length > 0 && selected) {
+                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                      e.preventDefault();
+                      const step = e.key === "ArrowDown" ? 1 : -1;
+                      setMenuIndex((i) => (i + step + suggestions.length) % suggestions.length);
+                      return;
+                    }
+                    if (e.key === "Tab") {
+                      e.preventDefault();
+                      setInput(`/${selected.name}${selected.needsArg ? " " : ""}`);
+                      return;
+                    }
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      pick(selected);
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      setMenuDismissed(true);
+                      return;
+                    }
+                  }
+                  if (e.key === "Escape") setShowHelp(false);
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    submit();
+                  }
+                }}
+              />
+              {sending ? (
+                // A stop *request*: the turn ends on its own stream, which then
+                // closes normally, so the partial answer stays on screen.
+                <Button
+                  variant="outline"
+                  size="lg"
+                  className="px-4"
+                  onClick={() => void stop()}
+                  disabled={stopping}
+                >
+                  {stopping ? "Stopping…" : "Stop"}
+                </Button>
+              ) : (
+                <Button
+                  size="lg"
+                  className="px-5"
+                  onClick={() => submit()}
+                  disabled={!input.trim()}
+                >
+                  Send
+                </Button>
+              )}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+              {/* One live region, always in the page: a region inserted along
+                with its text is often not read out. */}
+              <p role="status">
+                {sending ? (
+                  <RunningBadge label={stopping ? "Stopping…" : "Answering…"} />
+                ) : finished ? (
+                  <span className="sr-only">{finished}</span>
+                ) : null}
+              </p>
+              <p id={hintId} className="text-small text-muted-foreground">
+                Enter sends. Shift+Enter adds a line. Type / for commands.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

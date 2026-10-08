@@ -141,7 +141,7 @@ services:
   # publishes community images to Docker Hub, so minio/minio cannot be pulled
   # on a fresh machine.
   langfuse-minio:
-    image: cgr.dev/chainguard/minio:latest
+    image: cgr.dev/chainguard/minio@sha256:e7ca559d9f7c0b5f24f5f669bb92f40f3ca88d56273b808bf3a7c116c17d2ffa
     profiles: ["observability"]
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" /data'

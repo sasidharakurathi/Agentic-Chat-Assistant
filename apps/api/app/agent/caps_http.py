@@ -2,8 +2,14 @@
 
 The model can call a web API or read a page: `method`, `url`, optional
 `headers` and `body`. Every request goes through `app.security.ssrf`, so it
-can only reach public addresses (and, when the builder set one, the
-assistant's domain allowlist), and each redirect is checked again.
+can only reach public addresses on the assistant's domain allowlist, and
+each redirect is checked again.
+
+No allowlist means no sites (Phase 7a.9). It used to mean any public site,
+and a GET runs with nobody asked: a poisoned handbook page or ticket could
+have the model read rows from a database and then send them to a host of
+its choosing in a URL. With an empty list the tool refuses every request
+and says why, and the builder's warnings say so first.
 
 What the model gets back is text: the status line, the content type, the
 final URL if it was redirected, and the body when it is text-like, capped. A
@@ -29,6 +35,7 @@ from app.security.ssrf import (
     FetchResult,
     SsrfBlocked,
     is_compressed,
+    normalize_domain,
     safe_request,
 )
 
@@ -44,6 +51,50 @@ BODY_CHARS = 20_000
 MAX_REQUEST_BODY = 100_000
 #: Statuses from 400 up are failures: the call is marked as an error.
 HTTP_ERROR_FROM = 400
+
+NO_SITES = (
+    "blocked: this assistant isn't allowed to reach any sites yet. Its builder has to "
+    "list the sites it may use (the HTTP request tool's allowed sites)."
+)
+
+#: Hosts where anyone can publish or collect content. On an allowlist they
+#: still let data out (a gist, a paste, a form, a request catcher), so the
+#: builder is warned (Phase 7a.9). Not a complete list: a nudge.
+OPEN_HOSTS = (
+    "github.com",
+    "gist.github.com",
+    "raw.githubusercontent.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "pastebin.com",
+    "paste.ee",
+    "hastebin.com",
+    "docs.google.com",
+    "forms.gle",
+    "drive.google.com",
+    "dropbox.com",
+    "notion.site",
+    "webhook.site",
+    "requestbin.com",
+    "pipedream.net",
+    "ngrok.io",
+    "ngrok.app",
+    "ngrok-free.app",
+    "trycloudflare.com",
+)
+
+
+def open_domains(allowed: list[str]) -> list[str]:
+    """The allowed domains that let anyone publish or collect content:
+    the domain is one of `OPEN_HOSTS`, under one, or covers one (allowing
+    `google.com` allows `docs.google.com`)."""
+    out = []
+    for raw in allowed:
+        d = normalize_domain(raw)
+        if d and any(o == d or o.endswith("." + d) or d.endswith("." + o) for o in OPEN_HOSTS):
+            out.append(d)
+    return out
+
 
 _TEXT_TYPES = ("text/", "application/json", "application/xml", "application/javascript")
 _TEXT_SUFFIXES = ("+json", "+xml")
@@ -104,7 +155,11 @@ def build_http_tool(
 ) -> CapabilityTool:
     """The tool for one assistant: it closes over that assistant's allowlist,
     so a model cannot widen it by asking."""
-    allowed = list(cfg.allowed_domains)
+    allowed = [d for d in (normalize_domain(d) for d in cfg.allowed_domains) if d]
+
+    async def refuse(_args: dict[str, Any]) -> dict[str, Any]:
+        log.info("http_request_blocked", reason="no_allowed_sites")
+        return _err(NO_SITES)
 
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
         method = str(args.get("method") or "GET").upper()
@@ -145,11 +200,14 @@ def build_http_tool(
         description += (
             f" Only these domains (and their subdomains) are reachable: {', '.join(allowed)}."
         )
+    else:
+        description += " No sites are allowed yet, so every request is refused."
     return CapabilityTool(
         name="http_request",
         description=description,
         input_schema=_SCHEMA,
-        handler=handler,
+        # No sites listed: nothing is reachable, and the model is told why.
+        handler=handler if allowed else refuse,
         read_only=False,
         open_world=True,
     )
@@ -163,4 +221,13 @@ def _err(s: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": s}], "is_error": True}
 
 
-__all__ = ["BODY_CHARS", "METHODS", "READ_METHODS", "build_http_tool", "render"]
+__all__ = [
+    "BODY_CHARS",
+    "METHODS",
+    "NO_SITES",
+    "OPEN_HOSTS",
+    "READ_METHODS",
+    "build_http_tool",
+    "open_domains",
+    "render",
+]

@@ -14,7 +14,7 @@ from app.api.deps import (
     AssistantCtx,
     ClientIP,
     ConversationCtx,
-    ConversationEditorCtx,
+    ConversationStarterCtx,
     CurrentUser,
     PageQuery,
     SessionDep,
@@ -161,7 +161,7 @@ async def get_run(run_id: uuid.UUID, ctx: ConversationCtx, session: SessionDep) 
 @router.patch("/conversations/{conversation_id}", response_model=ConversationSummary)
 async def rename_conversation(
     body: ConversationRename,
-    ctx: ConversationEditorCtx,
+    ctx: ConversationStarterCtx,
     user: CurrentUser,
     session: SessionDep,
     ip: ClientIP,
@@ -172,7 +172,7 @@ async def rename_conversation(
 
 @router.delete("/conversations/{conversation_id}", response_model=Message)
 async def archive_conversation(
-    ctx: ConversationEditorCtx, user: CurrentUser, session: SessionDep, ip: ClientIP
+    ctx: ConversationStarterCtx, user: CurrentUser, session: SessionDep, ip: ClientIP
 ) -> Message:
     await chat.archive(session, ctx.conversation, actor_user_id=user.id, ip=ip)
     return Message(message="archived")
@@ -183,7 +183,7 @@ async def archive_conversation(
     response_model=Message,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def interrupt_conversation(ctx: ConversationEditorCtx) -> Message:
+async def interrupt_conversation(ctx: ConversationStarterCtx) -> Message:
     """Stop the turn running in this conversation (task 1.6).
 
     202, because the stop is a request: the turn ends on its own stream, which
@@ -200,7 +200,7 @@ async def interrupt_conversation(ctx: ConversationEditorCtx) -> Message:
 @router.post("/conversations/{conversation_id}/messages")
 async def post_message(
     body: MessageIn,
-    ctx: ConversationEditorCtx,
+    ctx: ConversationStarterCtx,
     session: SessionDep,
     request: Request,
     ip: ClientIP,

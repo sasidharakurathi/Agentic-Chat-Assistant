@@ -54,12 +54,16 @@ psql_in() { $COMPOSE exec -T postgres psql -U "$DB_USER" -v ON_ERROR_STOP=1 "$@"
 # Run `mc` in a one-off container on the stack's network, with a host
 # folder at /backup. The MinIO image has `mc` but no `tar`, and an `exec`
 # cannot mount a folder, so the objects travel through this container.
+# It runs as whoever runs this script, so the files it writes are theirs:
+# the image's own user (65532) could not write to their folder on Linux.
+# HOME is moved to /tmp because `mc` keeps its settings there.
 mc_run() {
   host_dir="$1"
   shift
   user="$($COMPOSE exec -T minio printenv MINIO_ROOT_USER | tr -d '\r')"
   pass="$($COMPOSE exec -T minio printenv MINIO_ROOT_PASSWORD | tr -d '\r')"
   MC_USER="$user" MC_PASS="$pass" $COMPOSE run --rm --no-deps -T \
+    --user "$(id -u):$(id -g)" -e HOME=/tmp \
     -e MC_USER -e MC_PASS \
     -v "$(mountable "$host_dir"):/backup" \
     --entrypoint /bin/sh minio-init -c \

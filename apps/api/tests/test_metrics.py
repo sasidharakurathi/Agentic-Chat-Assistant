@@ -203,7 +203,7 @@ async def test_a_turn_reports_its_duration_its_tools_and_its_spend(
     # Read from the ledger and the run rows, not counted in memory.
     assert got['assistant_studio_runs_total{status="ok"}'] == 2
     assert got['assistant_studio_tool_calls_total{status="success",tool="calculator"}'] == 1
-    model = "claude-sonnet-5"
+    model = "claude-sonnet-5-5"  # the default "sonnet", as it ran
     assert got[f'assistant_studio_tokens_total{{direction="out",kind="llm",model="{model}"}}'] > 0
     assert got[f'assistant_studio_cost_usd_total{{kind="llm",model="{model}"}}'] > 0
     assert (

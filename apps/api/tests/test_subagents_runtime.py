@@ -195,7 +195,7 @@ def test_a_subagent_nodes_overrides_are_compiled_not_dropped() -> None:
     # role, which the other subagents use, is left alone.
     own = config.subagents.models["retrieval"]
     assert (own.model, own.max_turns) == ("claude-sonnet-5", 4)
-    assert config.models.subagent.model == "claude-haiku-4-5"
+    assert config.models.subagent.model == "haiku"
     (spec,) = build_subagent_specs(config)
     assert (spec.model, spec.max_turns) == ("claude-sonnet-5", 4)
 

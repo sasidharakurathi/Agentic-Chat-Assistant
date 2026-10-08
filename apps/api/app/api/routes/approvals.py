@@ -4,7 +4,7 @@ import uuid
 
 from fastapi import APIRouter
 
-from app.api.deps import ConversationCtx, CurrentUser, PageQuery, SessionDep
+from app.api.deps import ClientIP, ConversationCtx, CurrentUser, PageQuery, SessionDep
 from app.schemas.approval import ApprovalOut, ApprovalResolve
 from app.schemas.common import Page
 from app.services import approvals as svc
@@ -36,12 +36,13 @@ async def resolve(
     approval_id: uuid.UUID,
     user: CurrentUser,
     session: SessionDep,
+    ip: ClientIP,
 ) -> ApprovalOut:
     row = await svc.get(session, approval_id)
     # The person in the conversation decides, or an admin reviewing a
     # teammate's pending write. Not any member who can read it.
     await svc.assert_can_decide(session, row, user_id=user.id)
-    row = await svc.resolve(session, row, decision=body.decision, user_id=user.id)
+    row = await svc.resolve(session, row, decision=body.decision, user_id=user.id, ip=ip)
     return ApprovalOut.model_validate(row)
 
 

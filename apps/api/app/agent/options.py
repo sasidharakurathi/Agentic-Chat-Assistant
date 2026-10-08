@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.agent import scope
+from app.agent import cli_files, scope
 from app.agent.approvals import CanUseTool
 from app.agent.caps import ALL_CAPS, CapabilityTool, build_sdk_servers
 from app.agent.caps_http import build_http_tool
@@ -23,7 +23,7 @@ from app.agent.caps_rag import build_kb_list_sources_tool, build_kb_search_tool
 from app.agent.caps_sql import build_sql_tools
 from app.agent.citations import CitationRegistry
 from app.agent.hooks import build_hooks, build_tool_gate
-from app.agent.models import fallback_for
+from app.agent.models import always_thinks, fallback_for, resolve_model
 from app.agent.subagents import SubagentSpec, build_agent_definitions, build_subagent_specs
 from app.config import settings
 from app.guardrails.turn import TurnGuard
@@ -332,9 +332,15 @@ def build_runtime_spec(
         system_prompt=compose_system_prompt(
             config, assistant_id, specs, history, memory_scope, main_tools
         ),
-        model=main.model,
+        # Pinned ids only: the CLI would choose a model itself for an alias.
+        model=resolve_model(main.model),
         effort=main.effort,
-        thinking_adaptive=main.thinking.type == "adaptive",
+        # Opus 5.5 and Fable 5.1 refuse `thinking: disabled` with a 400, and a
+        # subagent runs under the turn's setting, so any of them in the turn
+        # means adaptive, whatever the assistant asked for (Phase 7a.6).
+        thinking_adaptive=main.thinking.type == "adaptive"
+        or always_thinks(main.model)
+        or any(always_thinks(s.model) for s in specs if s.model),
         max_turns=main.max_turns,
         max_budget_usd=turn_budget(main.max_budget_usd, budget_remaining_usd),
         enabled_tools=enabled,
@@ -435,10 +441,26 @@ def build_claude_options(spec: RuntimeSpec, can_use_tool: CanUseTool) -> Any:
             # port of the editor's integration, which would connect a tenant's
             # agent to the developer's IDE. Never wanted here.
             "CLAUDE_CODE_SSE_PORT": "",
+            # One known place for the CLI's own files, its session transcripts
+            # above all (Phase 7a.5): a volume in production, removed with
+            # their conversation (`agent/cli_files.py`). Without it they went
+            # to the server user's home: the container's disposable layer,
+            # or, in development, the developer's own ~/.claude.
+            "CLAUDE_CONFIG_DIR": str(cli_files.config_dir()),
             # And the server's own secrets (task 6.3). The model has no tool
             # that reads the environment, so this is a second wall, not the
             # first: the CLI has no use for any of them.
             **dict.fromkeys(_SERVER_ONLY_ENV, ""),
+            # The one key the CLI needs, handed over rather than inherited
+            # (Phase 7a.6). Settings read it from .env without exporting it,
+            # so in development the CLI used to fall back to the developer's
+            # own Claude login in ~/.claude: a different account and bill, and
+            # gone once CLAUDE_CONFIG_DIR became the platform's own (7a.5).
+            **(
+                {"ANTHROPIC_API_KEY": settings.anthropic_api_key}
+                if settings.anthropic_api_key
+                else {}
+            ),
         },
         system_prompt=spec.system_prompt,
         model=spec.model,

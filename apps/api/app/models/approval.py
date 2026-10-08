@@ -30,6 +30,9 @@ class ApprovalStatus(enum.StrEnum):
     #: nobody answered in time. Treated exactly like `denied` at the call
     #: site — an unattended approval must never become an implicit yes.
     expired = "expired"
+    #: approved, but its turn had stopped before the action could run, so
+    #: nothing ran (Phase 7a.7). A row never claims an action that didn't happen.
+    cancelled = "cancelled"
 
 
 class ApprovalRisk(enum.StrEnum):

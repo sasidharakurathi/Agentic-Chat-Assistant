@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from app.agent import claude_api
-from app.agent.models import SUMMARY_MODEL
+from app.agent.models import SUMMARY_MODEL, resolve_model
 from app.logging import get_logger
 
 log = get_logger(__name__)
@@ -192,7 +192,7 @@ _PROMPT = (
 
 
 class HaikuSummarizer:
-    name = SUMMARY_MODEL
+    name = resolve_model(SUMMARY_MODEL)
 
     async def summarize(self, previous: str | None, messages: Sequence[HistoryMessage]) -> Summary:
         prior = (

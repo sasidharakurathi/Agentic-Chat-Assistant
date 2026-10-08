@@ -253,6 +253,7 @@ def validate_graph(graph: Graph) -> ValidationResult:
 
     # ── duplicate capability refs ────────────────────────────
     _dup_ref_check(graph, res)
+    _http_tool_warnings(graph, res)
 
     # Everything past here is best-effort reachability guidance (warnings only);
     # skip it if the graph is already structurally broken.
@@ -261,6 +262,42 @@ def validate_graph(graph: Graph) -> ValidationResult:
 
     _ = by_id  # reserved for future per-node data checks
     return res
+
+
+def _http_tool_warnings(graph: Graph, res: ValidationResult) -> None:
+    """The HTTP request tool reaches only its allowed sites (Phase 7a.9):
+    with none listed it refuses everything, and a site anyone can write to
+    still lets data out. Said here, before anyone chats."""
+    from app.agent.caps_http import open_domains
+
+    for n in graph.nodes:
+        if n.type != "tool" or getattr(n.data, "key", None) != "http_request":
+            continue
+        raw = (getattr(n.data, "config", None) or {}).get("allowed_domains") or []
+        domains = [str(d) for d in raw] if isinstance(raw, list) else []
+        if not [d for d in domains if d.strip()]:
+            res.warnings.append(
+                GraphIssue(
+                    code="http_no_allowed_sites",
+                    message=(
+                        "The HTTP request tool has no allowed sites, so every request it "
+                        "makes will be refused. List the sites it may reach."
+                    ),
+                    node_id=n.id,
+                )
+            )
+            continue
+        for d in open_domains(domains):
+            res.warnings.append(
+                GraphIssue(
+                    code="http_open_site",
+                    message=(
+                        f"Anyone can publish on {d} (a paste, a gist, a form), so allowing "
+                        "it lets the assistant send data anywhere. Allow a narrower site."
+                    ),
+                    node_id=n.id,
+                )
+            )
 
 
 def _subagent_issue(

@@ -339,8 +339,8 @@ def test_the_api_starts_as_production_behind_one_proxy(prod: dict[str, Any]) -> 
 
 def test_every_long_running_container_is_locked_down(prod: dict[str, Any]) -> None:
     for name, svc in prod["services"].items():
-        if name == "minio-init":
-            continue  # runs once and exits
+        if name in ("minio-init", "minio-owner"):
+            continue  # run once and exit
         assert svc["restart"] == "unless-stopped", name
         assert svc["security_opt"] == ["no-new-privileges:true"], name
         assert svc["logging"]["options"]["max-size"], name
@@ -385,6 +385,15 @@ def test_the_proxy_routes_what_it_must_and_refuses_metrics() -> None:
     # Citation links: reads only, one bucket.
     files = caddy[caddy.index("@files {") : caddy.index("handle @files")]
     assert "method GET HEAD" in files and "path /{$S3_BUCKET}/*" in files
+    # Phase 7a.1: files are served on the app's origin, so the browser must
+    # not guess their type and nothing in them may run (a second wall behind
+    # the API's choice of type, storage/file_types.py).
+    handle = caddy[caddy.index("handle @files") : caddy.index("reverse_proxy minio:9000")]
+    served = handle[handle.index("header {") :]
+    assert "X-Content-Type-Options nosniff" in served
+    assert "script-src 'none'" in served and "frame-ancestors 'none'" in served
+    # Never a rule that stops the browser's own PDF viewer.
+    assert "sandbox" not in served and "object-src" not in served
     assert caddy.count("{") == caddy.count("}")
 
 
@@ -452,8 +461,115 @@ def test_the_backup_scripts_never_put_a_secret_on_a_command_line() -> None:
 
 
 def test_the_stack_needs_one_minio_image(prod: dict[str, Any]) -> None:
-    # The bucket job and the backups use `mc` from the server image: the
-    # separate minio/mc image could not be pulled when this was written.
-    assert prod["services"]["minio-init"]["image"] == prod["services"]["minio"]["image"]
+    # The bucket job, the volume's owner and the backups use `mc` and `sh`
+    # from the server image: one image to have and pin.
     dev = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
-    assert dev["services"]["minio-init"]["image"] == dev["services"]["minio"]["image"]
+    for stack in (prod, dev):
+        image = stack["services"]["minio"]["image"]
+        for name in ("minio-init", "minio-owner"):
+            assert stack["services"][name]["image"] == image, name
+
+
+def test_the_object_store_is_a_maintained_build_pinned_by_digest(prod: dict[str, Any]) -> None:
+    """Phase 7a.6: minio/minio is no longer published and its code is
+    archived with unpatched CVEs. Chainguard rebuilds it from source; a digest
+    means a rebuild changes nothing until someone tests and bumps it."""
+    dev = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    obs = yaml.safe_load((ROOT / "docker-compose.observability.yml").read_text(encoding="utf-8"))
+    images = [
+        dev["services"]["minio"]["image"],
+        obs["services"]["langfuse-minio"]["image"],
+        # The production default, inside ${MINIO_IMAGE:-...}.
+        prod["services"]["minio"]["image"].removeprefix("${MINIO_IMAGE:-").removesuffix("}"),
+    ]
+    for image in images:
+        assert image.startswith("cgr.dev/chainguard/minio@sha256:"), image
+    assert len(set(images)) == 1, "one tested build everywhere"
+    assert "minio/minio" not in _without_comments(ROOT / "docker-compose.prod.yml")
+
+
+def test_the_volume_owner_step_does_one_thing_with_one_capability(
+    prod: dict[str, Any],
+) -> None:
+    """Chainguard's MinIO runs as uid 65532; a volume the old image wrote is
+    root's. The step that hands it over runs as root, so it gets only CHOWN,
+    no network, and runs before the server."""
+    owner = prod["services"]["minio-owner"]
+    assert owner["user"] == "0"
+    assert owner["cap_drop"] == ["ALL"] and owner["cap_add"] == ["CHOWN"]
+    assert owner["network_mode"] == "none"
+    assert owner["restart"] == "no"
+    assert "chown -R 65532:65532 /data" in owner["entrypoint"][-1]
+    wait = prod["services"]["minio"]["depends_on"]["minio-owner"]
+    assert wait["condition"] == "service_completed_successfully"
+
+
+def test_backups_run_mc_as_the_operator_not_the_images_user() -> None:
+    lib = (BACKUP / "lib.sh").read_text(encoding="utf-8")
+    assert '--user "$(id -u):$(id -g)" -e HOME=/tmp' in lib
+
+
+def test_the_cli_files_live_on_one_volume_the_api_and_worker_share(prod: dict[str, Any]) -> None:
+    """Phase 7a.5: the CLI's transcripts survive a redeploy, and the worker's
+    sweep sees the files the API's turns wrote."""
+    mount = "agentstate:/var/lib/assistant-studio"
+    dev = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    for stack in (prod, dev):
+        for name in ("api", "worker"):
+            assert mount in stack["services"][name]["volumes"], name
+        assert "agentstate" in stack["volumes"]
+    image = (ROOT / "docker" / "api.Dockerfile").read_text(encoding="utf-8")
+    assert "AGENT_STATE_DIR=/var/lib/assistant-studio" in image
+    assert "chown app:app /var/lib/assistant-studio" in image, "the app user can write to it"
+
+
+def test_a_stop_leaves_time_to_record_running_turns(prod: dict[str, Any]) -> None:
+    """uvicorn closes open streams after 10 s, then the app marks its turns
+    stopped; Docker waits 30 s before it kills anything."""
+    image = (ROOT / "docker" / "api.Dockerfile").read_text(encoding="utf-8")
+    assert '"--timeout-graceful-shutdown", "10"' in image
+    for name in ("api", "worker"):
+        assert prod["services"][name]["stop_grace_period"] == "30s", name
+
+
+def test_the_image_and_ci_install_the_locked_versions() -> None:
+    """Phase 7a.6: no rebuild picks up whatever was released since. The
+    image and CI install under constraints.txt, made from a Linux install of
+    the versions tested in development."""
+    image = (ROOT / "docker" / "api.Dockerfile").read_text(encoding="utf-8")
+    assert "apps/api/constraints.txt ./apps/api/" in image, "copied into the build"
+    assert "pip install -c ./apps/api/constraints.txt" in image
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "pip install -c constraints.txt -e" in ci
+    lock = (ROOT / "apps" / "api" / "constraints.txt").read_text(encoding="utf-8")
+    pins = dict(
+        line.split("==", 1) for line in lock.splitlines() if line and not line.startswith("#")
+    )
+    assert len(pins) > 100 and all("@" not in v for v in pins.values())
+    assert pins["torch"].endswith("+cpu"), "the CPU build, as the image installs"
+
+
+def test_the_cli_and_the_sql_classifier_are_pinned_exactly() -> None:
+    """claude-agent-sdk carries the Claude CLI; sqlglot decides read from
+    write. Both change behaviour under approved versions, so both are exact
+    in pyproject and agree with the lock."""
+    project = (ROOT / "apps" / "api" / "pyproject.toml").read_text(encoding="utf-8")
+    lock = (ROOT / "apps" / "api" / "constraints.txt").read_text(encoding="utf-8")
+    for name in ("claude-agent-sdk", "sqlglot"):
+        exact = re.search(rf'"{name}==([^"]+)"', project)
+        assert exact, f"{name} is pinned exactly in pyproject.toml"
+        assert f"{name}=={exact.group(1)}" in lock.splitlines(), f"{name} agrees with the lock"
+
+
+def test_the_proxy_keeps_an_access_log_for_half_a_year(prod: dict[str, Any]) -> None:
+    """Phase 7a.8: who connected from where, for CERT-In's 180 days, on a
+    volume (the containers' own logs are gone at the next rebuild), with the
+    credentials that travel in addresses taken out."""
+    caddy = _without_comments(ROOT / "deploy" / "proxy" / "Caddyfile")
+    assert "output file /var/log/caddy/access.log" in caddy
+    keep = re.search(r"roll_keep_for (\d+)h", caddy)
+    assert keep and int(keep.group(1)) >= 180 * 24
+    assert "request>uri regexp" in caddy and "/invites/" in caddy, "invite tokens are cut"
+    assert "log_credentials" not in caddy, "Authorization and Cookie stay redacted"
+    assert "caddylogs:/var/log/caddy" in prod["services"]["proxy"]["volumes"]
+    assert "caddylogs" in prod["volumes"]

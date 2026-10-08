@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+from app.config import settings
 from httpx import AsyncClient
 
 
@@ -43,7 +45,12 @@ async def test_login_wrong_password_401(client: AsyncClient) -> None:
     assert resp.json()["error"]["code"] == "invalid_credentials"
 
 
-async def test_refresh_rotation_and_reuse_detection(client: AsyncClient) -> None:
+async def test_refresh_rotation_and_reuse_detection(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The grace for a retry after a lost reply is off here: an immediate
+    # second use is then plain reuse. With it on, see test_session_resilience.
+    monkeypatch.setattr(settings, "refresh_reuse_grace_s", 0)
     reg = await client.post(
         "/api/v1/auth/register",
         json={"email": "c@example.com", "password": "supersecret", "name": ""},

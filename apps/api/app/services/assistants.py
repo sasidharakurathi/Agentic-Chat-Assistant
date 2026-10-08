@@ -9,7 +9,7 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent import session_store
+from app.agent import cli_files, session_store
 from app.api.errors import BadRequest, NotFound
 from app.db.pagination import PageResult, keyset_page
 from app.graph.compile import compile_graph
@@ -28,7 +28,7 @@ from app.schemas.assistant import (
     VersionDiff,
 )
 from app.schemas.assistant_config import AssistantConfig, default_config
-from app.services import audit, chat
+from app.services import audit
 from app.services.diff import diff_graphs, diff_values
 from app.services.graph_refs import reference_issues
 from app.services.slug import slugify
@@ -394,7 +394,7 @@ async def delete(
             log.warning("assistant_delete_object_failed", key=key, error=str(exc)[:200])
     for conversation_id in conversation_ids:
         await session_store.delete(conversation_id)
-        chat.discard_scratch(conversation_id)
+        cli_files.discard(conversation_id)
 
 
 __all__ = [

@@ -81,6 +81,12 @@ describe("approvalLine", () => {
     );
     expect(approvalLine({ ...base, status: "pending" })).toBe("Waiting for someone to answer");
   });
+
+  it("says when an approval came too late for anything to run (Phase 7a.7)", () => {
+    expect(approvalLine({ ...base, status: "cancelled", decided_by: "Sam", wait_ms: 4_000 })).toBe(
+      "Approved by Sam after 4.0 s, but the answer had stopped: nothing ran",
+    );
+  });
 });
 
 describe("the canvas link", () => {

@@ -30,6 +30,9 @@ class ConversationSummary(ORMModel):
     assistant_version_id: uuid.UUID | None
     title: str
     external_user_ref: str | None = None
+    #: Who started it: the only person who can reply in it or change it
+    #: (Phase 7a.4). Null when that person's account is gone.
+    created_by: uuid.UUID | None = None
     status: ConversationStatus
     cost_usd: Decimal
     token_usage: dict[str, Any]

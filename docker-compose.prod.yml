@@ -56,6 +56,8 @@ x-api-env: &api-env
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}
   # `fake` answers without calling the model: for trying the stack at no cost.
   AGENT_DRIVER: ${AGENT_DRIVER:-auto}
+  # Repoint a model alias, e.g. {"haiku": "<pinned id>"} (Phase 7a.6).
+  MODEL_ALIASES: '${MODEL_ALIASES:-{}}'
   VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
   RAG_OFFLINE: ${RAG_OFFLINE:-0}
   AGENT_MAX_CONCURRENCY: ${AGENT_MAX_CONCURRENCY:-8}
@@ -86,6 +88,8 @@ services:
       # new certificates, and the issuer limits how often.
       - caddydata:/data
       - caddyconfig:/config
+      # The access log, kept about 183 days (Phase 7a.8, deploy/proxy/Caddyfile).
+      - caddylogs:/var/log/caddy
     networks: [edge]
     # Only what binding ports 80 and 443 needs.
     cap_drop: [ALL]
@@ -137,6 +141,13 @@ services:
     init: true
     pids_limit: ${API_PIDS:-2048}
     mem_limit: ${API_MEMORY:-4g}
+    # The CLI's transcripts and working directories, shared with the worker
+    # (its evals run turns, and its sweep removes what no conversation
+    # needs). A cache: Postgres is the source of truth, so not backed up.
+    volumes:
+      - agentstate:/var/lib/assistant-studio
+    # Room to record running turns as stopped (see the API image's CMD).
+    stop_grace_period: 30s
     depends_on:
       postgres:
         condition: service_healthy
@@ -166,6 +177,9 @@ services:
     init: true
     pids_limit: ${API_PIDS:-2048}
     mem_limit: ${WORKER_MEMORY:-4g}
+    volumes:
+      - agentstate:/var/lib/assistant-studio
+    stop_grace_period: 30s
     healthcheck:
       disable: true
     depends_on:
@@ -226,10 +240,31 @@ services:
       timeout: 3s
       retries: 20
 
+  # Chainguard's MinIO runs as uid 65532, not root (Phase 7a.6). A volume
+  # written by the old minio/minio image is root's, so hand it over once,
+  # before the server starts; a volume that is already 65532's is left alone.
+  minio-owner:
+    image: ${MINIO_IMAGE:-cgr.dev/chainguard/minio@sha256:e7ca559d9f7c0b5f24f5f669bb92f40f3ca88d56273b808bf3a7c116c17d2ffa}
+    logging: *logging
+    security_opt: ["no-new-privileges:true"]
+    user: "0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    volumes:
+      - miniodata:/data
+    network_mode: none
+    entrypoint: ["/bin/sh", "-c", "[ \"$$(stat -c %u /data)\" = 65532 ] || chown -R 65532:65532 /data"]
+    restart: "no"
+
   minio:
     <<: *hardened
-    # Pin this to the release you tested (`minio/minio:RELEASE...`).
-    image: ${MINIO_IMAGE:-minio/minio:latest}
+    # Chainguard's build, rebuilt from source daily (Phase 7a.6): MinIO no
+    # longer publishes images and its code is archived. Pinned by digest;
+    # MINIO_IMAGE overrides it with another tested digest.
+    image: ${MINIO_IMAGE:-cgr.dev/chainguard/minio@sha256:e7ca559d9f7c0b5f24f5f669bb92f40f3ca88d56273b808bf3a7c116c17d2ffa}
+    depends_on:
+      minio-owner:
+        condition: service_completed_successfully
     command: ["server", "/data"]
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY}
@@ -247,7 +282,7 @@ services:
   minio-init:
     # The server image, which carries `mc` too. The backup scripts run
     # their copies through this service (deploy/backup/lib.sh).
-    image: ${MINIO_IMAGE:-minio/minio:latest}
+    image: ${MINIO_IMAGE:-cgr.dev/chainguard/minio@sha256:e7ca559d9f7c0b5f24f5f669bb92f40f3ca88d56273b808bf3a7c116c17d2ffa}
     logging: *logging
     depends_on:
       minio:
@@ -282,3 +317,5 @@ volumes:
   miniodata:
   caddydata:
   caddyconfig:
+  caddylogs:
+  agentstate:

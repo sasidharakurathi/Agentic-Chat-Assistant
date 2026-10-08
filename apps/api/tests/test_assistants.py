@@ -15,7 +15,7 @@ async def test_create_lists_and_gets_assistant(
     assert body["status"] == "draft"
     # a fresh assistant compiles from a valid default graph
     assert body["draft_validation"]["errors"] == []
-    assert body["draft_config"]["models"]["main"]["model"] == "claude-sonnet-5"
+    assert body["draft_config"]["models"]["main"]["model"] == "sonnet"
     assert {n["type"] for n in body["draft_graph"]["nodes"]} == {
         "input",
         "guardrail",

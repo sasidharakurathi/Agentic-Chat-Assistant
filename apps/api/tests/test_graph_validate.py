@@ -165,3 +165,41 @@ def test_data_source_must_go_through_a_knowledge_base() -> None:
     res = validate_graph(g)
     assert not res.ok
     assert [e.code for e in res.errors] == ["illegal_edge"]
+
+
+# ── the HTTP tool reaches only its allowed sites (Phase 7a.9) ─
+
+
+def _http_warnings(g: Graph) -> list[str]:
+    return [w.code for w in validate_graph(g).warnings if w.code.startswith("http_")]
+
+
+def _with_http(domains: list[str] | None) -> Graph:
+    g = minimal_graph()
+    config: dict[str, object] = {} if domains is None else {"allowed_domains": domains}
+    g.nodes.append(ToolNode(id="http", data=ToolNodeData(key="http_request", config=config)))
+    g.edges.append(Edge(source="http", target="a"))
+    return g
+
+
+def test_an_http_tool_with_no_allowed_sites_is_flagged() -> None:
+    assert _http_warnings(_with_http(None)) == ["http_no_allowed_sites"]
+    assert _http_warnings(_with_http([])) == ["http_no_allowed_sites"]
+    assert _http_warnings(_with_http(["  "])) == ["http_no_allowed_sites"]
+    (issue,) = [w for w in validate_graph(_with_http([])).warnings if w.code.startswith("http_")]
+    assert issue.node_id == "http" and "refused" in issue.message
+
+
+def test_an_allowed_site_anyone_can_publish_on_is_flagged() -> None:
+    assert _http_warnings(_with_http(["helpdesk.example.com"])) == []
+    flagged = _http_warnings(_with_http(["helpdesk.example.com", "pastebin.com", "google.com"]))
+    assert flagged == ["http_open_site", "http_open_site"]
+
+
+def test_a_graph_with_errors_still_gets_the_http_warning() -> None:
+    """Not reachability guidance: it is said even while the canvas is broken."""
+    g = _with_http([])
+    g.nodes = [n for n in g.nodes if n.type != "agent"]
+    g.edges = [e for e in g.edges if "a" not in (e.source, e.target)]
+    res = validate_graph(g)
+    assert res.errors and "http_no_allowed_sites" in [w.code for w in res.warnings]

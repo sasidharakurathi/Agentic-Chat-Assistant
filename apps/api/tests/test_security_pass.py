@@ -561,14 +561,30 @@ def test_connection_options_cannot_carry_a_credential_at_any_depth() -> None:
         assert "Pfake123" not in message, "the error names the key, never the value"
 
 
-def test_the_agents_cli_does_not_inherit_the_servers_secrets() -> None:
+def test_the_agents_cli_does_not_inherit_the_servers_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def allow(*_a: Any, **_k: Any) -> Any:
         return None
 
+    # Set here, not read from a developer's .env: a failure must never print one.
+    monkeypatch.setattr(settings, "anthropic_api_key", "")
     options = build_claude_options(build_runtime_spec(AssistantConfig()), allow)
     for name in ("APP_KEK", "JWT_SECRET", "DATABASE_URL", "S3_SECRET_KEY", "MCP_RUNNER_TOKEN"):
         assert options.env[name] == "", name
-    assert "ANTHROPIC_API_KEY" not in options.env, "the one key the CLI needs is left alone"
+    assert "ANTHROPIC_API_KEY" not in options.env, "no key set: nothing to hand over"
+
+
+def test_the_cli_is_handed_the_platforms_model_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not inherited (Phase 7a.6): settings read .env without exporting it,
+    and the CLI then signed in with the developer's own Claude login."""
+
+    async def allow(*_a: Any, **_k: Any) -> Any:
+        return None
+
+    monkeypatch.setattr(settings, "anthropic_api_key", "sk-ant-test-only")
+    options = build_claude_options(build_runtime_spec(AssistantConfig()), allow)
+    assert options.env["ANTHROPIC_API_KEY"] == "sk-ant-test-only"
 
 
 # ── starting in production ───────────────────────────────────

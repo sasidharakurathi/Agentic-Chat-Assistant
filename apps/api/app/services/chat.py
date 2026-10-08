@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import shutil
-import tempfile
 import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import anyio
@@ -19,11 +16,12 @@ import structlog
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent import approval_registry, interrupts, router, session_store
+from app.agent import approval_registry, cli_files, interrupts, router, session_store
 from app.agent.approvals import ApprovalRequest
 from app.agent.caps_memory import MemoryScope
 from app.agent.caps_memory import owner_key as memory_owner
 from app.agent.citations import blocks_from
+from app.agent.driver import get_driver
 from app.agent.events import (
     AgentEvent,
     ApprovalRequiredEvent,
@@ -32,6 +30,7 @@ from app.agent.events import (
     DoneEvent,
     ErrorEvent,
 )
+from app.agent.models import resolve_model
 from app.agent.runtime import Turn
 from app.agent.titles import DEFAULT_TITLE, Title
 from app.api.errors import NotFound
@@ -39,6 +38,7 @@ from app.config import settings
 from app.db.pagination import PageResult, keyset_page
 from app.db.session import get_sessionmaker
 from app.logging import get_logger
+from app.models.approval import ApprovalStatus
 from app.models.assistant import Assistant, AssistantVersion
 from app.models.conversation import (
     Conversation,
@@ -57,19 +57,6 @@ from app.services import approvals as approvals_svc
 from app.services import audit, budgets, conversation_memory
 
 log = get_logger(__name__)
-
-_SCRATCH_BASE = Path(tempfile.gettempdir()) / "assistant-studio" / "scratch"
-
-
-def _scratch_dir(conversation_id: uuid.UUID) -> Path:
-    d = _SCRATCH_BASE / str(conversation_id)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def discard_scratch(conversation_id: uuid.UUID) -> None:
-    """Remove a conversation's scratch directory, if it has one."""
-    shutil.rmtree(_SCRATCH_BASE / str(conversation_id), ignore_errors=True)
 
 
 async def create_conversation(
@@ -229,6 +216,11 @@ async def archive(
     )
     await session.flush()
     await session.commit()
+    # An archived conversation can't be continued, so the CLI's copy of it
+    # (the transcript it would resume from) has no further use; the stored
+    # messages stay for whoever may read them (Phase 7a.5).
+    await session_store.delete(conv.id)
+    cli_files.discard(conv.id)
 
 
 @dataclass(frozen=True)
@@ -339,21 +331,31 @@ async def _raise_approval(
     try:
         decision = await approval_registry.wait(row.id, future, timeout=settings.approval_timeout_s)
     except asyncio.CancelledError:
-        # The turn is gone (the client disconnected) while the reviewer was
-        # still deciding. Left `pending`, the row would keep being offered on
-        # reload, and approving it would record a decision for a statement
-        # that can no longer run. `expire` only moves a row out of pending, so
-        # a decision that raced in first is never overwritten.
+        # The turn is gone while the reviewer was still deciding. Left
+        # `pending`, the row would keep being offered on reload. If an
+        # approval raced in first, the action still won't run: say so.
         with anyio.CancelScope(shield=True):
-            await approvals_svc.expire(row.id)
+            if await approvals_svc.close(row.id) is ApprovalStatus.approved:
+                await approvals_svc.cancel_unrun(row.id)
         raise
     finally:
         if watcher is not None:
             watcher.cancel()
     if decision in ("expired", "interrupted"):
-        # An interrupted approval is closed like an unanswered one: it leaves
-        # the pending list, and a late click cannot approve a dead statement.
-        await approvals_svc.expire(row.id)
+        # Closed like an unanswered one: it leaves the pending list, and a
+        # late click cannot approve a dead statement. The row decides
+        # (Phase 7a.7): a decision can land between the timeout and here.
+        recorded = await approvals_svc.close(row.id)
+        if recorded is ApprovalStatus.denied:
+            return "denied"
+        if recorded is ApprovalStatus.approved:
+            if decision == "expired":
+                # Approved before its expiry, and the wake-up lost the race
+                # with the timeout: the person said yes in time, so it runs.
+                return "approved"
+            # Stopped at the same moment it was approved: Stop wins, and the
+            # row says nothing ran.
+            await approvals_svc.cancel_unrun(row.id)
     return decision
 
 
@@ -526,7 +528,7 @@ def _new_turn(
         ),
         budget_remaining_usd=remaining,
         budget_message=budget_message,
-        scratch_dir=_scratch_dir(conv.id),
+        scratch_dir=cli_files.scratch_dir(conv.id),
         citation_state=dict(conv.citation_state or {}),
         approvals=ApprovalRequest(
             conversation_id=conv.id, org_id=conv.org_id, request=request_approval
@@ -588,7 +590,7 @@ async def _run_admitted(
         assistant_id=conv.assistant_id,
         org_id=conv.org_id,
         user_ref=conv.external_user_ref,
-        model=config.models.main.model,
+        model=resolve_model(config.models.main.model),
         prompt=text,
         pii_redaction=config.guardrails.pii_redaction,
     )
@@ -703,7 +705,15 @@ async def _session_to_resume(conv: Conversation) -> str | None:
     cached = await session_store.get(conv.id)
     if cached is not None and cached != conv.sdk_session_id:
         log.warning("session_cache_stale", conversation_id=str(conv.id))
-    return conv.sdk_session_id
+    resume = conv.sdk_session_id
+    # The CLI resumes from its transcript on disk. A redeploy that lost the
+    # volume, or the CLI's own clean-up, leaves an id with nothing behind it,
+    # and resuming it failed every turn from then on. Replay the stored
+    # messages instead (Phase 7a.5); the turn's new session replaces the id.
+    if resume and get_driver().name != "fake" and not cli_files.has_transcript(conv.id, resume):
+        log.info("session_missing_replayed", conversation_id=str(conv.id))
+        return None
+    return resume
 
 
 def _end_trace(tracing: TurnTrace, turn: Turn, started: float) -> None:
@@ -775,7 +785,7 @@ async def _finalize(
         # What the guardrails did (task 5.3), so the chat still shows it
         # after a reload.
         + [{"type": "guardrail", **f} for f in turn.guard.findings],
-        model=config.models.main.model,
+        model=resolve_model(config.models.main.model),
         tokens_in=o.tokens_in,
         tokens_out=o.tokens_out,
         latency_ms=elapsed_ms,
@@ -794,7 +804,7 @@ async def _finalize(
         message_id=asst_msg.id,
         org_id=conv.org_id,
         version_number=version.version_number if version is not None else None,
-        model=config.models.main.model,
+        model=resolve_model(config.models.main.model),
         effort=config.models.main.effort,
         driver=o.driver_name,
         num_turns=o.num_turns,
@@ -833,7 +843,7 @@ async def _finalize(
             assistant_id=conv.assistant_id,
             conversation_id=conv.id,
             kind=UsageKind.llm,
-            model=config.models.main.model,
+            model=resolve_model(config.models.main.model),
             tokens_in=o.tokens_in,
             tokens_out=o.tokens_out,
             cost_usd=o.cost_usd,

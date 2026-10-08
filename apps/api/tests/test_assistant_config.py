@@ -13,8 +13,8 @@ from pydantic import ValidationError
 def test_default_config_is_valid_and_conservative() -> None:
     c = default_config()
     assert c.schema_version == 1
-    assert c.models.main.model == "claude-sonnet-5"
-    assert c.models.router.model == "claude-haiku-4-5"
+    assert c.models.main.model == "sonnet"
+    assert c.models.router.model == "haiku"
     assert c.rag.enabled is False
     assert c.tools.calculator.enabled is False
     assert c.approval_policy.file_write == "deny"

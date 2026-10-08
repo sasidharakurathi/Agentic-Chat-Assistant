@@ -14,7 +14,7 @@ from app.agent import history as history_mod
 from app.agent import titles as titles_mod
 from app.agent.claude_api import MAX_RETRIES, Refused, complete
 from app.agent.history import HistoryMessage
-from app.agent.models import SUMMARY_MODEL, TITLE_MODEL
+from app.agent.models import SUMMARY_MODEL, TITLE_MODEL, resolve_model
 from app.config import settings
 from tests import claude_stub
 
@@ -95,13 +95,13 @@ async def test_the_summarizer_folds_messages_into_the_previous_summary(
         [HistoryMessage("user", "It arrived broken."), HistoryMessage("assistant", "Sorry!")],
     )
     sent = claude_stub.body(stub.requests[0])
-    assert sent["model"] == SUMMARY_MODEL
+    assert sent["model"] == resolve_model(SUMMARY_MODEL) == "claude-haiku-4-5"
     prompt = claude_stub.prompt(stub.requests[0])
     assert "<summary>\n- ordered a lamp\n</summary>" in prompt
     assert '<message role="user">\nIt arrived broken.\n</message>' in prompt
     assert (summary.text, summary.model, summary.tokens_out) == (
         "- wants a refund",
-        SUMMARY_MODEL,
+        resolve_model(SUMMARY_MODEL),
         12,
     )
     assert summary.cost_usd > 0
@@ -111,7 +111,7 @@ async def test_the_titler_names_the_first_message(monkeypatch: pytest.MonkeyPatc
     stub = claude_stub.install(monkeypatch, lambda r: claude_stub.message('"Broken lamp refund."'))
     title = await titles_mod.HaikuTitler().title("My lamp arrived broken, can I get a refund?")
     sent = claude_stub.body(stub.requests[0])
-    assert (sent["model"], sent["max_tokens"]) == (TITLE_MODEL, 30)
+    assert (sent["model"], sent["max_tokens"]) == (resolve_model(TITLE_MODEL), 30)
     assert "<message>\nMy lamp arrived broken" in claude_stub.prompt(stub.requests[0])
     assert stub.timeouts == [15.0]
-    assert title.text == "Broken lamp refund" and title.model == TITLE_MODEL
+    assert title.text == "Broken lamp refund" and title.model == resolve_model(TITLE_MODEL)

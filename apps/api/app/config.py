@@ -12,8 +12,10 @@ import binascii
 import hashlib
 import hmac
 import secrets
+import tempfile
 import warnings
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
@@ -57,6 +59,11 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_ttl_seconds: int = 900
     jwt_refresh_ttl_seconds: int = 2_592_000
+    #: A refresh token presented again this soon after it was used, while
+    #: its session has not moved on, is a retry whose reply was lost on a
+    #: weak connection, not a stolen token (Phase 7a.8): a fresh pair is
+    #: issued instead of revoking the session. 0 turns the grace off.
+    refresh_reuse_grace_s: int = Field(default=30, ge=0, le=300)
     app_kek: str = ""
 
     # ── Datastores ───────────────────────────────────────────
@@ -149,6 +156,18 @@ class Settings(BaseSettings):
     #: turn slots and the pool is turns that last, not turns that are
     #: over in a millisecond.
     agent_fake_delay_ms: int = Field(default=0, ge=0)
+    #: Repoints model aliases (Phase 7a.6), as JSON: {"haiku": "<pinned id>"}.
+    #: Every assistant that names the alias moves at once, with no new
+    #: version. The preflight refuses an unknown alias or model id.
+    model_aliases: dict[str, str] = Field(default_factory=dict)
+    #: Where the Claude Code CLI keeps its files (Phase 7a.5): each
+    #: conversation's working directory under `scratch/`, and the CLI's own
+    #: config directory (`CLAUDE_CONFIG_DIR`) under `claude/`, which holds the
+    #: session transcripts it resumes from. The production image puts it on a
+    #: named volume shared by the API and the worker. Keep the path short: the
+    #: CLI names a transcript folder after the working directory and shortens
+    #: names over 200 characters, which would hide the conversation id.
+    agent_state_dir: Path = Path(tempfile.gettempdir()) / "assistant-studio"
 
     # ── Rate limiting (task 5.8) ─────────────────────────────
     #: Token buckets in Redis (see `security/ratelimit.py`). Each limit is
@@ -163,9 +182,14 @@ class Settings(BaseSettings):
     rate_limit_ip: str = "600/60"
     #: Every authenticated request, per user (API tokens included).
     rate_limit_user: str = "1200/60"
-    #: Register, log in, refresh: per IP. And logging in to one account,
-    #: per IP, against password guessing.
+    #: Register and log in: per IP. And logging in to one account, per
+    #: IP, against password guessing.
     rate_limit_auth: str = "20/60"
+    #: Refreshing a session (Phase 7a.8): per session, so people behind one
+    #: VPN or office address don't share a bucket, with a generous per-IP
+    #: ceiling. A refresh token can't be guessed, so this is about volume.
+    rate_limit_refresh: str = "10/60"
+    rate_limit_refresh_ip: str = "600/60"
     rate_limit_login: str = "10/300"
     #: Sending a chat message: per user, and per org across its members.
     rate_limit_chat_user: str = "30/60"

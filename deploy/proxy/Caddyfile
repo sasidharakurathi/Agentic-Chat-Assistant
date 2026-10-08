@@ -18,6 +18,27 @@
 		-Server
 	}
 
+	# Who connected, from where, and what they asked for (Phase 7a.8): the
+	# containers' own logs are gone at the next `up -d --build`, and an
+	# incident report to CERT-In needs 180 days. JSON, on its own volume
+	# (`caddylogs`), kept 4392 h, about 183 days. Caddy leaves out the values
+	# of Authorization and Cookie by itself; the filter takes out the two
+	# credentials that travel in the address: an invite link's token (in the
+	# path) and a file link's signature (in the query, so every query goes).
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 100MiB
+			roll_keep 2000
+			roll_keep_for 4392h
+		}
+		format filter {
+			fields {
+				request>uri regexp "(/invites/)[^/?]+|\?.*$" "${1}"
+			}
+			wrap json
+		}
+	}
+
 	# The largest request the API should ever be asked to read: a document
 	# upload. Refused here, before it costs the API anything.
 	request_body {
@@ -53,6 +74,15 @@
 		path /{$S3_BUCKET}/*
 	}
 	handle @files {
+		# A second wall behind the API's choice of type and disposition
+		# (storage/file_types.py): the browser must not guess a type, and
+		# nothing served here may run a script, post a form or be framed.
+		# No object-src or sandbox rule: those stop the browser's own PDF
+		# viewer, and the PDFs here are the citations people open.
+		header {
+			X-Content-Type-Options nosniff
+			Content-Security-Policy "script-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+		}
 		reverse_proxy minio:9000
 	}
 

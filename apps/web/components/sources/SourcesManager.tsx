@@ -244,6 +244,9 @@ export function SourcesManager({ assistantId }: { assistantId: string }) {
                 ref={fileInput}
                 type="file"
                 multiple
+                // The formats the server accepts (storage/file_types.py);
+                // it decides from the file itself either way.
+                accept=".pdf,.docx,.html,.htm,.md,.markdown,.txt,application/pdf,text/plain,text/markdown,text/html"
                 className="hidden"
                 onChange={(e) => {
                   uploadFiles(e.target.files);

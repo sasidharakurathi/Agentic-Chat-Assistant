@@ -4,6 +4,7 @@ import { MessagesSquare, Plus, X } from "lucide-react";
 import { use, useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 import { ChatThread } from "@/components/chat/ChatThread";
+import { canAct } from "@/components/chat/conversation-access";
 import { ConversationList } from "@/components/chat/ConversationList";
 import { failureText } from "@/components/chat/error-text";
 import { LoadFailed, loadFailure, type LoadFailure } from "@/components/load-state";
@@ -14,9 +15,11 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Loading } from "@/components/ui/loading";
 import { BackLink } from "@/components/ui/page-header";
 import { assistants, conversations, type Conversation } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 export default function ChatPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const { user } = useAuth();
   const [name, setName] = useState("");
   const [rows, setRows] = useState<Conversation[]>([]);
   const [active, setActive] = useState<string | null>(null);
@@ -149,6 +152,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       assistantId={id}
       name={name}
       rows={rows}
+      userId={user?.id ?? null}
       active={active}
       more={Boolean(more)}
       loadingMore={loadingMore}
@@ -199,6 +203,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               assistantId={id}
               assistantName={name}
               title={current?.title ?? "Conversation"}
+              readOnly={!canAct(current, user?.id)}
               headerLeading={
                 <Button
                   id={listTriggerId}

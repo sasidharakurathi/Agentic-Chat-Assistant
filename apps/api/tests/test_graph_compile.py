@@ -11,7 +11,7 @@ def test_compile_minimal_gives_default_shaped_config() -> None:
     assert c.rag.enabled is False
     assert c.databases == []
     assert c.subagents.retrieval is False and c.subagents.sql is False
-    assert c.models.main.model == "claude-sonnet-5"
+    assert c.models.main.model == "sonnet"
 
 
 def test_compile_rich_graph_projects_wired_nodes() -> None:

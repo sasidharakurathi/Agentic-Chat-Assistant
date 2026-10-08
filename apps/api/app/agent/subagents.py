@@ -26,6 +26,7 @@ from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.agent.models import resolve_model
 from app.schemas.assistant_config import AssistantConfig, ModelSpec, SubagentRole
 
 # The retrieval subagent's whole job. "Do not answer the question" is the
@@ -122,7 +123,7 @@ def _spec(
         description=description,
         prompt=prompt,
         tools=list(tools),
-        model=model.model,
+        model=resolve_model(model.model),
         # The role's own limit when it sets one; the built-in default only
         # otherwise.
         max_turns=model.max_turns or default_turns,

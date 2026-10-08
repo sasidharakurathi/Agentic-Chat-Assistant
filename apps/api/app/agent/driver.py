@@ -33,7 +33,7 @@ from app.agent.events import (
     UsageEvent,
 )
 from app.agent.hooks import build_tool_gate
-from app.agent.models import PRICE_PER_MTOK
+from app.agent.models import price_per_mtok, priced_usage
 from app.agent.options import (
     SUBAGENT_TOOL,
     RuntimeSpec,
@@ -50,7 +50,7 @@ log = get_logger(__name__)
 
 
 def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-    rate_in, rate_out = PRICE_PER_MTOK.get(model, (0.0, 0.0))
+    rate_in, rate_out = price_per_mtok(model)
     return round(rate_in * tokens_in / 1_000_000 + rate_out * tokens_out / 1_000_000, 6)
 
 
@@ -683,7 +683,12 @@ class _UsageLedger:
     def settle(self, message: Any) -> UsageEvent:
         usage = message.usage or {}
         total_cost = float(getattr(message, "total_cost_usd", 0.0) or 0.0)
-        if total_cost <= 0 and self.cost_usd > 0:
+        ours = _priced_model_usage(getattr(message, "model_usage", None))
+        if ours is not None:
+            # Our prices, from the CLI's per-model token counts (Phase 7a.6):
+            # the CLI prices a model it doesn't know at Opus 5's rates.
+            total_cost = ours
+        elif total_cost <= 0 and self.cost_usd > 0:
             # The SDK reports 0 for a model it has no price for. Settling to
             # that would silently zero out spend that genuinely happened, so
             # our own estimate stands (observed live: 40 tokens, "$0").
@@ -702,6 +707,31 @@ class _UsageLedger:
             stop_reason=getattr(message, "stop_reason", None),
             models=sorted(getattr(message, "model_usage", None) or {}),
         )
+
+
+def _priced_model_usage(model_usage: Any) -> float | None:
+    """A turn's cost at the platform's prices, from the CLI's per-model usage
+    (`modelUsage`: tokens, cache reads and writes, web searches per model).
+    None when it is missing or names a model this release has no price for:
+    the CLI's own total stands then."""
+    if not isinstance(model_usage, dict) or not model_usage:
+        return None
+    total = 0.0
+    for model, used in model_usage.items():
+        if not isinstance(used, dict):
+            return None
+        cost = priced_usage(
+            model,
+            input_tokens=int(used.get("inputTokens") or 0),
+            output_tokens=int(used.get("outputTokens") or 0),
+            cache_read_tokens=int(used.get("cacheReadInputTokens") or 0),
+            cache_write_tokens=int(used.get("cacheCreationInputTokens") or 0),
+            web_searches=int(used.get("webSearchRequests") or 0),
+        )
+        if cost is None:
+            return None
+        total += cost
+    return round(total, 6)
 
 
 def _input_read(usage: dict[str, Any]) -> int:
@@ -829,7 +859,10 @@ def _events_for(
         if spend is not None:
             events.append(spend)
         if message.error and parent is None:
-            failed = from_message_error(message.error)
+            said = " ".join(
+                getattr(b, "text", "") for b in message.content if isinstance(b, TextBlock)
+            )
+            failed = from_message_error(message.error, said)
             events.append(
                 ErrorEvent(code=failed.code, message=failed.message, retryable=failed.retryable)
             )

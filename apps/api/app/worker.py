@@ -127,6 +127,44 @@ async def mcp_health_sweep(ctx: dict[Any, Any], *_args: Any, **_kwargs: Any) -> 
     log.info("mcp_health_sweep", checked=len(ids))
 
 
+async def recovery_sweep(ctx: dict[Any, Any], *_args: Any, **_kwargs: Any) -> None:
+    """Every minute: close approvals a dead process left pending, and leave
+    a notice on questions a dead turn never answered (Phase 7a.7)."""
+    from app.services import recovery
+
+    await recovery.sweep()
+
+
+#: How many conversation ids one sweep query asks about.
+SWEEP_BATCH = 500
+
+
+async def agent_files_sweep(ctx: dict[Any, Any], *_args: Any, **_kwargs: Any) -> None:
+    """Remove the CLI files no conversation needs (Phase 7a.5): everything of
+    a conversation that was deleted or archived, and old transcripts of live
+    ones that will never be resumed. Archive and assistant delete remove
+    their own; this catches what they missed (a failed delete, an archive
+    from before this existed) and the sessions a summary replaced. The API
+    and the worker share the files' volume, so this sees the API's turns."""
+    from sqlalchemy import select
+
+    from app.agent import cli_files
+    from app.models.conversation import Conversation, ConversationStatus
+
+    on_disk = sorted(cli_files.conversation_ids_on_disk())
+    keep: dict[uuid.UUID, str | None] = {}
+    async with get_sessionmaker()() as session:
+        for i in range(0, len(on_disk), SWEEP_BATCH):
+            rows = await session.execute(
+                select(Conversation.id, Conversation.sdk_session_id).where(
+                    Conversation.id.in_(on_disk[i : i + SWEEP_BATCH]),
+                    Conversation.status != ConversationStatus.archived,
+                )
+            )
+            keep.update(rows.tuples().all())
+    cli_files.sweep(keep)
+
+
 class WorkerSettings:
     functions: ClassVar = [
         # Arq's default job timeout is 300 s. Indexing a long document on the
@@ -139,6 +177,9 @@ class WorkerSettings:
     ]
     cron_jobs: ClassVar = [
         cron(mcp_health_sweep, minute={0, 15, 30, 45}, run_at_startup=False, timeout=600),
+        cron(agent_files_sweep, hour={3}, minute={30}, run_at_startup=False, timeout=600),
+        # Every minute, starting at once: a restart is exactly when it matters.
+        cron(recovery_sweep, run_at_startup=True, timeout=55),
     ]
     on_startup = startup
     on_shutdown = shutdown
@@ -147,8 +188,10 @@ class WorkerSettings:
 
 __all__ = [
     "WorkerSettings",
+    "agent_files_sweep",
     "ingest_data_source_job",
     "mcp_health_sweep",
+    "recovery_sweep",
     "refresh_schema_job",
     "run_eval_job",
     "summarize_conversation_job",

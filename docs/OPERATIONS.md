@@ -17,7 +17,7 @@ below stands for:
 | `proxy` | TLS, and routing by path (Caddy) | the internet: ports 80, 443 |
 | `web` | the pages (Next.js) | the proxy |
 | `api` | the API, and the agent's turns | the proxy |
-| `worker` | background jobs: indexing documents, eval runs, summaries | nothing |
+| `worker` | background jobs: indexing documents, eval runs, summaries, a daily sweep of the agent's files, and a recovery sweep every minute (approvals and questions a crashed turn left behind) | nothing |
 | `mcp-runner` | runs local-command MCP servers, away from every secret | the API and worker |
 | `postgres` | everything stored, including vectors (pgvector) | the API and worker |
 | `redis` | the job queue, rate limits, cross-process signals, and each running answer's events for 10 minutes (so a page can watch it again through any API process) | the API and worker |
@@ -59,14 +59,21 @@ To try the whole stack without a model key or spend, set
 
 ### The MinIO image
 
-`docker-compose.prod.yml` uses `minio/minio:latest` unless `MINIO_IMAGE`
-says otherwise. MinIO has changed how it publishes images, and on the
-machine this was developed on the separate `minio/mc` image could no
-longer be pulled. The stack therefore needs only the server image (it
-carries `mc`), and you should set `MINIO_IMAGE` to an image you have
-pulled and tested, from a registry you trust. Any S3-compatible store
-works with the API; only the bucket-creating job and the backup scripts
-assume `mc` is in the image.
+MinIO no longer publishes images (`minio/minio` is gone from Docker Hub)
+and its code is archived. The stack uses Chainguard's build,
+`cgr.dev/chainguard/minio`, which is rebuilt from source and free to
+pull, pinned by digest in both compose files. A digest means nothing
+changes until someone pulls a newer build, tests it and updates the digest
+(`MINIO_IMAGE` in `.env.production` overrides it). The one image carries
+`mc` and a shell, which the bucket job and the backup scripts use.
+
+**Moving from `minio/minio`:** Chainguard's server runs as user 65532, not
+root. A one-off `minio-owner` step runs before it and hands the data
+volume over (`chown`), only if it is still root's, so an existing
+install keeps its files. Nothing to do by hand.
+
+Any S3-compatible store works with the API; only the bucket job, the
+volume step and the backup scripts assume this image.
 
 ## 3. Settings worth knowing
 
@@ -81,6 +88,7 @@ each. The ones that change behaviour most:
 | `RAG_OFFLINE` | 0 | you have no Voyage key: the local model is free, slower, and less accurate |
 | `METRICS_TOKEN` | empty | you run Prometheus (section 7) |
 | `TRUSTED_PROXY_HOPS` | 1 | there is another proxy or load balancer in front of Caddy (2) |
+| `MODEL_ALIASES` | none | a model family's newest model changes: repoint the alias ("haiku") and every assistant on it moves, with no new version |
 
 The load test and what it says about concurrency and the database pool
 are in `EXPLAINER.md` §12.5.
@@ -134,6 +142,12 @@ other two scripts refuse it.
 **What is not in it:** `APP_KEK` and the rest of `.env.production`
 (section 4), the TLS certificates (Caddy gets new ones), and Redis (a
 queue and counters: jobs that were waiting are lost, nothing else).
+Nor the `agentstate` volume, on purpose: it holds the Claude CLI's session
+transcripts and working folders, a cache of what the database already
+stores. A conversation whose transcript is missing (a new server, a lost
+volume) carries on from its stored messages; the transcripts are removed
+when their conversation is archived or its assistant deleted, and a daily
+job in the worker clears anything left over.
 
 **Schedule it.** For example, nightly, keeping two weeks, and proving each
 one:
@@ -237,9 +251,25 @@ an upgrade is done at a quiet time.
   own result). `readyz` answers 503 only when the server cannot serve a
   chat at all.
 - **Logs:** JSON lines on each container's output (`COMPOSE logs -f api`),
-  capped at 50 MB per container. Every request line has a `request_id`,
-  which is also the `x-request-id` response header: ask a user for it and
-  search for it. Secrets are redacted before a line is written.
+  capped at 50 MB per container and gone when a container is recreated,
+  so days at most. Every API request line has a `request_id` (also the
+  `x-request-id` response header: ask a user for it and search for it),
+  the signed-in `user_id` and the `client_ip`. Secrets are redacted before
+  a line is written.
+- **What is kept for half a year or more** (Phase 7a.8, for CERT-In's 180
+  days):
+  - the proxy's access log, on the `caddylogs` volume
+    (`/var/log/caddy/access.log`), rolled at 100 MB and kept 4392 hours:
+    who connected from where and to what, with invite tokens, file-link
+    signatures and Authorization values taken out;
+  - the audit log in Postgres (who did what), which is in the backups and
+    cannot be edited or deleted: a trigger refuses it.
+- **Behind a VPN or office NAT:** every remote user arrives from one
+  address. That puts one IP in the logs and the audit log, and shares the
+  per-address limits. On a Tailscale subnet router, turn off SNAT
+  (`--snat-subnet-routes=false`) or run Tailscale on the server itself,
+  then check that the audit log shows people's own addresses. Keep the VPN's
+  own connection logs as the company's policy says.
 - **Metrics, dashboards, alerts:** set `METRICS_TOKEN`, then see
   `EXPLAINER.md` §12.4. The proxy never publishes `/metrics`; Prometheus
   has to reach `api:8000` from inside (attach it to the stack's `edge`
@@ -265,6 +295,61 @@ an upgrade is done at a quiet time.
 
 For anything else: the `request_id`, then `COMPOSE logs api | grep <id>`.
 
+### A suspected incident
+
+Report a cyber incident to CERT-In within **6 hours** of noticing it; from
+14 May 2027, a personal-data breach also goes to the Data Protection Board
+and to the people affected within 72 hours. Then:
+
+1. **Keep the evidence.** Run `deploy/backup/backup.sh` at once, and copy
+   the proxy's access log out of its volume:
+   `COMPOSE cp proxy:/var/log/caddy ./incident-<date>/caddy`.
+2. **Who did what, in the window.** In `COMPOSE exec postgres psql -U app app`:
+
+   ```sql
+   SELECT created_at, action, actor_user_id, ip, target_type, target_id, meta
+   FROM audit_log
+   WHERE created_at BETWEEN '2027-01-10 00:00+05:30' AND '2027-01-11 00:00+05:30'
+   ORDER BY created_at;
+   ```
+
+3. **Who asked an assistant anything:**
+
+   ```sql
+   SELECT DISTINCT u.email, c.id AS conversation, min(m.created_at) AS first, max(m.created_at) AS last
+   FROM messages m
+   JOIN conversations c ON c.id = m.conversation_id
+   LEFT JOIN users u ON u.id = c.created_by
+   WHERE c.assistant_id = '<assistant id>' AND m.role = 'user'
+     AND m.created_at BETWEEN '<from>' AND '<to>'
+   GROUP BY u.email, c.id;
+   ```
+
+4. **Who was shown a document** (an answer citing a knowledge source):
+
+   ```sql
+   SELECT DISTINCT u.email, m.conversation_id, m.created_at
+   FROM messages m
+   JOIN conversations c ON c.id = m.conversation_id
+   LEFT JOIN users u ON u.id = c.created_by
+   WHERE m.blocks @> '[{"type": "citation", "data_source_id": "<source id>"}]'
+     AND m.created_at BETWEEN '<from>' AND '<to>';
+   ```
+
+5. **Who used a tool** (a database query, an MCP tool):
+
+   ```sql
+   SELECT t.created_at, u.email, t.tool_name, t.status, t.conversation_id
+   FROM tool_calls t
+   JOIN conversations c ON c.id = t.conversation_id
+   LEFT JOIN users u ON u.id = c.created_by
+   WHERE t.tool_name LIKE '%<tool>%' AND t.created_at BETWEEN '<from>' AND '<to>'
+   ORDER BY t.created_at;
+   ```
+
+6. **Where from:** the proxy's access log for the same window
+   (`remote_ip`, `request.uri`, `ts`), and the VPN's own logs.
+
 ## 10. Before you open it to people
 
 - [ ] `APP_KEK` is stored somewhere other than the server.
@@ -274,5 +359,6 @@ For anything else: the `request_id`, then `COMPOSE logs api | grep <id>`.
       copied off the machine.
 - [ ] You have restored one backup, once, onto a test machine.
 - [ ] The preflight shows no `WARN` you have not decided to accept.
-- [ ] `MINIO_IMAGE`, `CADDY_IMAGE` and `APP_VERSION` are pinned.
+- [ ] `CADDY_IMAGE` and `APP_VERSION` are pinned (the MinIO image is pinned by
+  digest in the compose file; `MINIO_IMAGE` only if you tested another).
 - [ ] `docs/THREAT_MODEL.md` §5 (what is still open) has been read.

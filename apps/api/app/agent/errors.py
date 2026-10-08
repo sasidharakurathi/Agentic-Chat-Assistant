@@ -62,6 +62,14 @@ _KNOWN: dict[str, tuple[str, bool]] = {
         False,
     ),
     "invalid_request": ("The model rejected the request.", False),
+    # The API refuses a model the bundled CLI is too old for (Phase 7a.6:
+    # "Claude Code 2.1.258 does not support this model; version 2.1.280 or
+    # newer is required"). Trying again can't help.
+    "model_unsupported": (
+        "This server's assistant runtime is too old for the chosen model. An administrator "
+        "needs to update the platform, or pick another model.",
+        False,
+    ),
     "agent_error": ("Something went wrong while answering. Try again.", True),
 }
 
@@ -158,7 +166,15 @@ _MESSAGE_ERRORS = {
 }
 
 
-def from_message_error(label: str) -> Failure:
+#: Said in the failed message's text, whatever its label.
+_UNSUPPORTED_MODEL = "does not support this model"
+
+
+def from_message_error(label: str, text: str = "") -> Failure:
+    """`text`: the failed message's own words, which name a few failures its
+    label does not (the CLI labels "too old for this model" `unknown`)."""
+    if _UNSUPPORTED_MODEL in text.lower():
+        return failure("model_unsupported")
     return failure(_MESSAGE_ERRORS.get(label, "agent_error"))
 
 

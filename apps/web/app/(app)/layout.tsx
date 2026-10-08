@@ -23,19 +23,34 @@ const NAV: { href: string; label: string; icon: LucideIcon }[] = [
 const WORK_SURFACE = /^\/assistants\/[^/]+\/(build|chat)(\/|$)/;
 
 export default function AppLayout({ children }: { children: ReactNode }) {
-  const { ready, user } = useAuth();
+  const { ready, user, offline, refresh } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
-    if (ready && !user) router.replace("/login");
-  }, [ready, user, router]);
+    // Offline is not signed out (Phase 7a.8): stay, and keep trying.
+    if (ready && !user && !offline) router.replace("/login");
+  }, [ready, user, offline, router]);
 
   // A link in the sheet navigates; the sheet should not stay over the page.
   useEffect(() => {
     setMenuOpen(false);
   }, [pathname]);
+
+  if (offline && !user) {
+    return (
+      <div className="flex min-h-dvh flex-col items-center justify-center gap-4 p-6 text-center">
+        <p role="status" className="max-w-sm">
+          Can&apos;t reach the server right now. You&apos;re still signed in, and this page tries
+          again by itself.
+        </p>
+        <Button variant="outline" onClick={() => void refresh()}>
+          Try now
+        </Button>
+      </div>
+    );
+  }
 
   if (!ready || !user) {
     return (
@@ -79,7 +94,17 @@ export default function AppLayout({ children }: { children: ReactNode }) {
       >
         <RailContent pathname={pathname} collapsed={collapsed} />
       </aside>
-      <main className="bg-background min-w-0 flex-1">{children}</main>
+      <main className="bg-background min-w-0 flex-1">
+        {offline && (
+          <p
+            role="status"
+            className="border-border bg-muted text-small border-b px-4 py-2 text-center"
+          >
+            Can&apos;t reach the server right now. Trying again.
+          </p>
+        )}
+        {children}
+      </main>
     </div>
   );
 }

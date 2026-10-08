@@ -22,7 +22,7 @@ from typing import Any
 
 from anthropic import AsyncAnthropic
 
-from app.agent.models import PRICE_PER_MTOK
+from app.agent.models import price_per_mtok, resolve_model
 from app.config import settings
 
 #: Retries the SDK makes itself (connection errors, 408/409/429/5xx).
@@ -55,7 +55,7 @@ def cost_usd(model: str, usage: Any) -> float:
     """What a response cost, from its `usage` and `PRICE_PER_MTOK`."""
     tokens_in = int(getattr(usage, "input_tokens", 0) or 0)
     tokens_out = int(getattr(usage, "output_tokens", 0) or 0)
-    rate_in, rate_out = PRICE_PER_MTOK.get(model, (0.0, 0.0))
+    rate_in, rate_out = price_per_mtok(model)
     return round(rate_in * tokens_in / 1e6 + rate_out * tokens_out / 1e6, 6)
 
 
@@ -78,6 +78,7 @@ async def complete(
     """One user prompt, one text answer. Raises on failure (the SDK's typed
     errors, or `Refused`): callers decide whether a failed summary or title
     matters, and neither ever fails a turn."""
+    model = resolve_model(model)  # an alias never leaves the platform
     async with client(timeout_s) as api:
         response = await api.messages.create(
             model=model,

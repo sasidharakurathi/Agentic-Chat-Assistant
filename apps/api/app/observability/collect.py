@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.pool import QueuePool
 
@@ -168,8 +169,12 @@ async def _integrations(session: AsyncSession) -> list[Sample]:
     pending = Sample(
         "assistant_studio_approvals_pending", "Tool calls waiting for a person.", "gauge", ()
     )
+    # Past its expiry a row can't be decided (Phase 7a.7): not waiting.
     waiting = await session.scalar(
-        select(func.count(Approval.id)).where(Approval.status == ApprovalStatus.pending)
+        select(func.count(Approval.id)).where(
+            Approval.status == ApprovalStatus.pending,
+            or_(Approval.expires_at.is_(None), Approval.expires_at > datetime.now(UTC)),
+        )
     )
     pending.values.append(((), float(waiting or 0)))
     return [servers, pending]

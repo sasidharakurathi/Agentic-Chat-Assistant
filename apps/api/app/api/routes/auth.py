@@ -17,6 +17,7 @@ from app.schemas.auth import (
     UserOut,
 )
 from app.schemas.common import Message
+from app.security.tokens import TokenError, decode_refresh_token
 from app.services import auth as auth_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -74,10 +75,23 @@ async def login(
     return _pair(tokens)
 
 
-@router.post("/refresh", response_model=TokenPair, dependencies=[AUTH])
+@router.post(
+    "/refresh",
+    response_model=TokenPair,
+    dependencies=[per_ip_limit("refresh_ip", "rate_limit_refresh_ip")],
+)
 async def refresh(
     body: RefreshRequest, session: SessionDep, request: Request, ip: ClientIP
 ) -> TokenPair:
+    # Per session, not per address (Phase 7a.8): everyone behind one VPN or
+    # office NAT shares an IP, and a refresh that fails reads as a sign-out.
+    # A token that doesn't verify is refused by the service below.
+    try:
+        family = decode_refresh_token(body.refresh_token).family_id
+    except TokenError:
+        family = None
+    if family is not None:
+        await ratelimit.enforce("refresh", str(family), settings.rate_limit_refresh)
     tokens = await auth_service.rotate_refresh_token(
         session, token=body.refresh_token, user_agent=request.headers.get("user-agent"), ip=ip
     )

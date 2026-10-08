@@ -7,6 +7,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -20,11 +21,15 @@ import {
   type Org,
 } from "@/lib/api";
 import { inviteTokenFrom, safeNext } from "@/lib/safe-next";
+import { endsSession, retryDelayMs } from "@/lib/session";
 
 export { safeNext };
 
 type AuthState = {
   ready: boolean;
+  /** Signed in, but the server can't be reached right now (no network, or
+   *  it is busy or restarting): retrying, and still signed in (Phase 7a.8). */
+  offline: boolean;
   user: Me["user"] | null;
   orgs: Org[];
   activeOrgId: string | null;
@@ -48,8 +53,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [activeOrgId, setActiveOrgId] = useState<string | null>(null);
   const [memberships, setMemberships] = useState<Me["memberships"]>([]);
+  const [offline, setOffline] = useState(false);
+  /** Tries since the server was last reached, for the backoff. */
+  const attempts = useRef(0);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async () => {
+    if (retryTimer.current) clearTimeout(retryTimer.current);
+    retryTimer.current = null;
     if (!tokenStore.access) {
       setReady(true);
       return;
@@ -63,10 +74,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const valid = orgList.find((o) => o.id === stored)?.id ?? orgList[0]?.id ?? null;
       if (valid) orgStore.set(valid);
       setActiveOrgId(valid);
-    } catch {
-      tokenStore.clear();
-      orgStore.clear();
-      setUser(null);
+      attempts.current = 0;
+      setOffline(false);
+    } catch (err) {
+      if (endsSession(err)) {
+        // The server refused the tokens, even after a refresh.
+        tokenStore.clear();
+        orgStore.clear();
+        setUser(null);
+        setOffline(false);
+      } else {
+        // No network, or the server busy or restarting: still signed in.
+        // Try again later; coming back online or to the tab tries at once.
+        setOffline(true);
+        retryTimer.current = setTimeout(() => void load(), retryDelayMs(attempts.current++));
+      }
     } finally {
       setReady(true);
     }
@@ -75,6 +97,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!offline) return;
+    const now = () => void load();
+    const visible = () => document.visibilityState === "visible" && now();
+    window.addEventListener("online", now);
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      window.removeEventListener("online", now);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, [offline, load]);
+
+  useEffect(
+    () => () => {
+      if (retryTimer.current) clearTimeout(retryTimer.current);
+    },
+    [],
+  );
 
   const setActiveOrg = useCallback((id: string) => {
     orgStore.set(id);
@@ -124,6 +165,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AuthState>(
     () => ({
       ready,
+      offline,
       user,
       orgs,
       activeOrgId,
@@ -134,7 +176,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logout,
       refresh: load,
     }),
-    [ready, user, orgs, activeOrgId, memberships, setActiveOrg, login, register, logout, load],
+    [
+      ready,
+      offline,
+      user,
+      orgs,
+      activeOrgId,
+      memberships,
+      setActiveOrg,
+      login,
+      register,
+      logout,
+      load,
+    ],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

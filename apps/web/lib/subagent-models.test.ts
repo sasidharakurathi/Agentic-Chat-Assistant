@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { carryShared, followsShared, pickModel, selectedModel, setTurns } from "./subagent-models";
+import {
+  carryShared,
+  followsShared,
+  modelName,
+  pickModel,
+  selectedModel,
+  setTurns,
+} from "./subagent-models";
 
 const shared = { model: "claude-haiku-4-5", effort: "low" };
 
@@ -38,5 +45,23 @@ describe("subagent role models", () => {
     const next = carryShared(own, shared, { model: "claude-sonnet-5" });
     expect(next.retrieval).toEqual({ model: "claude-sonnet-5", effort: "low", max_turns: 3 });
     expect(next.sql).toBe(own.sql);
+  });
+});
+
+describe("model names (Phase 7a.6)", () => {
+  it("reads an alias as its family's latest model", () => {
+    expect(modelName("sonnet")).toBe("Sonnet (latest)");
+    expect(modelName("haiku")).toBe("Haiku (latest)");
+    expect(modelName("fable")).toBe("Fable (latest)");
+  });
+
+  it("reads the 5.5 models by name and version", () => {
+    expect(modelName("claude-sonnet-5-5")).toBe("Sonnet 5.5");
+    expect(modelName("claude-opus-5-5")).toBe("Opus 5.5");
+    expect(modelName("claude-fable-5-1")).toBe("Fable 5.1");
+  });
+
+  it("leaves a name it does not know as it is", () => {
+    expect(modelName("sonnet-ish")).toBe("sonnet-ish");
   });
 });

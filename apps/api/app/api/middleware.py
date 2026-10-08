@@ -10,6 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from app.api import ratelimit
 from app.logging import get_logger, request_id_ctx
 from app.observability import metrics
 
@@ -90,6 +91,12 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             path=template or request.url.path,
             status=response.status_code,
             elapsed_ms=elapsed_ms,
+            # Who, and from where (Phase 7a.8): the line alone used to say
+            # nothing about either, so the logs kept could not answer an
+            # incident's first question. The address is the one the rate
+            # limiter believes (TRUSTED_PROXY_HOPS).
+            user_id=getattr(request.state, "user_id", None),
+            client_ip=ratelimit.client_ip(request),
         )
         return response
 

@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import approval_registry as registry
@@ -18,8 +18,9 @@ from app.logging import get_logger
 from app.models.approval import Approval, ApprovalRisk, ApprovalStatus
 from app.models.conversation import Conversation
 from app.models.enums import MemberRole
-from app.models.membership import Membership
 from app.observability import metrics
+from app.security.access import member_of
+from app.services import audit
 
 log = get_logger(__name__)
 
@@ -63,6 +64,9 @@ async def list_pending(
         select(Approval).where(
             Approval.conversation_id == conversation_id,
             Approval.status == ApprovalStatus.pending,
+            # Past its expiry it can no longer be decided (Phase 7a.7), so it
+            # is not offered, even before the sweep closes it.
+            or_(Approval.expires_at.is_(None), Approval.expires_at > datetime.now(UTC)),
         ),
         [Approval.created_at, Approval.id],
         limit=limit,
@@ -87,18 +91,15 @@ async def assert_can_decide(
     This endpoint converts a refusal into a database write, so it is checked
     here rather than inherited from whatever route happened to load the row.
     It used to accept any member of the org: a teammate who can only read a
-    conversation could approve the change it was waiting on. That is the
-    same rule as posting into a conversation (`require_conversation_editor`).
+    conversation could approve the change it was waiting on. Admins still
+    decide here although they can no longer post (`require_conversation_starter`,
+    Phase 7a.4): plan D17 keeps today's in-chat approval until the executor
+    for admin-approved actions exists.
 
-    Someone outside the org gets 404, not 403, so the id confirms nothing.
+    Someone outside the org gets 404, not 403, so the id confirms nothing;
+    a role below the Studio floor is refused (Phase 7a.3).
     """
-    member = await session.scalar(
-        select(Membership).where(
-            Membership.org_id == approval.org_id, Membership.user_id == user_id
-        )
-    )
-    if member is None:
-        raise NotFound("Approval not found")
+    member = await member_of(session, approval.org_id, user_id, missing="Approval not found")
     if member.role.satisfies(MemberRole.admin):
         return
     owner = await session.scalar(
@@ -117,26 +118,54 @@ async def resolve(
     *,
     decision: str,
     user_id: uuid.UUID | None,
+    ip: str | None = None,
 ) -> Approval:
     """Record a human decision and wake whoever is waiting.
 
-    Rejects a second decision rather than overwriting the first: the tool has
-    already run (or not) by then, so accepting it would record something that
-    never happened.
+    One conditional UPDATE decides it (Phase 7a.7): only a row that is still
+    pending and not past its expiry changes. It used to read the row, then
+    write it, so two decisions could both pass the check, and a decision
+    arriving just after the turn gave up waiting was recorded as "approved"
+    although nothing ran. A second decision is refused rather than
+    overwriting the first: the tool has run (or not) by then.
     """
-    if approval.status is not ApprovalStatus.pending:
-        raise BadRequest(
-            f"this approval was already {approval.status.value}", code="approval_not_pending"
-        )
     if decision not in ("approved", "denied"):
         raise BadRequest("decision must be 'approved' or 'denied'", code="invalid_decision")
-
-    approval.status = ApprovalStatus(decision)
-    approval.decided_by = user_id
-    approval.decided_at = datetime.now(UTC)
-    await session.flush()
+    now = datetime.now(UTC)
+    won = await session.scalar(
+        update(Approval)
+        .where(
+            Approval.id == approval.id,
+            Approval.status == ApprovalStatus.pending,
+            or_(Approval.expires_at.is_(None), Approval.expires_at > now),
+        )
+        .values(status=ApprovalStatus(decision), decided_by=user_id, decided_at=now)
+        .returning(Approval.id)
+        .execution_options(synchronize_session=False)
+    )
+    if won is None:
+        await session.rollback()
+        await session.refresh(approval)
+        if approval.status is not ApprovalStatus.pending:
+            raise BadRequest(
+                f"this approval was already {approval.status.value}", code="approval_not_pending"
+            )
+        raise BadRequest("this approval has expired", code="approval_expired")
+    # In the same transaction as the decision: an audit entry exists exactly
+    # when a decision was recorded.
+    await audit.record(
+        session,
+        action=f"approval.{decision}",
+        org_id=approval.org_id,
+        actor_user_id=user_id,
+        target_type="approval",
+        target_id=approval.id,
+        meta={"tool": approval.tool_name, "conversation_id": str(approval.conversation_id)},
+        ip=ip,
+    )
     await session.commit()
-    if approval.created_at is not None:
+    await session.refresh(approval)
+    if approval.created_at is not None and approval.decided_at is not None:
         waited = (approval.decided_at - approval.created_at).total_seconds()
         metrics.APPROVAL_WAIT.observe(max(0.0, waited), decision)
 
@@ -147,19 +176,88 @@ async def resolve(
     return approval
 
 
-async def expire(approval_id: uuid.UUID) -> None:
-    """Mark a timed-out approval, in its own session.
+async def close(approval_id: uuid.UUID) -> ApprovalStatus | None:
+    """End a wait that got no answer (it timed out, was stopped, or its turn
+    is gone): a still-pending row becomes `expired`. Returns the row's status
+    as it now stands, so the turn acts on what was recorded.
 
-    Separate session because the turn's session is mid-stream and may be
-    rolled back; the record that nobody answered should survive regardless.
+    Conditional, like `resolve`: a decision that landed first is never
+    overwritten. Its own session, because the turn's session is mid-stream
+    and may be rolled back; the record must survive regardless.
     """
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        row = await session.get(Approval, approval_id)
-        if row is not None and row.status is ApprovalStatus.pending:
-            row.status = ApprovalStatus.expired
-            row.decided_at = datetime.now(UTC)
-            await session.commit()
+    async with get_sessionmaker()() as session:
+        now = datetime.now(UTC)
+        await session.execute(
+            update(Approval)
+            .where(Approval.id == approval_id, Approval.status == ApprovalStatus.pending)
+            .values(status=ApprovalStatus.expired, decided_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+        status = await session.scalar(select(Approval.status).where(Approval.id == approval_id))
+        return ApprovalStatus(status) if status is not None else None
 
 
-__all__ = ["assert_can_decide", "create", "expire", "get", "list_pending", "resolve"]
+async def cancel_unrun(approval_id: uuid.UUID) -> None:
+    """An approval that was given but whose action will never run, because
+    its turn stopped first: recorded as `cancelled`, so the row never claims
+    something happened that didn't (Phase 7a.7)."""
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(Approval)
+            .where(Approval.id == approval_id, Approval.status == ApprovalStatus.approved)
+            .values(status=ApprovalStatus.cancelled)
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+
+
+#: How long past its expiry a pending approval may stay before the sweep
+#: closes it: the waiting turn closes its own at expiry, so anything older
+#: belongs to a process that died (an OOM kill, a restart mid-wait).
+ORPHAN_GRACE_S = 60
+
+
+async def sweep_orphaned(now: datetime | None = None) -> int:
+    """Close approvals a dead process left pending past their expiry, each
+    with an audit entry by the system (Phase 7a.7). Before this nothing did,
+    so they stayed "pending" forever and could still be offered."""
+    cutoff = (now or datetime.now(UTC)) - timedelta(seconds=ORPHAN_GRACE_S)
+    async with get_sessionmaker()() as session:
+        rows = (
+            await session.execute(
+                update(Approval)
+                .where(Approval.status == ApprovalStatus.pending, Approval.expires_at < cutoff)
+                .values(status=ApprovalStatus.expired, decided_at=datetime.now(UTC))
+                .returning(
+                    Approval.id, Approval.org_id, Approval.conversation_id, Approval.tool_name
+                )
+                .execution_options(synchronize_session=False)
+            )
+        ).all()
+        for approval_id, org_id, conversation_id, tool in rows:
+            await audit.record(
+                session,
+                action="approval.expired",
+                org_id=org_id,
+                target_type="approval",
+                target_id=approval_id,
+                meta={"reason": "orphaned", "tool": tool, "conversation_id": str(conversation_id)},
+            )
+        await session.commit()
+    if rows:
+        log.info("approvals_orphaned_closed", count=len(rows))
+    return len(rows)
+
+
+__all__ = [
+    "ORPHAN_GRACE_S",
+    "assert_can_decide",
+    "cancel_unrun",
+    "close",
+    "create",
+    "get",
+    "list_pending",
+    "resolve",
+    "sweep_orphaned",
+]
