@@ -291,6 +291,7 @@ async def test_recommending_for_an_assistant_previews_and_saves_nothing(
             "expose_write": False,
             "agent": True,
             "subagents": [],
+            "actions": [],
         }
     ]
     assert "Adds the database Shop PG." in body["changes"]

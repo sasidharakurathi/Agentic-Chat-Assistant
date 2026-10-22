@@ -16,13 +16,19 @@ import { PageHeader } from "@/components/ui/page-header";
 import { SampleList } from "@/components/samples/SampleList";
 import { useToast } from "@/components/ui/toast";
 import { ApiError, assistants, type Assistant } from "@/lib/api";
+import { ASSISTANT_STATUS_WORD } from "@/lib/assistant-lifecycle";
 import { useAuth } from "@/lib/auth";
 import { failureMessage, formatDate, formatRelative } from "@/lib/format";
 
-const STATUS: Record<Assistant["status"], { label: string; variant: "success" | "muted" }> = {
-  published: { label: "Published", variant: "success" },
-  draft: { label: "Draft", variant: "muted" },
-  archived: { label: "Archived", variant: "muted" },
+/** Where each assistant stands in Chat (Phase 7b.1): the words are the
+ *  builder header's, so the two never disagree. */
+const STATUS: Record<
+  Assistant["status"],
+  { label: string; variant: "success" | "warning" | "muted" }
+> = {
+  published: { label: ASSISTANT_STATUS_WORD.published, variant: "success" },
+  draft: { label: ASSISTANT_STATUS_WORD.draft, variant: "muted" },
+  archived: { label: ASSISTANT_STATUS_WORD.archived, variant: "warning" },
 };
 
 function reason(err: unknown): string | null {

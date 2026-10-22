@@ -28,8 +28,10 @@ import type { FlowOptions, GraphIssues } from "@/components/canvas/graph-sync";
 import { GRID, mergeFlowEdges, mergeFlowNodes, toFlow } from "@/components/canvas/graph-sync";
 import { RouteConnectionLine, RouteEdge } from "@/components/canvas/RouteEdge";
 import { StudioNode } from "@/components/canvas/StudioNode";
+import { TrafficContext, type TrafficView } from "@/components/canvas/traffic-context";
 import type { LineFamily } from "@/components/ui/line-bullet";
-import type { Graph, GraphSchema } from "@/lib/api";
+import { busyEdges } from "@/lib/analytics";
+import type { AssistantTraffic, Graph, GraphSchema } from "@/lib/api";
 
 const nodeTypes: NodeTypes = { studio: StudioNode };
 
@@ -77,6 +79,7 @@ export function Canvas({
   diff,
   readOnly = false,
   label,
+  traffic = null,
 }: {
   graph: Graph;
   /** Wiring rules from `GET /meta/graph-schema` — the validator's own
@@ -107,6 +110,8 @@ export function Canvas({
   readOnly?: boolean;
   /** What this drawing is, for a screen reader (the builder's is its tab). */
   label?: string;
+  /** Live traffic to draw on the stations and lines (Phase 10.2), or null. */
+  traffic?: AssistantTraffic | null;
 }) {
   const { resolvedTheme } = useTheme();
   const flow = useMemo(
@@ -116,6 +121,10 @@ export function Canvas({
   );
   const [keyFocus, setKeyFocus] = useState<LineFamily | null>(null);
   const view = useMemo(() => ({ keyFocus }), [keyFocus]);
+  const trafficView = useMemo<TrafficView>(
+    () => (traffic ? { nodes: traffic.nodes, edges: busyEdges(graph, traffic.nodes) } : null),
+    [traffic, graph],
+  );
 
   // React Flow's own copy of the nodes and edges. It reports each node's
   // measured size, drags and selection through onNodesChange / onEdgesChange,
@@ -301,69 +310,71 @@ export function Canvas({
 
   return (
     <CanvasViewContext.Provider value={view}>
-      <div
-        ref={box}
-        className="studio-canvas relative h-full w-full"
-        onPointerDownCapture={() => {
-          byKeyboard.current = false;
-        }}
-        onKeyDownCapture={() => {
-          byKeyboard.current = true;
-        }}
-      >
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          nodeTypes={nodeTypes}
-          edgeTypes={edgeTypes}
-          onNodeClick={handleNodeClick}
-          onSelectionChange={handleSelectionChange}
-          onPaneClick={() => onSelect(null)}
-          onNodeDragStop={(_, node) => onNodeMoved(node.id, node.position)}
-          aria-label={label}
-          nodesDraggable={!readOnly}
-          // Only the pair is saved: which of the Agent's inputs a line uses
-          // is worked out again from positions every render.
-          onConnect={(c) => c.source && c.target && onConnect?.(c.source, c.target)}
-          isValidConnection={isValidConnection}
-          onNodesDelete={(ns: Node[]) => onDeleteNodes?.(ns.map((n) => n.id))}
-          onEdgesDelete={(es: Edge[]) =>
-            onDeleteEdges?.(es.map((e) => ({ source: e.source, target: e.target })))
-          }
-          // Wiring: releasing anywhere within 40px of an input connects to it,
-          // and a click on an output then an input works as well as a drag.
-          connectionRadius={40}
-          connectOnClick
-          connectionLineComponent={RouteConnectionLine}
-          defaultEdgeOptions={{ interactionWidth: 16 }}
-          snapToGrid
-          snapGrid={[GRID, GRID]}
-          colorMode={resolvedTheme === "dark" ? "dark" : "light"}
-          fitView
-          fitViewOptions={{ padding: 0.2 }}
-          // React Flow stops zooming out at 0.5, which cannot show a pipeline
-          // of a hundred stations, or a comparison in a narrow column: "fit
-          // everything in view" then cut both ends off.
-          minZoom={0.1}
-          proOptions={{ hideAttribution: true }}
-          onInit={(flowInstance) => {
-            instance.current = flowInstance;
+      <TrafficContext.Provider value={trafficView}>
+        <div
+          ref={box}
+          className="studio-canvas relative h-full w-full"
+          onPointerDownCapture={() => {
+            byKeyboard.current = false;
           }}
-          ariaLabelConfig={ARIA_LABELS}
-          nodesConnectable={Boolean(onConnect) && !readOnly}
-          deleteKeyCode={onDeleteNodes && !readOnly ? ["Backspace", "Delete"] : null}
+          onKeyDownCapture={() => {
+            byKeyboard.current = true;
+          }}
         >
-          <Background gap={GRID} size={1.25} />
-          <Controls showInteractive={false} position="bottom-left" />
-        </ReactFlow>
-        {/* Next to the zoom controls (React Flow's panel sits 15px in and
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
+            onNodeClick={handleNodeClick}
+            onSelectionChange={handleSelectionChange}
+            onPaneClick={() => onSelect(null)}
+            onNodeDragStop={(_, node) => onNodeMoved(node.id, node.position)}
+            aria-label={label}
+            nodesDraggable={!readOnly}
+            // Only the pair is saved: which of the Agent's inputs a line uses
+            // is worked out again from positions every render.
+            onConnect={(c) => c.source && c.target && onConnect?.(c.source, c.target)}
+            isValidConnection={isValidConnection}
+            onNodesDelete={(ns: Node[]) => onDeleteNodes?.(ns.map((n) => n.id))}
+            onEdgesDelete={(es: Edge[]) =>
+              onDeleteEdges?.(es.map((e) => ({ source: e.source, target: e.target })))
+            }
+            // Wiring: releasing anywhere within 40px of an input connects to it,
+            // and a click on an output then an input works as well as a drag.
+            connectionRadius={40}
+            connectOnClick
+            connectionLineComponent={RouteConnectionLine}
+            defaultEdgeOptions={{ interactionWidth: 16 }}
+            snapToGrid
+            snapGrid={[GRID, GRID]}
+            colorMode={resolvedTheme === "dark" ? "dark" : "light"}
+            fitView
+            fitViewOptions={{ padding: 0.2 }}
+            // React Flow stops zooming out at 0.5, which cannot show a pipeline
+            // of a hundred stations, or a comparison in a narrow column: "fit
+            // everything in view" then cut both ends off.
+            minZoom={0.1}
+            proOptions={{ hideAttribution: true }}
+            onInit={(flowInstance) => {
+              instance.current = flowInstance;
+            }}
+            ariaLabelConfig={ARIA_LABELS}
+            nodesConnectable={Boolean(onConnect) && !readOnly}
+            deleteKeyCode={onDeleteNodes && !readOnly ? ["Backspace", "Delete"] : null}
+          >
+            <Background gap={GRID} size={1.25} />
+            <Controls showInteractive={false} position="bottom-left" />
+          </ReactFlow>
+          {/* Next to the zoom controls (React Flow's panel sits 15px in and
             is 34px wide). Capped to the canvas height, opening upward. */}
-        <div className="pointer-events-none absolute top-3 bottom-[15px] left-16 z-10 flex">
-          <CanvasKey graph={graph} onFocusFamily={setKeyFocus} />
+          <div className="pointer-events-none absolute top-3 bottom-[15px] left-16 z-10 flex">
+            <CanvasKey graph={graph} onFocusFamily={setKeyFocus} />
+          </div>
         </div>
-      </div>
+      </TrafficContext.Provider>
     </CanvasViewContext.Provider>
   );
 }

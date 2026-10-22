@@ -13,8 +13,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, UUIDPrimaryKeyMixin
@@ -33,6 +33,9 @@ class DataSourceStatus(enum.StrEnum):
     processing = "processing"
     ready = "ready"
     error = "error"
+    #: Not indexed until its builder decides (Phase 9.4): it holds
+    #: credentials or identity numbers and everyone could read it.
+    held = "held"
 
 
 class DataSource(UUIDPrimaryKeyMixin, Base):
@@ -69,6 +72,18 @@ class DataSource(UUIDPrimaryKeyMixin, Base):
     #: What the last ingestion did: chunks, reuse, context coverage, cost.
     #: See `app.rag.ingest.IngestReport`.
     ingest_report: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    #: Who may read it (Phase 9.4, plan D6). Deny by default: no groups and
+    #: not `everyone` is nobody, and a deleted group's id simply matches no
+    #: one. Sources from before 9.4 are everyone's, as they were.
+    everyone: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    group_ids: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    #: The content its builder confirmed everyone may read despite the scan
+    #: (`rag.sensitivity`): new content is scanned and asked about again.
+    sensitive_confirmed_checksum: Mapped[str | None] = mapped_column(String(128))
 
 
 class Document(UUIDPrimaryKeyMixin, Base):
@@ -92,6 +107,11 @@ class Document(UUIDPrimaryKeyMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime(), server_default=func.now(), nullable=False
     )
+    #: Replaced by a newer index of its source, but kept because a version
+    #: still uses it (Phase 7b.1): Chat goes on answering from the copy an
+    #: admin approved, while previews see only current documents. Removed
+    #: once no submitted or approved version names it.
+    superseded_at: Mapped[datetime | None] = mapped_column(TZDateTime())
 
 
 def _postgres_only(index: Index) -> Index:

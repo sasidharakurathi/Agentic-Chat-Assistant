@@ -20,11 +20,14 @@ from app.db.session import get_sessionmaker
 from app.graph.compile import compile_graph
 from app.graph.nodes import Graph
 from app.graph.project import project_config
+from app.models.approval import Approval, ApprovalStatus
 from app.models.conversation import ToolCall
 from app.schemas.assistant_config import ApprovalPolicy, McpServerRef
 from app.services import chat as chat_svc
+from app.services import executor
 from httpx import AsyncClient
 from sqlalchemy import select
+from tests.pending import decide
 
 pytestmark = pytest.mark.anyio
 
@@ -139,7 +142,7 @@ async def _setup(
     put = await client.put(f"/api/v1/assistants/{a['id']}/draft-config", json=cfg, headers=headers)
     assert put.status_code == 200, put.text
     conv = await client.post(
-        f"/api/v1/assistants/{a['id']}/conversations", json={}, headers=headers
+        f"/api/v1/assistants/{a['id']}/conversations", json={"mode": "preview"}, headers=headers
     )
     return a["id"], conv.json()["id"]
 
@@ -204,40 +207,35 @@ async def test_the_assistant_switch_off_beats_a_tool_rule(
 
 
 @pytest.mark.parametrize(
-    ("decision", "status", "permission"),
-    [
-        ("approved", "success", "approved"),
-        ("denied", "denied", "declined"),
-    ],
+    ("decision", "ended"),
+    [("approved", ApprovalStatus.succeeded), ("denied", ApprovalStatus.denied)],
 )
 async def test_a_person_decides_and_the_audit_says_who_did(
     client: AsyncClient,
     org_headers: dict[str, str],
     use_runner: str,
     decision: str,
-    status: str,
-    permission: str,
+    ended: ApprovalStatus,
 ) -> None:
+    """Since Phase 9.1 the call is stored, not run, in its turn; deciding it
+    afterwards runs it through the server's own connection, once."""
     _, cid = await _setup(client, org_headers, ref={}, default="require")
     events: list[Any] = []
-    task = asyncio.create_task(_turn(cid, "mcp: echo.environment {}", events))
-    prompt = None
-    for _ in range(500):
-        prompt = next((e for e in events if e.type == "approval_required"), None)
-        if prompt is not None or task.done():
-            break
-        await asyncio.sleep(0.02)
+    await asyncio.wait_for(_turn(cid, "mcp: echo.environment {}", events), 60)
+    prompt = next((e for e in events if e.type == "approval_required"), None)
     assert prompt is not None, [e.type for e in events]
-    r = await client.post(
-        f"/api/v1/approvals/{prompt.approval_id}:resolve",
-        json={"decision": decision},
-        headers=org_headers,
-    )
-    assert r.status_code == 200, r.text
-    await asyncio.wait_for(task, 60)
     result = next(e for e in events if e.type == "tool_result")
-    assert (result.status, result.permission) == (status, permission)
-    assert await _audit(cid) == [("mcp__echo__environment", status, permission)]
+    assert (result.status, result.permission) == ("denied", "queued")
+    assert await _audit(cid) == [("mcp__echo__environment", "denied", "queued")]
+
+    r = await decide(client, org_headers, prompt.approval_id, decision)
+    assert r.status_code == 200, r.text
+    await executor.drain()
+    async with get_sessionmaker()() as s:
+        row = await s.get(Approval, uuid.UUID(prompt.approval_id))
+        assert row is not None
+        assert row.status is ended, row.result
+        assert row.decided_by is not None
 
 
 async def test_a_refusal_says_which_rule_and_where(

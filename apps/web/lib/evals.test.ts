@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import type { EvalCaseResult, EvalRunDetail } from "./api";
+import type { EvalCaseDraft, EvalCaseResult, EvalRunDetail } from "./api";
 import {
+  CSV_COLUMNS,
+  casesToCsv,
+  casesToJson,
   checkText,
   compareRuns,
   expectations,
@@ -95,6 +98,72 @@ describe("parseCasesFile", () => {
     expect(parseCasesFile('{"rows":[]}', "x.json").problems).toEqual([
       'Expected a list of cases, or an object with a "cases" list.',
     ]);
+  });
+});
+
+describe("follow-up messages (Phase 9.8)", () => {
+  it("reads them from a CSV column and from JSON, dropping blanks", () => {
+    const csv = [
+      "input,follow_ups,contains",
+      'How do I reset my password?,"And if I lost my phone? | | Thanks, anything else?",4400',
+      "Single question,,",
+    ].join("\n");
+    const { cases, problems } = parseCasesFile(csv, "cases.csv");
+    expect(problems).toEqual([]);
+    expect(cases[0].follow_ups).toEqual(["And if I lost my phone?", "Thanks, anything else?"]);
+    expect("follow_ups" in cases[1]).toBe(false);
+
+    const json = parseCasesFile(
+      JSON.stringify([{ input: "q", follow_ups: [" then? ", "", 3, "and now?"] }, { input: "r" }]),
+      "x.json",
+    );
+    expect(json.cases[0].follow_ups).toEqual(["then?", "and now?"]);
+    expect("follow_ups" in json.cases[1]).toBe(false);
+  });
+
+  const drafts: EvalCaseDraft[] = [
+    {
+      input: "How do I reset my password?",
+      follow_ups: ["And if I lost my phone?", 'Say "thanks", then stop'],
+      expected: {
+        reference: "Call 4400.",
+        contains: ["4400"],
+        not_contains: [],
+        tools: ["kb_search"],
+        cites: true,
+        refuses: false,
+        expects_approval: true,
+      },
+      labels: { relevant_sources: ["Passwords and two-factor"] },
+    },
+    {
+      input: "Just one, with a comma, here",
+      expected: {
+        reference: null,
+        contains: [],
+        not_contains: ["sorry"],
+        tools: [],
+        cites: false,
+        refuses: false,
+      },
+      labels: { relevant_sources: [] },
+    },
+  ];
+
+  it("survive a CSV export and import", () => {
+    const text = casesToCsv(drafts);
+    expect(text.split("\n")[0]).toBe(CSV_COLUMNS.join(","));
+    expect(parseCasesFile(text, "cases.csv")).toEqual({ cases: drafts, problems: [] });
+  });
+
+  it("survive a JSON export and import", () => {
+    const back = parseCasesFile(casesToJson(drafts), "cases.json");
+    expect(back.problems).toEqual([]);
+    expect(back.cases.map((c) => [c.input, c.follow_ups])).toEqual(
+      drafts.map((c) => [c.input, c.follow_ups]),
+    );
+    expect(back.cases[0].expected).toEqual(drafts[0].expected);
+    expect(back.cases[0].labels?.relevant_sources).toEqual(["Passwords and two-factor"]);
   });
 });
 

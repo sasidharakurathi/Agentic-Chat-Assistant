@@ -30,6 +30,7 @@ from app.schemas.assistant_config import AssistantConfig
 from httpx import AsyncClient
 from pydantic import ValidationError
 from sqlalchemy import select
+from tests.pending import decide
 
 pytestmark = pytest.mark.anyio
 
@@ -92,7 +93,9 @@ async def _allow(
 
 
 async def _chat(client: AsyncClient, headers: dict[str, str], aid: str, text: str) -> list[dict]:
-    conv = await client.post(f"/api/v1/assistants/{aid}/conversations", json={}, headers=headers)
+    conv = await client.post(
+        f"/api/v1/assistants/{aid}/conversations", json={"mode": "preview"}, headers=headers
+    )
     events: list[dict] = []
     async with client.stream(
         "POST",
@@ -355,7 +358,7 @@ async def test_auto_runs_read_only_tools_only(
     sid = await _echo_server(client, org_headers, a["id"])
     await _allow(client, org_headers, a, sid, ["echo", "environment"], mcp_default="auto")
     conv = await client.post(
-        f"/api/v1/assistants/{a['id']}/conversations", json={}, headers=org_headers
+        f"/api/v1/assistants/{a['id']}/conversations", json={"mode": "preview"}, headers=org_headers
     )
     events: list[Any] = []
 
@@ -377,11 +380,8 @@ async def test_auto_runs_read_only_tools_only(
         await asyncio.sleep(0.02)
     assert prompt is not None, f"a tool not declared read-only ran unasked: {events}"
     assert prompt.rationale.startswith("echo: environment(")
-    await client.post(
-        f"/api/v1/approvals/{prompt.approval_id}:resolve",
-        json={"decision": "denied"},
-        headers=org_headers,
-    )
+    # Stored, not run (Phase 9.1): the turn has ended by itself.
     await asyncio.wait_for(task, 30)
+    assert (await decide(client, org_headers, prompt.approval_id, "denied")).status_code == 200
     result = next(e for e in events if e.type == "tool_result")
     assert result.status == "denied"

@@ -149,7 +149,7 @@ async def test_a_turn_never_streams_a_secret_a_tool_returned(
     async def leaky(_args: dict[str, Any]) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": f"api_key | {SECRETS['anthropic']}"}]}
 
-    def build(_aid: uuid.UUID, _dbs: list[Any]) -> list[CapabilityTool]:
+    def build(_aid: uuid.UUID, _dbs: list[Any], _asker: Any = None) -> list[CapabilityTool]:
         return [CapabilityTool("sql_query", "stub", {"type": "object"}, leaky)]
 
     monkeypatch.setattr("app.agent.options.build_sql_tools", build)

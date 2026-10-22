@@ -20,6 +20,7 @@ from app.services import chat as chat_svc
 from httpx import AsyncClient
 from sqlalchemy import select
 from tests.test_chat import _new_assistant
+from tests.versions import go_live
 
 pytestmark = pytest.mark.anyio
 
@@ -28,6 +29,7 @@ async def test_conversations_can_be_tagged_and_listed_per_end_user(
     client: AsyncClient, org_headers: dict[str, str]
 ) -> None:
     aid = await _new_assistant(client, org_headers)
+    await go_live(client, aid, org_headers)
     url = f"/api/v1/assistants/{aid}/conversations"
     alice = await client.post(url, json={"external_user_ref": "user-alice"}, headers=org_headers)
     await client.post(url, json={"external_user_ref": "user-bob"}, headers=org_headers)
@@ -57,7 +59,9 @@ async def test_tool_events_are_previews(
 ) -> None:
     monkeypatch.setattr("app.agent.runtime.get_driver", _NoisyTool)
     aid = await _new_assistant(client, org_headers)
-    r = await client.post(f"/api/v1/assistants/{aid}/conversations", json={}, headers=org_headers)
+    r = await client.post(
+        f"/api/v1/assistants/{aid}/conversations", json={"mode": "preview"}, headers=org_headers
+    )
     cid = uuid.UUID(r.json()["id"])
     async with get_sessionmaker()() as session:
         events = [e async for e in chat_svc.run_message(session, conversation_id=cid, text="q")]

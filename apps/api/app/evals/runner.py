@@ -6,6 +6,19 @@ Each case is one message in its own hidden conversation, answered by
 to the version under test and nobody is there to approve anything
 (`chat.Unattended`). So a result has what any turn has: a run row, its
 steps, its trace, and its spend on the ledger and against the budgets.
+That spend is builder testing's (Phase 9.7): every ledger row a case
+writes is under its hidden conversation, judge and retrieval included, so
+it counts toward the builder budget and never the pilot's.
+
+A case with follow-ups (Phase 9.8) asks its question, then each follow-up
+in order, all in that one conversation, as a person would. The rule for
+grading it: the checks, the judge and retrieval are about the LAST answer
+(and the last question), except `tools` and `expects_approval`, which look
+at every call any of the case's turns made, because the tool a case wants
+is often the one its first question needed. Cost adds up across the turns
+(it is the conversation's). A turn that fails stops the case there: it is
+failed, with the reason and which turn it was. A case without follow-ups
+is scored exactly as before, and its result has no `turns`.
 
 Then three kinds of score, each optional:
 
@@ -44,7 +57,7 @@ from app.evals.checks import run_checks
 from app.evals.labels import score_retrieval
 from app.logging import get_logger
 from app.models.assistant import Assistant, AssistantVersion
-from app.models.conversation import Conversation, Message
+from app.models.conversation import Conversation, Message, ToolCall
 from app.models.evals import EvalCase, EvalCaseResult, EvalRun, EvalRunStatus, EvalSuite
 from app.models.usage import UsageEvent, UsageKind
 from app.rag import usage as rag_usage
@@ -55,16 +68,23 @@ from app.services import budgets, chat
 log = get_logger(__name__)
 
 #: Error codes after which no later case could run either.
-_STOPS_THE_RUN = frozenset({"budget_exceeded"})
+_STOPS_THE_RUN = frozenset({"budget_exceeded", "builder_budget"})
 TITLE_CHARS = 80
+#: How much of each earlier answer the judge is shown, for context (9.8).
+CONTEXT_CHARS = 1_500
 
 
 @dataclass
 class _Turn:
-    """What one case's turn produced."""
+    """What one case's turn produced. For a case with follow-ups (Phase
+    9.8), the case as a whole: the last answer and its sources, every turn's
+    tools and calls, the first error, and the conversation's cost."""
 
     answer: str = ""
     tools: list[str] = field(default_factory=list)
+    #: Every call the turn made, with how it was permitted (Phase 10.4):
+    #: `{"name", "input", "permission", "status"}`, from its ToolCall rows.
+    calls: list[dict[str, Any]] = field(default_factory=list)
     passages: list[judge_mod.Passage] = field(default_factory=list)
     error: str | None = None
     error_code: str | None = None
@@ -73,6 +93,8 @@ class _Turn:
     trace_id: str | None = None
     cost_usd: float = 0.0
     duration_ms: int = 0
+    #: Each turn of a case with follow-ups, for the results view (9.8).
+    turns: list[dict[str, Any]] = field(default_factory=list)
 
 
 async def _config(session: AsyncSession, run: EvalRun, assistant: Assistant) -> AssistantConfig:
@@ -84,10 +106,12 @@ async def _config(session: AsyncSession, run: EvalRun, assistant: Assistant) -> 
     return AssistantConfig.model_validate(assistant.draft_config)
 
 
-def _spend_row(run: EvalRun, spend: Spend) -> UsageEvent:
+def _spend_row(run: EvalRun, spend: Spend, conv_id: uuid.UUID) -> UsageEvent:
     return UsageEvent(
         org_id=run.org_id,
         assistant_id=run.assistant_id,
+        # Under the case's conversation: builder testing's (Phase 9.7).
+        conversation_id=conv_id,
         kind=UsageKind.llm,
         model=spend.model,
         tokens_in=spend.tokens_in,
@@ -104,10 +128,8 @@ async def _recover(session: AsyncSession, run: EvalRun, case: EvalCase) -> None:
     await session.refresh(case)
 
 
-async def _take_turn(
-    session: AsyncSession, run: EvalRun, case: EvalCase
-) -> tuple[_Turn, uuid.UUID]:
-    """Ask the case's question in a conversation of its own."""
+async def _open_conversation(session: AsyncSession, run: EvalRun, case: EvalCase) -> uuid.UUID:
+    """The case's hidden conversation: every one of its turns goes here."""
     title = " ".join(case.input.split())[:TITLE_CHARS]
     conv = Conversation(
         assistant_id=run.assistant_id,
@@ -120,13 +142,23 @@ async def _take_turn(
     )
     session.add(conv)
     await session.commit()
-    conv_id = conv.id
+    return conv.id
 
+
+async def _conversation_cost(session: AsyncSession, conv_id: uuid.UUID) -> float:
+    spent = await session.scalar(select(Conversation.cost_usd).where(Conversation.id == conv_id))
+    return float(spent or 0)
+
+
+async def _ask(
+    session: AsyncSession, run: EvalRun, case: EvalCase, conv_id: uuid.UUID, text: str
+) -> _Turn:
+    """Send one message in the case's conversation and read what came back."""
     turn = _Turn()
     started = time.perf_counter()
     pin = chat.Unattended(version_id=run.assistant_version_id)
     try:
-        stream = chat.run_message(session, conversation_id=conv_id, text=case.input, unattended=pin)
+        stream = chat.run_message(session, conversation_id=conv_id, text=text, unattended=pin)
         async with contextlib.aclosing(stream) as events:
             async for ev in events:
                 if isinstance(ev, ToolCallEvent):
@@ -159,15 +191,100 @@ async def _take_turn(
                 for b in message.blocks or []
                 if b.get("type") == "citation"
             ]
-    spent = await session.scalar(select(Conversation.cost_usd).where(Conversation.id == conv_id))
-    turn.cost_usd = float(spent or 0)
-    return turn, conv_id
+    return turn
+
+
+def _turn_row(text: str, turn: _Turn, cost_usd: float) -> dict[str, Any]:
+    """One turn as the result's `scores["turns"]` keeps it (Phase 9.8)."""
+    return {
+        "input": text,
+        "output": turn.answer,
+        "tools": list(turn.tools),
+        "error": turn.error,
+        "cost_usd": round(max(cost_usd, 0.0), 6),
+        "duration_ms": turn.duration_ms,
+        "run_id": turn.run_id,
+        "trace_id": turn.trace_id,
+    }
+
+
+async def _take_turn(
+    session: AsyncSession, run: EvalRun, case: EvalCase
+) -> tuple[_Turn, uuid.UUID]:
+    """Ask the case's question, then each follow-up (Phase 9.8), in one
+    conversation of its own. Returns the case as one `_Turn` (see there)."""
+    conv_id = await _open_conversation(session, run, case)
+    messages = [case.input, *case.follow_ups]
+    multi = len(messages) > 1
+    whole = _Turn()
+    spent_before = 0.0
+    for n, text in enumerate(messages, start=1):
+        turn = await _ask(session, run, case, conv_id, text)
+        spent = await _conversation_cost(session, conv_id)
+        if multi:
+            whole.turns.append(_turn_row(text, turn, spent - spent_before))
+        spent_before = spent
+        # The last turn asked is the one graded.
+        whole.answer, whole.passages = turn.answer, turn.passages
+        whole.tools += turn.tools
+        whole.duration_ms += turn.duration_ms
+        if turn.run_id is not None:
+            whole.message_id, whole.run_id, whole.trace_id = (
+                turn.message_id,
+                turn.run_id,
+                turn.trace_id,
+            )
+        if turn.error is not None:
+            whole.error_code = turn.error_code
+            whole.error = (
+                f"Turn {n} of {len(messages)} failed, so the case stopped there: {turn.error}"
+                if multi
+                else turn.error
+            )
+            break
+    whole.cost_usd = spent_before
+    # Every call of every turn: `tools` and `expects_approval` look at all.
+    whole.calls = [
+        {"name": c.tool_name, "input": c.input, "permission": c.permission, "status": c.status}
+        for c in await session.scalars(
+            select(ToolCall)
+            .where(ToolCall.conversation_id == conv_id)
+            .order_by(ToolCall.created_at)
+        )
+    ]
+    return whole, conv_id
+
+
+def _last_question(case: EvalCase, turn: _Turn) -> str:
+    return str(turn.turns[-1]["input"]) if turn.turns else case.input
+
+
+def _graded_question(case: EvalCase, turn: _Turn) -> str:
+    """The question the last answer answers. For a case with follow-ups
+    (Phase 9.8), the last message asked, with the turns before it for
+    context: "and if I lost my phone?" means little on its own."""
+    earlier = turn.turns[:-1]
+    if not earlier:
+        return _last_question(case, turn)
+    lines = ["Earlier in this conversation:"]
+    for row in earlier:
+        lines.append(f"User: {row['input']}")
+        lines.append(f"Assistant: {str(row['output'])[:CONTEXT_CHARS]}")
+    lines += ["", f"The question being graded: {turn.turns[-1]['input']}"]
+    return "\n".join(lines)
 
 
 async def _retrieval(
-    session: AsyncSession, run: EvalRun, case: EvalCase, labels: EvalLabels, config: AssistantConfig
+    session: AsyncSession,
+    run: EvalRun,
+    case: EvalCase,
+    labels: EvalLabels,
+    config: AssistantConfig,
+    conv_id: uuid.UUID,
+    question: str | None = None,
 ) -> tuple[dict[str, Any] | None, float]:
-    """Retrieval scores for a labelled case, and what the lookup cost."""
+    """Retrieval scores for a labelled case, and what the lookup cost.
+    `question`: the last message asked, for a case with follow-ups (9.8)."""
     if not labels.any:
         return None, 0.0
     if not config.rag.enabled:
@@ -177,7 +294,7 @@ async def _retrieval(
             scores = await score_retrieval(
                 session,
                 assistant_id=run.assistant_id,
-                question=case.input,
+                question=question or case.input,
                 labels=labels,
                 config=config.rag.retrieval,
             )
@@ -190,6 +307,7 @@ async def _retrieval(
             UsageEvent(
                 org_id=run.org_id,
                 assistant_id=run.assistant_id,
+                conversation_id=conv_id,
                 kind=UsageKind(line.kind),
                 model=line.model,
                 tokens_in=line.tokens,
@@ -208,25 +326,26 @@ async def _judge(
     turn: _Turn,
     config: AssistantConfig,
     suite: EvalSuiteConfig,
+    conv_id: uuid.UUID,
 ) -> tuple[dict[str, Any] | None, float]:
     """The judge's verdict, and what it cost. None when it doesn't apply:
     the suite doesn't want it, the real model is off, or there is no answer
     to grade."""
     if not suite.judge or turn.error or not claude_api.real_model_allowed():
         return None, 0.0
-    over = (await budgets.gate(session, run.org_id, run.assistant_id)).exceeded
+    over = (await budgets.gate(session, run.org_id, run.assistant_id, builder=True)).exceeded
     if over is not None:
         return {"error": over.exceeded_message()}, 0.0
     try:
         result, spend = await judge_mod.judge(
             config,
-            question=case.input,
+            question=_graded_question(case, turn),
             answer=turn.answer,
             expected=expected,
             passages=turn.passages,
         )
     except AssistFailed as exc:
-        session.add(_spend_row(run, exc.spend))  # billed all the same
+        session.add(_spend_row(run, exc.spend, conv_id))  # billed all the same
         why = (
             "The judge declined to grade this answer."
             if exc.reason == "refused"
@@ -236,7 +355,7 @@ async def _judge(
     except anthropic.APIError as exc:
         log.warning("eval_judge_failed", error=type(exc).__name__)
         return {"error": "The judge model couldn't be reached."}, 0.0
-    session.add(_spend_row(run, spend))
+    session.add(_spend_row(run, spend, conv_id))
     return result.as_dict(suite.pass_score), spend.cost_usd
 
 
@@ -253,10 +372,16 @@ async def run_case(
     turn, conv_id = await _take_turn(session, run, case)
 
     checks = run_checks(
-        expected, answer=turn.answer, tools=turn.tools, citations=len(turn.passages)
+        expected,
+        answer=turn.answer,
+        tools=turn.tools,
+        citations=len(turn.passages),
+        calls=turn.calls,
     )
-    retrieval, retrieval_cost = await _retrieval(session, run, case, labels, config)
-    judged, judge_cost = await _judge(session, run, case, expected, turn, config, suite)
+    retrieval, retrieval_cost = await _retrieval(
+        session, run, case, labels, config, conv_id, _last_question(case, turn)
+    )
+    judged, judge_cost = await _judge(session, run, case, expected, turn, config, suite, conv_id)
     scores: dict[str, Any] = {
         "checks": [c.as_dict() for c in checks],
         "judge": judged,
@@ -264,6 +389,9 @@ async def run_case(
         "tools": turn.tools,
         "citations": len(turn.passages),
     }
+    if turn.turns:
+        # Only a case with follow-ups has them (Phase 9.8).
+        scores["turns"] = turn.turns
     result = EvalCaseResult(
         eval_run_id=run.id,
         eval_case_id=case.id,

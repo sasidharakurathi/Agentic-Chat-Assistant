@@ -7,6 +7,7 @@ from fastapi import APIRouter, File, Form, UploadFile, status
 
 from app.api.deps import (
     AssistantCtx,
+    ChatAssistantCtx,
     ClientIP,
     EditableAssistantCtx,
     PageQuery,
@@ -21,6 +22,7 @@ from app.schemas.data_source import (
     CreateUrlSource,
     DataSourceCreate,
     DataSourceSummary,
+    SourceAccess,
 )
 from app.services import data_sources as svc
 
@@ -125,7 +127,7 @@ async def get_data_source(
     response_model=ContentUrl,
 )
 async def data_source_content_url(
-    ctx: AssistantCtx, session: SessionDep, data_source_id: uuid.UUID
+    ctx: ChatAssistantCtx, session: SessionDep, data_source_id: uuid.UUID
 ) -> ContentUrl:
     """A short-lived link to the original file, for citation deep links.
 
@@ -134,7 +136,16 @@ async def data_source_content_url(
     isn't a member of the assistant's org — so there's no path from "I know a
     data source id" to "I can mint a URL for another tenant's object".
     """
+    from app.api.errors import NotFound
+    from app.models.rag import DataSourceStatus
+    from app.services import knowledge_access
+
     source = await svc.get(session, assistant_id=ctx.assistant.id, data_source_id=data_source_id)
+    # Only a source the caller may read, and nothing the scan is holding
+    # back except to its editors (Phase 9.9): not-found, as for any other.
+    allowed = await knowledge_access.readable_ids(session, ctx.assistant, ctx.membership)
+    if allowed is not None and (source.id not in allowed or source.status is DataSourceStatus.held):
+        raise NotFound("Data source not found")
     return await svc.content_url(source)
 
 
@@ -148,6 +159,38 @@ async def reindex_data_source(
 ) -> DataSourceSummary:
     source = await svc.get(session, assistant_id=ctx.assistant.id, data_source_id=data_source_id)
     source = await svc.reindex(session, source, user_id=ctx.membership.user_id, ip=ip)
+    return DataSourceSummary.model_validate(source)
+
+
+@router.put(
+    "/assistants/{assistant_id}/data-sources/{data_source_id}/access",
+    response_model=DataSourceSummary,
+)
+async def set_source_access(
+    body: SourceAccess,
+    ctx: EditableAssistantCtx,
+    session: SessionDep,
+    ip: ClientIP,
+    data_source_id: uuid.UUID,
+) -> DataSourceSummary:
+    """Who may read it (Phase 9.4): everyone, or groups; audited."""
+    source = await svc.get(session, assistant_id=ctx.assistant.id, data_source_id=data_source_id)
+    source = await svc.set_access(session, source, body, user_id=ctx.membership.user_id, ip=ip)
+    return DataSourceSummary.model_validate(source)
+
+
+@router.post(
+    "/assistants/{assistant_id}/data-sources/{data_source_id}:confirm-everyone",
+    dependencies=[HEAVY],
+    response_model=DataSourceSummary,
+)
+async def confirm_source_for_everyone(
+    ctx: EditableAssistantCtx, session: SessionDep, ip: ClientIP, data_source_id: uuid.UUID
+) -> DataSourceSummary:
+    """Index a source the scan held back, for everyone (Phase 9.4): what it
+    found is recorded in the audit log with who confirmed it."""
+    source = await svc.get(session, assistant_id=ctx.assistant.id, data_source_id=data_source_id)
+    source = await svc.confirm_everyone(session, source, user_id=ctx.membership.user_id, ip=ip)
     return DataSourceSummary.model_validate(source)
 
 

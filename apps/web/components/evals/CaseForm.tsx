@@ -1,5 +1,6 @@
 "use client";
 
+import { Plus, X } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
 
 import { Toggle } from "@/components/config/panels";
@@ -8,7 +9,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import type { EvalCase, EvalCaseDraft } from "@/lib/api";
+import type { EvalCase, EvalCaseDraft, EvalExpected } from "@/lib/api";
 
 const lines = (text: string) =>
   text
@@ -22,9 +23,14 @@ const commas = (text: string) =>
     .map((s) => s.trim())
     .filter(Boolean);
 
+/** Follow-up messages a case may send (matches the API's limit). */
+const MAX_FOLLOW_UPS = 5;
+
 /** One eval case (task 6.1): the question, and what a good answer looks
  *  like. Only the question is required; everything else is a check the
- *  answer has to meet, and a case with none passes by answering at all. */
+ *  answer has to meet, and a case with none passes by answering at all.
+ *  "Then asks" (Phase 9.8) adds follow-up messages, sent in the same
+ *  conversation; the checks grade the last answer. */
 export function CaseForm({
   open,
   editing,
@@ -40,14 +46,17 @@ export function CaseForm({
   onSave: (draft: EvalCaseDraft) => void;
 }) {
   const formId = useId();
-  const e = editing?.expected;
+  // With `expects_approval` (Phase 10.4) until the types are regenerated.
+  const e = editing?.expected as EvalExpected | undefined;
   const [input, setInput] = useState(editing?.input ?? "");
+  const [followUps, setFollowUps] = useState<string[]>(editing?.follow_ups ?? []);
   const [reference, setReference] = useState(e?.reference ?? "");
   const [contains, setContains] = useState((e?.contains ?? []).join("\n"));
   const [notContains, setNotContains] = useState((e?.not_contains ?? []).join("\n"));
   const [tools, setTools] = useState((e?.tools ?? []).join(", "));
   const [cites, setCites] = useState(e?.cites ?? false);
   const [refuses, setRefuses] = useState(e?.refuses ?? false);
+  const [waits, setWaits] = useState(e?.expects_approval ?? false);
   const [sources, setSources] = useState((editing?.labels.relevant_sources ?? []).join("\n"));
 
   function submit(ev: FormEvent) {
@@ -55,6 +64,7 @@ export function CaseForm({
     if (!input.trim()) return;
     onSave({
       input: input.trim(),
+      follow_ups: followUps.map((s) => s.trim()).filter(Boolean),
       expected: {
         reference: reference.trim() || null,
         contains: lines(contains),
@@ -62,6 +72,7 @@ export function CaseForm({
         tools: commas(tools),
         cites,
         refuses,
+        expects_approval: waits,
       },
       labels: {
         relevant_sources: lines(sources),
@@ -101,6 +112,47 @@ export function CaseForm({
             onChange={(ev) => setInput(ev.target.value)}
           />
         </Field>
+        <fieldset className="flex flex-col gap-1.5">
+          <legend className="text-sm font-medium">Then asks</legend>
+          <p className="text-small text-muted-foreground max-w-[60ch]">
+            Optional. Follow-up messages, sent one after another in the same conversation. The
+            checks below grade the last answer; tools and approval count across every turn.
+          </p>
+          {followUps.map((text, i) => (
+            <div key={i} className="flex items-start gap-2">
+              <Textarea
+                aria-label={`Follow-up ${i + 1}`}
+                rows={1}
+                value={text}
+                placeholder="And if I lost my phone?"
+                onChange={(ev) =>
+                  setFollowUps(followUps.map((t, j) => (j === i ? ev.target.value : t)))
+                }
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label={`Remove follow-up ${i + 1}`}
+                onClick={() => setFollowUps(followUps.filter((_, j) => j !== i))}
+              >
+                <X aria-hidden />
+              </Button>
+            </div>
+          ))}
+          {followUps.length < MAX_FOLLOW_UPS && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="self-start"
+              onClick={() => setFollowUps([...followUps, ""])}
+            >
+              <Plus aria-hidden />
+              Add a follow-up message
+            </Button>
+          )}
+        </fieldset>
         <Field
           id={`${formId}-ref`}
           label="Reference answer"
@@ -167,6 +219,12 @@ export function CaseForm({
             hint="For requests it must refuse. The judge marks an answer down if it goes along."
             checked={refuses}
             onChange={setRefuses}
+          />
+          <Toggle
+            label="It must wait for approval"
+            hint="For a change someone has to approve first. Passes when it asks and changes nothing; in a test run nobody approves, so nothing runs."
+            checked={waits}
+            onChange={setWaits}
           />
         </div>
       </form>

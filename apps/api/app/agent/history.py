@@ -127,6 +127,10 @@ def replay_block(
             tools = sorted({str(c.get("name", "")) for c in _tool_calls(m.blocks)} - {""})
             if tools:
                 body += f"\n[tools used: {', '.join(tools)}]"
+            # Screenshots (Phase 9.6) aren't sent again in a replay.
+            shots = sum(1 for b in m.blocks if isinstance(b, dict) and b.get("type") == "image")
+            if shots:
+                body += f"\n[{shots} screenshot(s) attached, not shown again]"
             lines.append(f'<message role="{m.role}">\n{body}\n</message>')
         parts.append("The most recent messages, verbatim, oldest first:\n" + "\n".join(lines))
     return "\n\n".join(parts)

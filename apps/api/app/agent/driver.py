@@ -15,7 +15,7 @@ import asyncio
 import json
 import re
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -33,6 +33,7 @@ from app.agent.events import (
     UsageEvent,
 )
 from app.agent.hooks import build_tool_gate
+from app.agent.images import PromptImage, count_note, streamed_prompt
 from app.agent.models import price_per_mtok, priced_usage
 from app.agent.options import (
     SUBAGENT_TOOL,
@@ -138,6 +139,24 @@ def _mcp_call(prompt: str, spec: RuntimeSpec) -> tuple[CapabilityTool, dict[str,
     return cap, args if isinstance(args, dict) else {}
 
 
+def _action_call(prompt: str, spec: RuntimeSpec) -> tuple[CapabilityTool, dict[str, Any]] | None:
+    """`act: request_access {"app": "Figma"}` -> that declared action (Phase
+    9.1) and its values, when this turn offers it."""
+    lowered = prompt.lower()
+    if "act:" not in lowered:
+        return None
+    rest = prompt[lowered.index("act:") + 4 :].strip()
+    name, _, raw = rest.partition(" ")
+    cap = next((t for t in spec.caps_tools if t.name == f"act_{name}"), None)
+    if cap is None:
+        return None
+    try:
+        args = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        args = {}
+    return cap, args if isinstance(args, dict) else {}
+
+
 def _permitted_call(prompt: str, spec: RuntimeSpec) -> tuple[CapabilityTool, dict[str, Any]] | None:
     """The permission-checked call a prompt asks for, if this turn offers it."""
     lowered = prompt.lower()
@@ -145,6 +164,9 @@ def _permitted_call(prompt: str, spec: RuntimeSpec) -> tuple[CapabilityTool, dic
     mcp = _mcp_call(prompt, spec)
     if mcp is not None:
         return mcp
+    action = _action_call(prompt, spec)
+    if action is not None:
+        return action
     http = tools.get("mcp__caps__http_request")
     if http is not None and "http:" in lowered:
         return http, _http_args(prompt)
@@ -373,9 +395,9 @@ async def _fake_tool_turn(
             yield ev
     elif permitted is not None:
         # A tool that goes through the real permission callback, as the
-        # SDK's calls do: "mcp: <server>.<tool> {json}", "http: [METHOD]
-        # <url> [body]" or "sql: <statement>". This is what makes the
-        # approval flow exercisable without spending credits.
+        # SDK's calls do: "mcp: <server>.<tool> {json}", "act: <action>
+        # {json}", "http: [METHOD] <url> [body]" or "sql: <statement>". This
+        # is what makes the approval flow exercisable without spending credits.
         cap, args = permitted
         async for ev in _fake_permitted_call(cap.qualified_name, args, cap, can_use_tool, reply):
             yield ev
@@ -474,6 +496,7 @@ class FakeDriver:
         session_id: str | None = None,
         can_use_tool: CanUseTool | None = None,
         interrupt: asyncio.Event | None = None,
+        images: Sequence[PromptImage] = (),
     ) -> AsyncIterator[AgentEvent]:
         failed = self._failure(prompt)
         if failed is not None:
@@ -491,6 +514,9 @@ class FakeDriver:
                 yield ev
         if not reply_parts:
             reply_parts = ["(fake driver)", "you", "said:", prompt.strip() or "(nothing)"]
+        if images:
+            # Screenshots (Phase 9.6): said, so a test can see they arrived.
+            reply_parts.append(count_note(images))
 
         # A load test's turn length (AGENT_FAKE_DELAY_MS): a quarter before
         # the first token, as a model's thinking would be, the rest spread
@@ -565,6 +591,7 @@ class ClaudeSDKDriver:
         session_id: str | None = None,
         can_use_tool: CanUseTool | None = None,
         interrupt: asyncio.Event | None = None,
+        images: Sequence[PromptImage] = (),
     ) -> AsyncIterator[AgentEvent]:
         from claude_agent_sdk import ClaudeSDKClient, PermissionResultDeny
 
@@ -589,7 +616,9 @@ class ClaudeSDKDriver:
         try:
             transport = transport_factory(options) if transport_factory is not None else None
             async with ClaudeSDKClient(options=options, transport=transport) as client:
-                await client.query(prompt)
+                # With screenshots (Phase 9.6), one streamed user message
+                # whose content is the image blocks and the text.
+                await client.query(streamed_prompt(prompt, images) if images else prompt)
                 relay = (
                     asyncio.create_task(_relay_interrupt(interrupt, client))
                     if interrupt is not None

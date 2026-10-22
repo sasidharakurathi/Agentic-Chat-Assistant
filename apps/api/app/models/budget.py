@@ -10,6 +10,11 @@ ingestion).
 constraint can hold (a NULL `assistant_id` would not be unique in
 Postgres). `assistant_id` is there too, so deleting the assistant deletes
 its budgets.
+
+Per person (Phase 8.9): "role:employee" and "role:builder" are the cap
+each person in that role gets (builders, admins and the owner share the
+second), and "person:<user id hex>" overrides it for one person, with
+`user_id` set so deleting the person deletes it. Only admins see these.
 """
 
 from __future__ import annotations
@@ -42,8 +47,11 @@ class Budget(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     assistant_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("assistants.id", ondelete="CASCADE"), nullable=True, index=True
     )
-    #: "org", or the assistant's id.
+    #: "org", the assistant's id, "role:<role>", or "person:<user id hex>".
     scope_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     period: Mapped[BudgetPeriod] = mapped_column(
         SAEnum(BudgetPeriod, name="budget_period", native_enum=False, length=10), nullable=False
     )

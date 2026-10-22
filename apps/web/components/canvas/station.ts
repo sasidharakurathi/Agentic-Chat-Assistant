@@ -152,7 +152,7 @@ export function problemSummary(errors: number, warnings: number): string {
 
 /** Why Publish is off: "Fix 2 problems to publish". */
 export function publishBlockedReason(errors: number): string {
-  return `Fix ${plural(errors, "problem", "problems")} to publish`;
+  return `Fix ${plural(errors, "problem", "problems")} to submit`;
 }
 
 /** Whether a node's data says it can change data: a database with its

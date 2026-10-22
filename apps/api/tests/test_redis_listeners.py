@@ -15,11 +15,12 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from app.agent import approval_registry, interrupts
+from app.agent import interrupts
 from app.config import settings
 from app.db import redis as redis_mod
 from app.db.redis import get_redis
 from redis.asyncio import Redis
+from tests.infra import unavailable
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -39,7 +40,7 @@ async def publisher() -> AsyncIterator[Redis]:
     try:
         await client.ping()
     except Exception:
-        pytest.skip(f"Redis not reachable at {settings.redis_url}")
+        unavailable("redis", f"Redis not reachable at {settings.redis_url}")
     yield client
     await client.aclose()
 
@@ -116,12 +117,3 @@ async def test_an_interrupt_from_another_worker_arrives_after_a_quiet_spell(
     finally:
         interrupts.unregister(cid, stopped.set)
         await interrupts.stop_listener()
-
-
-async def test_an_unknown_decision_is_a_denial(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[tuple[str, str]] = []
-    monkeypatch.setattr(approval_registry, "resolve_local", lambda a, d: seen.append((a, d)))
-    approval_registry._on_published({"approval_id": "a1", "decision": "approved"})
-    approval_registry._on_published({"approval_id": "a2", "decision": "yes please"})
-    approval_registry._on_published({"approval_id": "a3"})
-    assert seen == [("a1", "approved"), ("a2", "denied"), ("a3", "denied")]

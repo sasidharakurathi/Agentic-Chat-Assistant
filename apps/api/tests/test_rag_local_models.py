@@ -11,8 +11,9 @@ import pytest
 from app.rag import EMBEDDING_DIM
 from app.rag.embedders.local_bge import LocalBgeEmbedder
 from app.rag.rerankers.local import LocalCrossEncoderReranker
+from tests.infra import unavailable
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.local_models]
 
 
 @pytest.fixture(scope="module")
@@ -24,7 +25,7 @@ def embedder() -> LocalBgeEmbedder:
         asyncio.run(e.embed_query("warm up"))
         return e
     except Exception as exc:  # pragma: no cover - environment-dependent
-        pytest.skip(f"bge-m3 unavailable (no network / no disk space?): {exc}")
+        unavailable("models", f"bge-m3 unavailable (no network / no disk space?): {exc}")
 
 
 async def test_embeddings_have_the_configured_dimension(embedder: LocalBgeEmbedder) -> None:
@@ -62,6 +63,6 @@ async def test_reranker_orders_the_relevant_candidate_first() -> None:
             ],
         )
     except Exception as exc:  # pragma: no cover - environment-dependent
-        pytest.skip(f"bge-reranker unavailable (no network / no disk space?): {exc}")
+        unavailable("models", f"bge-reranker unavailable (no network / no disk space?): {exc}")
 
     assert results[0].index == 1

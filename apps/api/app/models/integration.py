@@ -1,5 +1,5 @@
 """Integrations (plan §2.4): database connections and their cached schema,
-and MCP servers (Phase 4).
+MCP servers (Phase 4), and HTTP connections (Phase 9.3).
 
 The credential itself never lives here — `secret_ref` points at an
 envelope-encrypted `secrets` row. Everything on this table is safe to show a
@@ -196,12 +196,45 @@ class McpServer(UUIDPrimaryKeyMixin, Base):
     )
 
 
+class HttpConnection(UUIDPrimaryKeyMixin, Base):
+    """A company system an assistant calls over HTTP (Phase 9.3): a base URL
+    and the headers it needs, sealed. Which calls are made, and how each is
+    approved, are the actions in the assistant's versioned config; the
+    model fills only their values, never the URL or a header.
+
+    `send_asker` adds who is asking (`X-Asker-Email`, `X-Asker-Name`,
+    `X-Asker-Id`), to this host only, so the system can answer as them."""
+
+    __tablename__ = "http_connections"
+    __table_args__ = (
+        UniqueConstraint("assistant_id", "name", name="uq_http_connections_assistant_name"),
+    )
+
+    assistant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assistants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    headers_secret_ref: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("secrets.id", ondelete="SET NULL")
+    )
+    header_names: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    send_asker: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime(), server_default=func.now(), nullable=False
+    )
+
+
 __all__ = [
     "DEFAULT_PERMISSIONS",
     "DbConnection",
     "DbConnectionStatus",
     "DbEngine",
     "DbSchemaCache",
+    "HttpConnection",
     "McpServer",
     "McpServerStatus",
     "McpTransport",

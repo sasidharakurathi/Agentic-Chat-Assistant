@@ -145,7 +145,7 @@ async def _conversation_with(
     cfg["memory"] = {**cfg["memory"], **memory}
     r = await client.put(f"/api/v1/assistants/{a['id']}/draft-config", json=cfg, headers=headers)
     assert r.status_code == 200, r.text
-    body = {"title": title} if title else {}
+    body = {"mode": "preview", **({"title": title} if title else {})}
     r = await client.post(f"/api/v1/assistants/{a['id']}/conversations", json=body, headers=headers)
     assert r.status_code == 201, r.text
     return str(r.json()["id"])

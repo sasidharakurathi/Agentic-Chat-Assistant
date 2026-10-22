@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import queue
 from app.agent import claude_api
@@ -26,7 +27,6 @@ from app.api.deps import (
 from app.api.errors import Forbidden, NotFound
 from app.db.tenancy import bind_org
 from app.models.assistant import Assistant
-from app.models.enums import MemberRole
 from app.models.evals import EvalCase, EvalCaseResult, EvalRun, EvalSuite
 from app.models.membership import Membership
 from app.schemas.common import Message
@@ -47,8 +47,10 @@ from app.schemas.evals import (
     EvalSuiteOut,
     EvalSuitePatch,
     EvalSuitesOut,
+    EvalTurnOut,
 )
-from app.security.access import member_of
+from app.security.access import can_edit_assistant, member_of
+from app.services import audit
 from app.services import evals as svc
 
 router = APIRouter(tags=["evals"])
@@ -65,13 +67,8 @@ class SuiteContext:
     suite: EvalSuite
     assistant: Assistant
     membership: Membership
-
-    @property
-    def can_edit(self) -> bool:
-        return self.membership.role.satisfies(MemberRole.admin) or (
-            self.assistant.created_by is not None
-            and self.assistant.created_by == self.membership.user_id
-        )
+    #: The assistant's editors (`access.can_edit_assistant`, Phase 7b.4).
+    can_edit: bool = False
 
 
 async def _context(session: SessionDep, user: CurrentUser, suite: EvalSuite | None) -> SuiteContext:
@@ -84,7 +81,12 @@ async def _context(session: SessionDep, user: CurrentUser, suite: EvalSuite | No
     if assistant is None:
         raise NotFound("Eval suite not found")
     bind_org(session, suite.org_id)
-    return SuiteContext(suite=suite, assistant=assistant, membership=membership)
+    return SuiteContext(
+        suite=suite,
+        assistant=assistant,
+        membership=membership,
+        can_edit=await can_edit_assistant(session, assistant, membership),
+    )
 
 
 async def suite_context(
@@ -125,6 +127,20 @@ async def run_context(
 RunCtx = Annotated[RunContext, Depends(run_context)]
 
 
+async def run_editor(ctx: RunCtx) -> RunContext:
+    """A run's cases and answers (Phase 9.9): they can hold answers from
+    restricted knowledge and questions people asked, so its editors only."""
+    if not ctx.suite.can_edit:
+        raise Forbidden(
+            "Only this assistant's editors (and admins) can open its eval runs",
+            code="not_assistant_editor",
+        )
+    return ctx
+
+
+RunEditorCtx = Annotated[RunContext, Depends(run_editor)]
+
+
 # ── shapes ───────────────────────────────────────────────────
 
 
@@ -133,9 +149,10 @@ def _case(case: EvalCase) -> EvalCaseOut:
         id=case.id,
         position=case.position,
         input=case.input,
+        follow_ups=case.follow_ups,
         expected=EvalExpected.model_validate(case.expected or {}),
         labels=EvalLabels.model_validate(case.labels or {}),
-        metadata=case.meta or {},
+        metadata=case.author_meta,
     )
 
 
@@ -165,6 +182,8 @@ def _result(row: EvalCaseResult) -> EvalCaseResultOut:
         input=row.input,
         expected=EvalExpected.model_validate(row.expected or {}),
         output=row.output,
+        # Kept in the scores JSON by the runner (Phase 9.8).
+        turns=[EvalTurnOut.model_validate(t) for t in (row.scores or {}).get("turns") or []],
         scores=row.scores or {},
         passed=row.passed,
         error=row.error,
@@ -232,7 +251,7 @@ async def create_suite(
 
 
 @router.get("/eval-suites/{suite_id}", response_model=EvalSuiteDetail)
-async def get_suite(ctx: SuiteCtx, session: SessionDep) -> EvalSuiteDetail:
+async def get_suite(ctx: SuiteEditorCtx, session: SessionDep) -> EvalSuiteDetail:
     return await _detail(session, ctx.suite)
 
 
@@ -241,6 +260,7 @@ async def patch_suite(
     body: EvalSuitePatch, ctx: SuiteEditorCtx, session: SessionDep
 ) -> EvalSuiteDetail:
     suite = await svc.update_suite(session, ctx.suite, name=body.name, config=body.config)
+    await _audit(session, ctx, "eval_suite.update", {"fields": sorted(body.model_fields_set)})
     return await _detail(session, suite)
 
 
@@ -249,6 +269,23 @@ async def delete_suite(ctx: SuiteEditorCtx, session: SessionDep) -> Message:
     """The suite, its cases and every run of it."""
     await svc.delete_suite(session, ctx.suite, actor_id=ctx.membership.user_id)
     return Message(message="Suite deleted")
+
+
+async def _audit(
+    session: AsyncSession, ctx: SuiteContext, action: str, meta: dict[str, object]
+) -> None:
+    """A change to a suite (Phase 7b.7): suites decide what "passes", so who
+    changed one is on record."""
+    await audit.record(
+        session,
+        action=action,
+        org_id=ctx.suite.org_id,
+        actor_user_id=ctx.membership.user_id,
+        target_type="eval_suite",
+        target_id=ctx.suite.id,
+        meta=meta,
+    )
+    await session.commit()
 
 
 # ── cases ────────────────────────────────────────────────────
@@ -260,6 +297,12 @@ async def add_cases(
 ) -> EvalSuiteDetail:
     """Add cases, or replace them all (an import)."""
     await svc.add_cases(session, ctx.suite, body.cases, replace=body.mode == "replace")
+    await _audit(
+        session,
+        ctx,
+        "eval_suite.cases",
+        {"added": len(body.cases), "replaced": body.mode == "replace"},
+    )
     return await _detail(session, ctx.suite)
 
 
@@ -271,7 +314,9 @@ async def put_case(
     session: SessionDep,
 ) -> EvalCaseOut:
     case = await svc.get_case(session, ctx.suite.id, case_id)
-    return _case(await svc.update_case(session, case, body))
+    updated = await svc.update_case(session, case, body)
+    await _audit(session, ctx, "eval_suite.cases", {"updated": str(case_id)})
+    return _case(updated)
 
 
 @router.delete("/eval-suites/{suite_id}/cases/{case_id}", response_model=Message)
@@ -279,6 +324,7 @@ async def delete_case(
     case_id: Annotated[uuid.UUID, Path()], ctx: SuiteEditorCtx, session: SessionDep
 ) -> Message:
     await svc.delete_case(session, await svc.get_case(session, ctx.suite.id, case_id))
+    await _audit(session, ctx, "eval_suite.cases", {"deleted": str(case_id)})
     return Message(message="Case deleted")
 
 
@@ -306,13 +352,13 @@ async def start_run(body: EvalRunIn, ctx: SuiteEditorCtx, session: SessionDep) -
 
 
 @router.get("/eval-suites/{suite_id}/runs", response_model=EvalRunsOut)
-async def list_runs(ctx: SuiteCtx, session: SessionDep) -> EvalRunsOut:
+async def list_runs(ctx: SuiteEditorCtx, session: SessionDep) -> EvalRunsOut:
     """The suite's recent runs, newest first."""
     return EvalRunsOut(runs=[_run(r) for r in await svc.list_runs(session, ctx.suite.id)])
 
 
 @router.get("/eval-runs/{run_id}", response_model=EvalRunDetail)
-async def get_run(ctx: RunCtx, session: SessionDep) -> EvalRunDetail:
+async def get_run(ctx: RunEditorCtx, session: SessionDep) -> EvalRunDetail:
     """A run's metrics and each case's result so far."""
     rows = await svc.results(session, ctx.run.id)
     return EvalRunDetail(**_run(ctx.run).model_dump(), results=[_result(r) for r in rows])
@@ -325,7 +371,9 @@ async def cancel_run(ctx: RunCtx, session: SessionDep) -> EvalRunSummary:
             "You can only cancel runs for assistants you created (or need an admin role)",
             code="not_assistant_editor",
         )
-    return _run(await svc.cancel_run(session, ctx.run))
+    run = await svc.cancel_run(session, ctx.run)
+    await _audit(session, ctx.suite, "eval_run.cancel", {"run": str(ctx.run.id)})
+    return _run(run)
 
 
 __all__ = ["router"]

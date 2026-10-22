@@ -25,6 +25,7 @@ from app.agent.caps_memory import (
 from app.agent.options import build_runtime_spec
 from app.schemas.assistant_config import ApprovalPolicy, AssistantConfig
 from httpx import AsyncClient
+from tests.versions import go_live
 
 from test_chat_approvals import _run_turn  # type: ignore[import-not-found]
 from test_orgs import _register  # type: ignore[import-not-found]
@@ -236,9 +237,16 @@ async def _assistant(client: AsyncClient, headers: dict[str, str], memory_tool: 
 
 
 async def _chat(
-    client: AsyncClient, headers: dict[str, str], aid: str, text: str, ext: str | None = None
+    client: AsyncClient,
+    headers: dict[str, str],
+    aid: str,
+    text: str,
+    ext: str | None = None,
+    live: bool = False,
 ) -> list[Any]:
-    body = {"external_user_ref": ext} if ext else {}
+    # A builder tries their draft in a preview; anyone else chats with the
+    # approved version (Phase 7b.1).
+    body = {"mode": "live" if live else "preview", **({"external_user_ref": ext} if ext else {})}
     r = await client.post(f"/api/v1/assistants/{aid}/conversations", json=body, headers=headers)
     assert r.status_code == 201, r.text
     events: list[Any] = []
@@ -301,8 +309,9 @@ async def test_people_see_and_clear_their_own_memory(client: AsyncClient) -> Non
     m = {**member.headers, "X-Org-Id": org["id"]}
     aid = await _assistant(client, o, memory_tool=True)
 
+    await go_live(client, aid, o)
     await _chat(client, o, aid, "remember: owner fact")
-    await _chat(client, m, aid, "remember: member fact")
+    await _chat(client, m, aid, "remember: member fact", live=True)
     await _chat(client, o, aid, "remember: customer fact", ext="cust-1")
 
     base = f"/api/v1/assistants/{aid}/memories"

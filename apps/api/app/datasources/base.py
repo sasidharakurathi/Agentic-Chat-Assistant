@@ -121,8 +121,11 @@ class SqlAdapter(DbAdapter, Protocol):
         max_rows: int,
         mutating: bool = False,
         returns_rows: bool = False,
+        asker_email: str | None = None,
     ) -> QueryResult:
-        """Execute one already-guarded statement.
+        """Execute one already-guarded statement. `asker_email`: set it for
+        the statement's transaction, for row-level security (Phase 9.3);
+        an engine that can't refuses rather than running unscoped.
 
         `mutating` / `returns_rows` come from the guard's parse rather than
         being re-derived here: the adapter must know whether to ask the driver

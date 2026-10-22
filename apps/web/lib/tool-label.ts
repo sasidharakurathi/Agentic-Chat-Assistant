@@ -7,7 +7,14 @@ export function toolLabel(name: string): string {
   const m = /^mcp__([^_]+(?:-[^_]+)*)__(.+)$/.exec(name);
   if (!m) return name;
   const [, server, tool] = m;
+  if (server === "caps" && tool.startsWith("act_")) return actionWords(tool);
   return server === "caps" ? tool : `${server}: ${tool}`;
+}
+
+/** A declared action's tool, as words (Phase 9.1): `act_request_access`
+ *  -> `request access`. */
+export function actionWords(tool: string): string {
+  return tool.replace(/^act_/, "").replace(/_/g, " ");
 }
 
 /** The bare tool name, without any server: what the UI keys behaviour on. */
@@ -59,6 +66,8 @@ export function toolNodeType(name: string): ToolNodeType {
   const parts = mcpParts(name);
   if (!parts) return "tool";
   if (parts.server !== "caps") return "mcp_server";
+  // A declared action is a database's (Phase 9.1).
+  if (parts.tool.startsWith("act_")) return "database";
   return CAPS_TYPE[parts.tool] ?? "tool";
 }
 
@@ -139,6 +148,7 @@ export function toolSentence(name: string, input?: Record<string, unknown> | nul
       return "Used its memory";
     }
     default:
+      if (parts.tool.startsWith("act_")) return `Used the action "${actionWords(parts.tool)}"`;
       return `Used ${parts.tool}`;
   }
 }

@@ -17,6 +17,11 @@ money.
 Each test lists **Do** and **Expect**. Tick the box when it matches. If it
 doesn't, note the step number and what you saw.
 
+> **Since Phase 7b.1 (§16.1) there is no one-step Publish.** Wherever a step
+> below says *Publish*, press **Submit for review**, then **Approve** the
+> version in **History** as an admin or the owner. Chat answers only from
+> an approved version: to chat with a draft, press **Preview**.
+
 ---
 
 ## 0. Setup
@@ -252,9 +257,10 @@ As the owner, in QA Owner's Org.
   > The switches for PII redaction, injection scan and refusal fallback, and
   > the memory options (summarization, auto titles, memory tool), are saved
   > but not enforced yet: enforcement is Phase 5. Only check that they save.
-- [ ] **3.9 Publish with a note.** Click **Publish** and enter the note "First
-  version". **Expect:** a "Published version 1" toast. Change the system
-  prompt, then publish again with "Friendlier prompt".
+- [ ] **3.9 Submit with a note.** Click **Submit for review** and enter the
+  note "First version". **Expect:** a "Submitted version 1 for review"
+  toast. Change the system prompt, then submit again with "Friendlier
+  prompt" (version 1 shows **Replaced**).
 - [ ] **3.10 History.** Open **History** and compare v1 with v2.
   **Expect:** the diff shows `system_prompt` changed, with both notes listed.
 - [ ] **3.11 Delete an assistant.** On Assistants, click **Delete** on Scratch
@@ -296,11 +302,13 @@ Turn **Calculator** back on for Shop Helper, then open **Chat**.
   Helper's build page and change the system prompt. **Expect:** the save is
   refused ("You can only edit assistants you created…"), and the canvas
   reverts. As the admin, it saves.
-- [ ] **4.9a Conversations follow the published version.** In an existing
+- [ ] **4.9a Conversations stay on their version.** In an existing
   conversation, send `hello` and open **Run details**: note the **Version**
-  (e.g. v2). Change the system prompt on the build page *without* publishing,
-  and send again. **Expect:** still v2 (drafts never reach chat). Publish, and
-  send again in the **same** conversation. **Expect:** Version v3.
+  (e.g. v2). Change the system prompt on the build page *without* submitting,
+  and send again. **Expect:** still v2 (drafts never reach chat). Submit and
+  approve, then send again in the **same** conversation. **Expect:** still
+  v2 (since 7b.1 a conversation stays on the version it started on); a new
+  conversation shows v3.
 - [ ] **4.9b Markdown.** With the knowledge base wired (§5), ask
   `search: refund eligibility`. **Expect:** the kb_search card's output shows
   headings and bold text formatted, not `##` and `**`.
@@ -1884,12 +1892,9 @@ production stack; 15.5.4 does not.
 Use an assistant with a database connection whose writes ask for approval
 (Panels > Databases), on the dev stack.
 
-- [ ] **15.7.1 A last-second click is never a false "approved".** Set
-  `APPROVAL_TIMEOUT_S=20` (restart the API), ask for a write, and click
-  **Approve** in the last second of the card's countdown. Repeat a few
-  times. **Expect:** each time, either the write happened and **Run
-  details** says "Approved by …", or nothing was written and it says "No
-  answer: declined" (the card closes). Never "Approved" without the write.
+- [ ] **15.7.1 A last-second click is never a false "approved".**
+  Superseded by Phase 9.1: nothing waits inside a turn any more. See
+  18.1.6 for a decision after the expiry.
 - [ ] **15.7.2 A decision is audited.** Ask for another write and approve
   it in time. **Expect:** the write happens, and **Members > Audit log**
   has an `approval.approved` entry naming you.
@@ -1946,6 +1951,869 @@ Use an assistant with a database connection whose writes ask for approval
 - [ ] **15.9.4 The tests.** From `apps/api`:
   `python -m pytest tests/test_http_tool.py tests/test_graph_validate.py -q`.
   **Expect:** all pass.
+
+## 16. Phase 7b: governance foundations
+
+### 16.1 The approval gate (7b.1)
+
+You need two accounts in one organisation: an admin (or the owner) and a
+member who builds. Sign in as each in a different browser, or one in a
+private window.
+
+- [ ] **16.1.1 A draft answers nobody.** As the member, create an
+  assistant. **Expect:** the header says **Not approved yet**, with
+  **Preview** and **Submit for review**. Open its chat page
+  (`/assistants/<id>/chat`). **Expect:** "isn't answering yet… No version
+  of this assistant has been approved yet", and a **Preview the draft**
+  button.
+- [ ] **16.1.2 The preview.** Press **Preview** and send a message.
+  **Expect:** a banner "Preview of the draft… Only this assistant's
+  builders and admins see previews", and an answer. Change the system
+  prompt and send again. **Expect:** the answer follows the new prompt.
+  Open the plain chat page. **Expect:** the preview conversation is not
+  listed there.
+- [ ] **16.1.3 Submit.** Press **Submit for review**, with a note.
+  **Expect:** a toast "Submitted version 1 for review"; History shows
+  version 1 **Waiting for review** with **Withdraw** and **Preview**, and
+  no Approve button for the member. Chat still isn't answering.
+- [ ] **16.1.4 Review as the admin.** As the admin, open the assistant's
+  History. **Expect:** **Approve** and **Reject** on version 1. Press
+  **Preview** on it and chat. **Expect:** "Preview of version 1".
+  **Reject** with an empty reason. **Expect:** "A rejection needs a
+  reason". Then submit again as the member and, as the admin, **Approve**
+  with a note. **Expect:** version 2 shows **Live** and the note under
+  "Review:"; the header says **Live**; the chat page answers.
+- [ ] **16.1.5 Conversations stay on their version.** As the member,
+  start a conversation in Chat and send a message. Change the prompt,
+  submit, and approve as the admin. Send another message in the same
+  conversation. **Expect:** it still answers as before; a new
+  conversation answers with the new prompt. **Run details** show the
+  version number each answer came from.
+- [ ] **16.1.6 Compare with the live version.** Wire a database
+  connection on the canvas and submit. As the admin, press **Compare with
+  the live version** on the submission. **Expect:** "Knowledge,
+  connections and tools" lists `Database connection "…" added`, above the
+  pipeline and settings diff.
+- [ ] **16.1.7 A connection changed after approval.** Approve it, then
+  edit the connection (point it at another database, or allow writes).
+  In History, put the live version on the right of the comparison.
+  **Expect:** "Version N has changed since it was submitted… Database
+  connection '…' has changed since it was approved… Chat leaves these out
+  of its answers until a new version is approved." In Chat, ask for a
+  query. **Expect:** it has no database tool. In a preview, it does.
+  Submit again before approving anything, change the connection again,
+  then approve. **Expect:** refused: "uses something that has changed
+  since it was submitted".
+- [ ] **16.1.8 The approved copy of a document.** With a knowledge source
+  wired and approved, upload a changed copy of the document (or edit a
+  pasted text source) and reindex it. **Expect:** a preview answers from
+  the new text; Chat still answers from the approved text; the Sources
+  tab counts one document. Approve a new version. **Expect:** Chat now
+  answers from the new text. Try to delete the source. **Expect:**
+  refused: "Version N answers from this source".
+- [ ] **16.1.9 Roll back.** With two approved versions, as the admin press
+  **Roll back to this** on the earlier one and confirm. **Expect:** it
+  shows **Live**, the other shows **Rolled back** with no way to make it
+  live, and a conversation that was on it answers from the live version.
+- [ ] **16.1.10 Pause.** As the admin press **Pause** with a reason.
+  **Expect:** the header says **Paused**; a conversation's message box is
+  replaced by "An admin has paused this assistant."; previews refuse too.
+  Approve a new version while paused. **Expect:** still paused. **Reopen**.
+  **Expect:** **Live** again.
+- [ ] **16.1.11 No way around it.** As the member, from the browser
+  console or curl, send `PATCH /api/v1/assistants/<id>` with
+  `{"status": "published"}`. **Expect:** 422. `POST
+  .../versions/<n>/approve`. **Expect:** 403 `insufficient_role`.
+- [ ] **16.1.12 The audit log.** As the admin, open the organisation's
+  audit log. **Expect:** `assistant.version.submit`, `.approve`,
+  `.reject`, `.rollback`, `assistant.archive` and `.unarchive` entries,
+  and, after the upgrade, one `assistant.version.grandfathered` per
+  assistant that had published versions.
+- [ ] **16.1.13 The tests.** From `apps/api`:
+  `python -m pytest tests/test_approval_gate.py tests/test_frozen_versions.py tests/test_conversation_versions.py tests/test_version_review_migration.py -q`.
+  From the repo root: `npm run test -w web`. **Expect:** all pass.
+
+### 16.2 Conversations are private (7b.2)
+
+You need three accounts in one organisation: two members and an admin. An
+approved assistant (§16.1) that all three can chat with.
+
+- [ ] **16.2.1 Your own only.** As member A, start a conversation titled
+  something recognisable. As member B, open the same assistant's chat.
+  **Expect:** A's conversation is not listed. Paste its address
+  (`/assistants/<id>/chat`, then the conversation from A's browser) or call
+  `GET /api/v1/conversations/<id>`. **Expect:** 403
+  `not_conversation_owner`.
+- [ ] **16.2.2 An admin lists everyone's, untitled.** As the admin, switch
+  the list to **Everyone's**. **Expect:** A's conversation shows as
+  "Conversation", with a note that titles are private.
+- [ ] **16.2.3 A reason first.** Open it. **Expect:** "Open someone else's
+  conversation?" asking for a reason. Cancel. **Expect:** it stays closed.
+  Open it again with a reason. **Expect:** it opens read-only.
+- [ ] **16.2.4 Recorded once.** Reload and open it again with the same
+  reason, then once with a different one. In the organisation's audit log
+  (`GET /api/v1/orgs/<org>/audit-log`). **Expect:** two
+  `conversation.read_by_admin` entries, each with the reason, the admin's
+  email and role and the owner's id, and none of the conversation's text.
+- [ ] **16.2.5 Usage.** Open **Usage**. **Expect:** as member B, only B's
+  own conversations under Top conversations; as the admin, A's appears as
+  "Someone else's conversation (its title is private)".
+- [ ] **16.2.6 No titles in the audit log.** As A, rename the conversation.
+  **Expect:** the `conversation.rename` entry has lengths, not titles.
+- [ ] **16.2.7 The tests.** From `apps/api`:
+  `python -m pytest tests/test_conversation_privacy.py -q`. **Expect:** all
+  pass.
+
+### 16.3 Nobody approves their own work (7b.3)
+
+You need the owner and two admins in one organisation.
+
+- [ ] **16.3.1 Your own submission.** As admin A, create an assistant and
+  submit it. In History. **Expect:** no **Approve** on it, and "You
+  submitted this or built the assistant, so another admin or the owner
+  approves it". **Reject** is still there. As admin B (or the owner),
+  approve it. **Expect:** it goes live.
+- [ ] **16.3.2 The builder, even when someone else submitted.** As admin B,
+  submit a change to A's assistant. **Expect:** neither A nor B is offered
+  Approve; the owner is.
+- [ ] **16.3.3 The owner alone.** In an organisation with only the owner
+  (or with every admin deactivated), submit and approve your own version.
+  **Expect:** "Approve your own version?", asking why it is ready; an
+  empty note is refused; with a note it goes live. The Members page warns
+  that only one person can approve assistants.
+- [ ] **16.3.4 The record.** In the audit log. **Expect:** the
+  `assistant.version.approve` entry has `submitted_by`, `built_by`,
+  `approver_role` and `self_approved`; a tool call's `approval.approved`
+  entry has `requested_by`, `decider_role`, `risk` and `self_approved`
+  (true when the person in the conversation approved their own request).
+- [ ] **16.3.5 The tests.** From `apps/api`:
+  `python -m pytest tests/test_separation_of_duties.py -q`. **Expect:** all
+  pass.
+
+### 16.4 People: joining, leaving, coming back (7b.4)
+
+You need the owner, an admin and two members in one organisation.
+
+- [ ] **16.4.1 Joining with an invite.** As the admin, invite a new
+  address. Open the link signed out and create the account. **Expect:**
+  you land in the organisation with no other organisation in the
+  switcher, and the invite page says "You've joined ...".
+- [ ] **16.4.2 Invites.** Invite the same address twice. **Expect:** one
+  entry under **Invites not yet used**, and the first link says it was
+  withdrawn or replaced. **Withdraw** the second. **Expect:** its link says
+  the same, and signing up with it joins nothing.
+- [ ] **16.4.3 An invite needs its sender.** As the admin, invite someone;
+  as the owner, make the admin a member. Open the link. **Expect:**
+  "withdrawn". Accepting it as that person: "This invite is no longer
+  valid".
+- [ ] **16.4.4 Removing someone.** As member A, build an assistant and
+  start a preview with a pending write (any SQL write). As the admin,
+  press **Remove** on A. **Expect:** the dialog lists the assistant, the
+  connection to rotate and one pending approval, with you taking over.
+  Confirm. **Expect:** A is marked **Removed**; in A's browser, the next
+  action fails and A is signed out on the next refresh; the assistant is
+  yours; the approval shows expired.
+- [ ] **16.4.5 Who may remove whom.** As the admin. **Expect:** no Remove
+  button on the other admin, the owner or yourself.
+- [ ] **16.4.6 Reactivating.** **Reactivate** A. **Expect:** A is back in
+  the organisation but the assistant stays with you.
+- [ ] **16.4.7 An active owner stays.** With two owners, remove one, then
+  try to make the other an admin. **Expect:** "must keep at least one
+  active owner".
+- [ ] **16.4.8 Co-editors.** As the creator of an assistant, add member
+  A under **Who can edit** in History. **Expect:** A can edit and preview
+  it, and doesn't see the add control. Remove A. **Expect:** A's edits are
+  refused.
+- [ ] **16.4.9 The tests.** From `apps/api`:
+  `python -m pytest tests/test_people_lifecycle.py -q`. **Expect:** all
+  pass.
+
+### 16.5 Email (7b.5)
+
+In development without `SMTP_HOST`, mail is written to the API's log
+(`mail_console` lines). To try real sending, set the `SMTP_*` and
+`MAIL_FROM` settings in `.env` and run `scripts/dev-mailer.ps1`.
+
+- [ ] **16.5.1 An invite is emailed.** As an admin, invite an address.
+  **Expect:** the panel says "We emailed it to them"; the API's log (or
+  the inbox) has the invite, with the same link and the footer about never
+  approving from an email.
+- [ ] **16.5.2 Reviewers hear of a submission.** As a member, submit a
+  version. **Expect:** a "waits for your review" message to each active
+  admin and the owner, none to the member. Reject it as an admin.
+  **Expect:** the member gets "was rejected", without the reason.
+- [ ] **16.5.3 Names can't plant a link.** Name an assistant
+  `Desk https://evil.example`, submit it. **Expect:** the subject and body
+  say `Desk [link removed]`.
+- [ ] **16.5.4 The admin's view.** Members › **Email**. **Expect:** how
+  mail is sent and, with SMTP, the week's counts; **Send me a test** sends
+  only to you. As a member: no Email section.
+- [ ] **16.5.5 The preflight.** With `APP_ENV=production` and
+  `MAIL_BACKEND=console`, run the preflight. **Expect:** FAIL MAIL_BACKEND.
+  With a gmail.com `MAIL_FROM`: WARN.
+- [ ] **16.5.6 The tests.** From `apps/api`:
+  `python -m pytest tests/test_mail.py tests/test_deploy.py -q`.
+  **Expect:** all pass.
+
+### 16.6 Getting back in (7b.6)
+
+In development, reset and confirmation emails appear in the API's log
+(`mail_console`); copy the link from there.
+
+- [ ] **16.6.1 Forgot your password.** Sign out; on sign-in, **Forgot your
+  password?**, enter your address. **Expect:** "If an account has that
+  address..."; the same message for an address with no account, and no
+  email for that one.
+- [ ] **16.6.2 The link.** Open the emailed link. **Expect:** the address
+  bar shows `/reset-password#token=...`; the API's access log for the page
+  load has no token. Set a new password. **Expect:** "Your password is
+  changed"; the old password fails, the new one works. Open the same link
+  again and submit. **Expect:** "This link has been used or has expired".
+- [ ] **16.6.3 Every session ends.** Sign in in two browsers; reset the
+  password from one. **Expect:** the other is signed out at its next
+  request, and a "password was changed" email arrives.
+- [ ] **16.6.4 Change it while signed in.** Your account › Password: a
+  wrong current password is refused; a right one changes it, keeps this
+  browser signed in and signs the other one out.
+- [ ] **16.6.5 Confirm your email.** Your account shows **Not confirmed**
+  for an account made without an invite. **Email me a link**, open it,
+  press **Confirm my email**. **Expect:** **Confirmed**. An account that
+  joined through an invite shows **Confirmed** from the start.
+- [ ] **16.6.6 On a phone.** Open a reset link on a phone. **Expect:** the
+  form, not the "use a computer" note.
+- [ ] **16.6.7 The operator's link.** On the server:
+  `python -m scripts.reset_link <address>`. **Expect:** a working reset
+  link, and `user.password_reset_link_issued` in the audit log.
+- [ ] **16.6.8 The tests.** From `apps/api`:
+  `python -m pytest tests/test_account_recovery.py -q`. **Expect:** all
+  pass.
+
+### 16.7 The audit log (7b.7)
+
+The worker seals new entries every minute; start it (`scripts/dev-worker.ps1`)
+for 16.7.5.
+
+- [ ] **16.7.1 Who sees it.** Sign in as a member. **Expect:** no
+  **Audit log** in the sidebar, and `/audit` shows an error from the API.
+  As an admin: the page, without **Export CSV** or **Check integrity**.
+  As the owner: both buttons.
+- [ ] **16.7.2 Sign-ins.** Sign out, fail a sign-in once with a wrong
+  password, then sign in. **Expect:** at the top, "Signed in", "Failed to
+  sign in" (Wrong password) and "Signed out", under your email.
+- [ ] **16.7.3 Filters.** **What** › **Admins opening conversations**
+  after opening someone's conversation as an admin. **Expect:** the read,
+  with the reason you gave. **Who** narrows to one person; **When** to a
+  period. **Load more** appears past 50 entries.
+- [ ] **16.7.4 Export.** As the owner, **Export CSV**. **Expect:** a file
+  `audit-log-<date>.csv` with the filtered rows, oldest first, and a new
+  entry "Exported the audit log" at the top of the page.
+- [ ] **16.7.5 Integrity.** **Check integrity**. **Expect:** "Intact: N
+  entries check out" and the newest fingerprint. Then, in `psql` as the
+  database owner, drop the protection and change a row:
+
+  ```sql
+  ALTER TABLE audit_log DISABLE TRIGGER audit_log_append_only;
+  UPDATE audit_log SET meta = '{}' WHERE seq = 3;
+  ALTER TABLE audit_log ENABLE TRIGGER audit_log_append_only;
+  ```
+
+  **Expect:** **Check integrity** now says entry 3 no longer matches. Use
+  a throwaway database for this, never `demo`.
+- [ ] **16.7.6 Still refused.** `UPDATE audit_log SET action = 'x' WHERE
+  seq = 1;` and `DELETE FROM audit_log WHERE seq = 1;` **Expect:** both
+  fail with "cannot be changed".
+- [ ] **16.7.7 A removed account.** Remove someone, then delete their user
+  row in a throwaway database. **Expect:** their entries still show their
+  email, and the chain is intact.
+- [ ] **16.7.8 The tests.** From `apps/api`:
+  `python -m pytest tests/test_audit_log.py -q`. **Expect:** all pass.
+
+### 16.8 Carrying a server over (7b.8)
+
+Use a copy of a real database for 16.8.1 to 16.8.3 (OPERATIONS §7), never
+`demo` itself.
+
+- [ ] **16.8.1 The rehearsal.** Restore a backup into a scratch database
+  and run the upgrade on it, as OPERATIONS §7 says. **Expect:** the
+  migration runs; `python -m scripts.upgrade_report` lists every org.
+  Check that the org people actually use reads `team`, that it has an
+  owner, and that the warnings make sense.
+- [ ] **16.8.2 What was archived.** For each org the report shows as
+  ARCHIVED: it had nothing in it, and each of its people is in another
+  open org. **Expect:** signing in as one of them opens the team org.
+- [ ] **16.8.3 Archive and bring back.** `python -m scripts.upgrade_report
+  archive <id> --reason "Test"` on a personal org with content.
+  **Expect:** its member no longer sees it (and the URL of one of its
+  assistants is "not found"). `unarchive <id>` brings it back. Archiving
+  an org whose person has nowhere else to go is refused without `--force`.
+- [ ] **16.8.4 Freeze.** `freeze <id>`. **Expect:** the org's Usage page
+  shows day and month limits of $0, and a chat there is refused for the
+  budget.
+- [ ] **16.8.5 Single mode.** With `ORG_MODE=single`: creating an org
+  through the API is refused (`org_creation_closed`); signing up without
+  an invite is refused even with `REGISTRATION=open`; an invited person
+  lands in the one org.
+- [ ] **16.8.6 Settings.** Members › Organisation. As an admin: visible,
+  greyed. As the owner: rename the org. **Expect:** the sidebar shows the
+  new name, and the audit log has "Changed the organisation's settings".
+- [ ] **16.8.7 The switches.** Turn off **Email admins when a version
+  waits for review**; submit a version. **Expect:** no email. In an org
+  with no other admin, turn off **Let the only reviewer approve their own
+  work**. **Expect:** approving your own version is refused, with a
+  message naming the switch.
+- [ ] **16.8.8 The tests.** From `apps/api`:
+  `python -m pytest tests/test_rollout.py -q`. **Expect:** all pass.
+
+### 16.9 CI runs the integration tiers (7b.9)
+
+- [ ] **16.9.1 A missing service fails.** Stop Redis
+  (`docker compose stop redis`), then from `apps/api`:
+  `$env:REQUIRE_INTEGRATION="redis"; python -m pytest tests/test_turns_redis.py -q`.
+  **Expect:** failures saying REQUIRE_INTEGRATION includes redis. Without
+  the variable, the same tests skip. Start Redis again.
+- [ ] **16.9.2 The round trips.** With Postgres up:
+  `python -m pytest tests/test_migrations.py tests/test_migrations_postgres.py -q`.
+  **Expect:** all pass, and no `migtest_` database left behind
+  (`docker compose exec postgres psql -U app -c "\l"`).
+- [ ] **16.9.3 The trigger.** `python -m pytest tests/test_session_resilience.py -q -m integration`.
+  **Expect:** all pass.
+- [ ] **16.9.4 In CI.** Push a branch and open a pull request. **Expect:**
+  the `api-integration` job starts the datastores, migrates, checks, and
+  runs the integration tier green. On `main`, `api-retrieval` runs too
+  (the first run downloads the models; later runs use the cache).
+
+### 16.10 The threat model (7b.10)
+
+- [ ] **16.10.1 Read it as an attacker.** For each person in section 3 of
+  `docs/THREAT_MODEL.md`, find the wall in section 4 that stops them, and
+  try it once in the app (a member opening a colleague's conversation URL,
+  an admin approving their own version, a removed member's old tab).
+  **Expect:** each is refused as the document says.
+- [ ] **16.10.2 The route list stays true.** Change one route's level in
+  `ROLE_MATRIX`, run `python -m pytest tests/test_role_matrix.py -q -k threat_model`.
+  **Expect:** it fails and names `python -m tests.role_table`. Undo the
+  change.
+- [ ] **16.10.3 Before Chat opens.** Go through section 7 with the plan.
+  **Expect:** every unticked line is a Phase 8 task you can name.
+
+## 17. Phase 8: Chat for everyone
+
+### 17.1 The Employee role (8.1)
+
+You need an owner or admin, a builder, and an employee, each in their own
+browser or private window. Invite the employee from Members, leaving the
+role at **Employee (chats)**.
+
+- [ ] **17.1.1 Where an employee lands.** Sign in as the employee.
+  **Expect:** Chat, with only Chat in the sidebar. Typing `/assistants`
+  or `/members` in the address takes you back to Chat.
+- [ ] **17.1.2 What answers.** The builder creates two assistants and an
+  admin approves one. **Expect:** the employee's Chat lists only the
+  approved one; the other's chat address shows "not found".
+- [ ] **17.1.3 The answer, not its workings.** Give the approved assistant
+  a knowledge source or a database, ask the employee's question that uses
+  it. **Expect:** the tool step reads "Searched the knowledge base" or
+  "Looked up data", with nothing to expand; no Run details. In the
+  browser's Network tab, the stream and `GET /conversations/{id}` carry no
+  SQL, no rows, no `cost_usd` above 0, no `usage` events. As the builder,
+  the same question shows everything.
+- [ ] **17.1.4 A request waits for an approver.** Ask something that
+  needs approval (a database write on an assistant that allows one).
+  **Expect:** the employee sees "Waiting for an approver" with
+  **Withdraw** and no statement; each admin gets an email; **Approvals**
+  lists it with the statement (since 9.1; see 18.1).
+- [ ] **17.1.5 A demoted builder.** Change the builder to employee through
+  the API (`PATCH /api/v1/orgs/{org}/members/{user}` with
+  `{"role": "employee"}`), then bring their tab into view. **Expect:** they
+  are taken to Chat within a minute, and their own assistant's preview is
+  refused.
+- [ ] **17.1.6 The tests.** From `apps/api`:
+  `python -m pytest tests/test_employee_role.py tests/test_role_matrix.py -q`.
+  **Expect:** all pass.
+
+### 17.2 The internal host (8.2)
+
+On the real server, with the name and Tailscale set up as OPERATIONS §2
+says.
+
+- [ ] **17.2.1 The proxy image.** Build it (`docker build -f
+  deploy/proxy/caddy.Dockerfile ...`). **Expect:** the build ends without
+  error; `docker run --rm assistant-studio-proxy:2.10 caddy list-modules |
+  grep dns.providers` lists acmedns and cloudflare.
+- [ ] **17.2.2 The certificate.** Start with `TLS_MODE=acmedns` (or
+  `cloudflare`). **Expect:** `COMPOSE logs proxy` shows the certificate
+  obtained; the site opens with no warning; ports 80 and 443 are closed
+  from outside (try from a phone on mobile data with Tailscale off).
+- [ ] **17.2.3 From each place.** Office Wi-Fi, home Wi-Fi with Tailscale,
+  an Android and an iPhone on mobile data with Tailscale. **Expect:** the
+  sign-in page, no warning, everywhere. With Tailscale off at home: it
+  doesn't load.
+- [ ] **17.2.4 The preflight.** `COMPOSE logs api`. **Expect:** no
+  `TLS_MODE` or `BIND_IP` warning; `site name` resolves to the private
+  address. Set `BIND_IP=` and restart the API: a `BIND_IP` warning.
+- [ ] **17.2.5 The tests.** From `apps/api`:
+  `python -m pytest tests/test_deploy.py -q`. **Expect:** all pass.
+
+### 17.3 Google sign-in (8.3)
+
+Set up as OPERATIONS §3 says, with a test Workspace account or two.
+
+- [ ] **17.3.1 Off by default.** Without the Google settings, the sign-in
+  page shows no Google button.
+- [ ] **17.3.2 No invite, no way in.** With a Workspace account that has
+  never been invited: **Continue with Google**. **Expect:** back on
+  sign-in, "Sign-up here is by invitation".
+- [ ] **17.3.3 Joining with an invite.** Invite the address, open the
+  link, **Join with Google**. **Expect:** signed in, in that organisation
+  with the invite's role; Your account says Google is how it signs in (no
+  password); a password sign-in for that address fails.
+- [ ] **17.3.4 Not by address.** Register a password account for an
+  address, then **Continue with Google** with the Google account of that
+  address. **Expect:** "already has an account with a password"; nothing
+  connected. Sign in with the password, Your account › **Connect
+  Google**. **Expect:** connected; Google sign-in now opens that account.
+- [ ] **17.3.5 Another domain.** A personal Gmail account. **Expect:**
+  "Use your company Google account".
+- [ ] **17.3.6 Auto-join.** As the owner, switch on **Let the company's
+  Google accounts join without an invite**. A new Workspace account signs
+  in. **Expect:** joined as an Employee; the audit log says "Joined with
+  Google (auto-join)".
+- [ ] **17.3.7 No tokens in addresses.** In the browser's history and the
+  proxy's access log for the sign-in: no access or refresh token, and no
+  handoff code (it is after `#`).
+- [ ] **17.3.8 The tests.** From `apps/api`:
+  `python -m pytest tests/test_google_signin.py -q`. **Expect:** all pass.
+
+### 17.4 Two-step sign-in (8.4)
+
+With `REQUIRE_ADMIN_2FA=true` in the API's environment, and an
+authenticator app on a phone.
+
+- [ ] **17.4.1 Held back.** Sign in as the owner. **Expect:** a banner,
+  "Admin features need two-step sign-in"; Members' settings and the
+  Approvals page are refused; building and chat work.
+- [ ] **17.4.2 Setting it up.** Your account › **Set up two-step sign-in**,
+  scan the QR code, type the code. **Expect:** ten recovery codes shown
+  once; the banner goes; admin pages work.
+- [ ] **17.4.3 Signing in.** Sign out and in. **Expect:** after the
+  password, a code is asked for; a wrong one is refused; the right one
+  signs in. The same code again is refused.
+- [ ] **17.4.4 A recovery code.** Sign in with a recovery code instead.
+  **Expect:** it works once; Your account shows nine left.
+- [ ] **17.4.5 Locked out.** On the server:
+  `python -m scripts.reset_two_factor <address>`. **Expect:** password sign-in
+  works again, and the audit log shows it.
+- [ ] **17.4.6 From one office address.** With `TRUSTED_INTERNAL_NETS` set
+  to the office range, have several people sign in at once from the
+  office. **Expect:** none is told to wait.
+- [ ] **17.4.7 The tests.** From `apps/api`:
+  `python -m pytest tests/test_two_factor.py -q`. **Expect:** all pass.
+
+### 17.5 Audiences, groups and the catalog (8.5)
+
+An admin, a builder, and two employees; one group "IT" with the first.
+
+- [ ] **17.5.1 A group.** As the admin: Groups › make "IT", add the first
+  employee. **Expect:** the count shows 1; the audit log says so.
+- [ ] **17.5.2 For a group.** As the builder: Listing tab › category "IT",
+  a starter, **Members of groups** › IT; save; submit. As the admin:
+  History shows "For: Members of IT" for the version; approve.
+- [ ] **17.5.3 Who sees it.** **Expect:** the first employee sees it in
+  Chat, with its category and the starter in a new conversation; the
+  second doesn't, and its address says "not found". Add the second to IT:
+  it appears at once.
+- [ ] **17.5.4 Dropped.** Remove the first employee from IT. **Expect:**
+  their old conversation opens, and sending says the assistant is no
+  longer available to them.
+- [ ] **17.5.5 What was reviewed.** Rename the assistant and change the
+  draft's audience without submitting. **Expect:** Chat still shows the
+  old name and audience.
+- [ ] **17.5.6 Official and search.** As the admin, **Mark as Official**.
+  **Expect:** it is first in Chat, with the badge; the search box and the
+  category buttons narrow the list.
+- [ ] **17.5.7 The tests.** From `apps/api`:
+  `python -m pytest tests/test_audiences.py -q`. **Expect:** all pass.
+
+### 17.6 The Chat app (8.6)
+
+An employee, and the owner. On a phone where marked.
+
+- [ ] **17.6.1 A dropped answer.** Ask a question; while it is
+  answering, turn the network off for a few seconds and back on.
+  **Expect:** "Reconnecting…", then the answer goes on from where it was,
+  with nothing twice; one run in the admin's view.
+- [ ] **17.6.2 Lost for good.** Turn the network off and leave it.
+  **Expect:** after a few seconds, "Lost the connection…" with **Reload
+  conversation**; once back online, that shows the finished answer.
+- [ ] **17.6.3 Nothing typed is lost.** Set an organisation budget below
+  what is spent, then send a message. **Expect:** "This assistant has
+  reached its usage limit for now. It will be back at …" in your own
+  time, with no dollar figure, and your message back in the box.
+- [ ] **17.6.4 A link survives sign-in.** Signed out, open
+  `/chat/c/<a conversation id>`. **Expect:** sign-in, then that
+  conversation.
+- [ ] **17.6.5 Withdrawn.** Remove the employee from the assistant's
+  audience, then open their conversation from Chat. **Expect:** it opens
+  read-only, with a note; no composer.
+- [ ] **17.6.6 A newer version.** Approve a new version, then open an
+  older conversation. **Expect:** "This assistant has been updated" and
+  **Start a new conversation**.
+- [ ] **17.6.7 The employee's shell.** **Expect:** a slim bar (Chat, Your
+  account, Sign out), no Studio rail, no cost in the thread, no `/cost`.
+- [ ] **17.6.8 Install it (phone).** On the production host, add it to the
+  home screen. **Expect:** the icon, and it opens on Chat. With the VPN
+  off, open it. **Expect:** "Can't reach the assistant", with the steps
+  the owner wrote in settings.
+- [ ] **17.6.9 A code from another device (iPhone).** On a computer: Your
+  account › **Make a code**. In the home-screen app: type it. **Expect:**
+  signed in; the code works once; with two-step sign-in on, it asks for
+  the authenticator code too.
+- [ ] **17.6.10 The tests.** From `apps/api`:
+  `python -m pytest tests/test_chat_app.py -q`. **Expect:** all pass.
+
+### 17.7 How Chat uses your data (8.7)
+
+The owner, a builder and an employee, with one live assistant.
+
+- [ ] **17.7.1 Before the first message.** As the employee, open Chat.
+  **Expect:** "How Chat uses your data" in place of Chat, saying admins
+  can open conversations, with the rules, where messages go and the
+  owner's address. **I've read it: continue** opens Chat.
+- [ ] **17.7.2 Previews don't ask.** As the builder, preview the draft
+  without accepting. **Expect:** it answers.
+- [ ] **17.7.3 A typo, then a real change.** As the owner: Members › How
+  Chat uses your data, change a word with **Ask everyone…** off, and save.
+  **Expect:** still version 1; the employee chats on. Change it again with
+  it on. **Expect:** version 2. The employee's next message shows the
+  notice again, then continues.
+- [ ] **17.7.4 The contact.** Set **Privacy contact** in Organisation
+  settings. **Expect:** the notice and Privacy & help name it.
+- [ ] **17.7.5 Access to your conversations.** As the owner, open the
+  employee's conversation with a reason. As the employee: Privacy & help.
+  **Expect:** the owner, when, and the reason.
+- [ ] **17.7.6 The card.** In a conversation, **About**. **Expect:** who
+  runs it, the approved version, what it uses, what it can do and
+  whether an admin approves, what leaves the building. With memory on,
+  **See what it remembers about you** and **Forget all of it**.
+- [ ] **17.7.7 The tests.** From `apps/api`:
+  `python -m pytest tests/test_privacy_notice.py -q`. **Expect:** all
+  pass.
+
+### 17.8 History and feedback (8.8)
+
+An employee, a builder and the owner, with one live assistant.
+
+- [ ] **17.8.1 Remove, honestly.** As the employee, remove a
+  conversation. **Expect:** the confirmation says the company keeps it and
+  admins can still open it; it leaves the list; **Removed** in Chat shows
+  it, and **Put back** returns it.
+- [ ] **17.8.2 Search.** Ask two assistants different things. **Expect:**
+  the search box on Chat finds each by a word from its title or from what
+  was said, and nobody else's.
+- [ ] **17.8.3 A thumbs.** Thumbs-down an answer and write a comment.
+  **Expect:** the box says it is shared with the assistant's team without
+  your name; pressing the thumbs again takes it back.
+- [ ] **17.8.4 Did this solve it?** **Expect:** under the latest answer
+  only; Yes or No, then **Change**.
+- [ ] **17.8.5 The Feedback tab.** As the builder: the assistant's
+  Feedback tab. **Expect:** the thumbs by version, the solved rate with how
+  many answered, the comment with its question and answer, and no name. As
+  the owner: **Open the conversation** asks for a reason.
+- [ ] **17.8.6 The tests.** From `apps/api`:
+  `python -m pytest tests/test_history_feedback.py -q`. **Expect:** all
+  pass.
+
+### 17.9 Per-person caps and alerts (8.9)
+
+The owner and two employees, with one live assistant.
+
+- [ ] **17.9.1 A default.** Usage › Limits for each person: **Each
+  Employee**, daily $0.01. **Expect:** the first employee's next message
+  says they've reached their limit and when it is back, without money; the
+  owner still chats.
+- [ ] **17.9.2 Their own.** **Their own limit** for that employee: daily
+  $5. **Expect:** they chat again; the table marks it as their own. Empty
+  it: back to the role's.
+- [ ] **17.9.3 Only admins.** As a builder, open Usage. **Expect:** no
+  per-person section, and no one's spend.
+- [ ] **17.9.4 The org stops.** Set the organisation's daily budget below
+  what is spent and send a message. **Expect:** an email to the admins
+  ("The organisation's budget is used up"), a banner on every page for
+  admins, and the Alerts page listing it. Raise the budget and send a
+  message that answers. **Expect:** the banner goes.
+- [ ] **17.9.5 Mark handled.** With an open alert, **Mark handled**.
+  **Expect:** it shows as resolved, and the audit log records it.
+- [ ] **17.9.6 The tests.** From `apps/api`:
+  `python -m pytest tests/test_people_caps.py -q`. **Expect:** all pass.
+
+### 17.10 Keeping and erasing (8.10)
+
+The owner, an admin and an employee with a few conversations.
+
+- [ ] **17.10.1 The setting.** As the admin: Members › Keeping and
+  erasing, set 90 days. **Expect:** the DPDP warning below a year; saving
+  is in the audit log. The notice (Privacy & help) says 90 days.
+- [ ] **17.10.2 The nightly erase.** With a conversation older than the
+  setting (or run `retention_sweep` by hand from the worker). **Expect:**
+  it is gone, with its memory notes and transcript; "What was erased"
+  lists it; Usage totals are unchanged.
+- [ ] **17.10.3 A hold.** As the owner, hold the employee, then try to
+  erase them. **Expect:** refused while held. Lift it.
+- [ ] **17.10.4 Erase one person.** As the owner, choose the employee and
+  type their email. **Expect:** their conversations and memory notes go;
+  they remain a member; "What was erased" lists it.
+- [ ] **17.10.5 After a restore** (a test machine). Erase something, then
+  restore an older backup. **Expect:** `restore.sh` saves the record and
+  prints the reapply command; running it erases the same again.
+- [ ] **17.10.6 The tests.** From `apps/api`:
+  `python -m pytest tests/test_retention.py -q`. **Expect:** all pass.
+
+### 17.11 Browser tests (8.11)
+
+- [ ] **17.11.1 They run.** Ports 8020 and 3020 free; from the repo root:
+  `npm run e2e -w web`. **Expect:** Playwright starts its own API and web
+  app, seeds them, and all seven tests pass; nothing appears in the dev
+  database.
+- [ ] **17.11.2 A failure is readable.** Break one on purpose (rename the
+  "Send" button in a scratch copy). **Expect:** the test fails with a
+  screenshot and a trace in `apps/web/test-results`.
+
+## 18. Phase 9: Actions, permissions and the pilot
+
+### 18.1 Requests that wait, declared actions, approvers (9.1)
+
+The owner, an admin, a builder and an employee (Pat), on the dev stack
+(`ACTION_EXECUTOR` unset: requests run in the API). A scratch SQLite
+helpdesk file with `tickets (id, title, status, requester_email)` and
+`access_requests (id, app, reason, requester_email)`, as a connection
+that allows writes.
+
+- [ ] **18.1.1 Declaring.** As the builder, on the database node's
+  drawer, **Add an action** "Reopen my ticket", SQL
+  `UPDATE tickets SET status = 'open' WHERE id = :id`, a whole-number
+  value `id`, tier "The person asking confirms". **Expect:** refused,
+  saying `confirm` is only for the asker's own rows. Add
+  `AND requester_email = :asker_email`. **Expect:** saved, badge "Asker
+  confirms". Add "Close a ticket" (`UPDATE tickets SET status = 'closed'
+  WHERE id = :id`, "An approver decides") and "Request access to an app"
+  (an INSERT with `:app` limited to Figma, Slack, Jira and
+  `:asker_email`, "confirms").
+- [ ] **18.1.2 Read-only.** Switch the connection's writes off.
+  **Expect:** the canvas reports that the action changes data on a
+  read-only connection, and **Submit for review** is blocked. Switch them
+  back on.
+- [ ] **18.1.3 The asker's own, in a preview.** In the builder's preview,
+  ask for access to Figma (fake driver: `act: request_access {"app":
+  "Figma", "reason": "Redesign"}`). **Expect:** the answer says it is
+  saved and waiting; the tool step says "Saved as a request"; a card
+  "Waiting for you to confirm" with the reference, "closes in 24 hours",
+  the app as a choice and the reason editable. Choose Slack, **Confirm**.
+  **Expect:** the card goes; the thread says it was done, with the row;
+  the file has Slack and the builder's address.
+- [ ] **18.1.4 An approver's, in live Chat.** Submit and approve the
+  version. As Pat, ask to close ticket 2 (`act: close_ticket {"id": 2}`).
+  **Expect:** Pat's card says "Waiting for an approver" with **Withdraw**
+  and no statement; the admins are emailed (nothing of the request in
+  the email but its title and reference). Pat can't decide it.
+- [ ] **18.1.5 The queue.** As the admin, **Approvals**. **Expect:** the
+  request with Pat, the assistant, "closes in 3 days", the value and the
+  exact statement. **Decline** with no note: refused. **Approve and
+  run**. **Expect:** the ticket closes; Pat is emailed; Pat's thread says
+  it was done, in one line, with no statement.
+- [ ] **18.1.6 Changed or late.** Ask again; as the admin, open the queue
+  in two tabs and approve in one, then in the other. **Expect:** the
+  second is refused (already decided). Set the org's expiry to 1 hour,
+  ask again, and wait (or move `expires_at` back in the database).
+  **Expect:** the sweep expires it; Pat is told in the thread and by
+  email.
+- [ ] **18.1.7 Named approvers.** As the admin, History › **Who approves
+  its requests**: add the builder. Ask again as Pat. **Expect:** only the
+  builder is emailed; the builder's **Approvals** lists it; an admin
+  still can decide. Remove the builder: "The admins, as nobody is
+  named".
+- [ ] **18.1.8 Standing in.** As the builder (a named approver), Your
+  account › **While you're away**: hand over to the owner until
+  tomorrow. **Expect:** listed; the owner can decide the builder's
+  assistant's requests. **End now**. As the admin, hand over to Pat.
+  **Expect:** Pat still can't decide (an admin's powers don't pass on).
+- [ ] **18.1.9 Checked again before it runs.** Ask again; approve it with
+  the worker stopped (`ACTION_EXECUTOR=queue` and no mailer running),
+  pause the assistant, then start the mailer. **Expect:** it fails, saying
+  the assistant was paused; nothing was written.
+- [ ] **18.1.10 The tests.** From `apps/api`: `python -m pytest
+  tests/test_actions.py tests/test_requests.py tests/test_chat_approvals.py
+  tests/test_approval_races.py -q`. **Expect:** all pass.
+
+### 18.2 The inbox, emails and My requests (9.2)
+
+The same people and assistant as 18.1.
+
+- [ ] **18.2.1 Counts.** Ask for two approver requests as Pat. **Expect:**
+  within a minute the admin's sidebar shows **Approvals 2**; Pat's Chat
+  home says "My requests: 2 still open".
+- [ ] **18.2.2 Emails.** **Expect:** each admin got one email for the
+  first request, linking to its page, and none for the second. After 15
+  minutes (or with the sweep run by hand), one "2 requests wait" email
+  each. No email says what the request would do.
+- [ ] **18.2.3 A request's page.** Open the link from the email while
+  signed out. **Expect:** sign-in first, then the request, with the
+  decision card. As the builder (not an approver), the same link says it
+  isn't one you can see.
+- [ ] **18.2.4 The views.** As the admin, decide one. **Expect:** it
+  leaves Waiting and shows under **Decided by you**; **All requests**
+  lists everything, and the state and assistant filters narrow it.
+- [ ] **18.2.5 My requests.** As Pat, **My requests**. **Expect:** both,
+  newest first; the decided one's page shows who decided and their note,
+  and no statement; the waiting one has **Withdraw**.
+- [ ] **18.2.6 The tests.** From `apps/api`: `python -m pytest
+  tests/test_inbox.py -q`. **Expect:** all pass.
+
+### 18.3 Data scoped to the asker, HTTP calls, internal destinations (9.3)
+
+The same people as 18.1. Two more things are needed:
+
+- **A Postgres database** with a non-owner role: an `leave (email, days)`
+  table, row-level security enabled, and a policy
+  `USING (email = current_setting('app.asker_email', true))`.
+- **A small server that prints what it receives** (method, path, headers,
+  body) and answers JSON, on this machine's LAN address, e.g.
+  `192.168.1.20:8099`. Not `localhost`: this machine is always refused.
+
+- [ ] **18.3.1 Only Postgres is scoped.** On a SQLite connection's
+  permissions there is no **Answer only for the person asking**; on the
+  Postgres one there is. Turn it on and **Test connection**. **Expect:**
+  as the table's owner or a superuser, the test fails and says row-level
+  security wouldn't apply. As the reader role, it passes, warning about
+  any table without a policy.
+- [ ] **18.3.2 Each person sees their own rows.** Wire it to an assistant
+  with "Let the assistant write SQL" on. As Pat, ask "how many leave days
+  do I have?". **Expect:** only Pat's row. As the admin, only theirs. A
+  dry run (graph compile) or an eval case refuses with "answers only for
+  a signed-in person".
+- [ ] **18.3.3 An internal destination.** As the owner, Organisation →
+  **Internal destinations**: host `192.168.1.20`, range
+  `192.168.1.0/24`, port `8099`, **Allow plain http**. Try range
+  `127.0.0.0/8`. **Expect:** refused ("this machine"). Save the right
+  one. **Expect:** the audit log has the change.
+- [ ] **18.3.4 A connection.** As the builder, on the HTTP request node's
+  drawer, **Add a connection** "Tickets", address
+  `http://192.168.1.20:8099/api`, header `Authorization: Bearer test`,
+  **Say who is asking** on. **Expect:** saved. On Edit it shows
+  "Stored: Authorization" and never the value. A header named
+  `X-Asker-Email` is refused.
+- [ ] **18.3.5 Calls.**
+  1. **Add a call** "Look up a ticket", `GET /tickets/{ticket_id}`, an
+     integer value, fields `id, status`. **Expect:** the tier is fixed
+     at "At once".
+  2. Add "Open an IT ticket": `POST /users/{asker_email}/tickets`, a
+     value `title`, "The person asking confirms".
+  3. Try a path with `?x=1`, or `/../admin`. **Expect:** refused, with
+     the reason.
+- [ ] **18.3.6 A read runs at once.** In the preview, ask about ticket 7.
+  **Expect:** the server prints `GET /api/tickets/7` with `Authorization`
+  and `X-Asker-Email` (yours). The answer shows only `id` and `status`.
+- [ ] **18.3.7 Confirm, then send.** Publish; as Pat, "open a ticket: VPN
+  drops". **Expect:**
+  - the confirm card, and nothing printed by the server yet;
+  - after Pat edits the title and confirms, one
+    `POST /api/users/pat%40…/tickets` with the edited title in the body
+    and Pat's `X-Asker-*` headers;
+  - the request succeeded in My requests.
+- [ ] **18.3.8 A moved system isn't followed.** Ask for an
+  approver-tier call, then change the connection's address before an
+  admin approves. **Expect:** after approval, nothing reaches the server
+  and the request fails, saying the address changed. The version shows
+  the connection drifted until it is approved again.
+- [ ] **18.3.9 Confirm needs identity.** Turn **Say who is asking** off.
+  **Expect:** the confirm call can't be saved and the canvas shows
+  `confirm_without_asker`. A read call reaches the server without
+  `X-Asker-*`.
+- [ ] **18.3.10 The tests.** From `apps/api`: `python -m pytest
+  tests/test_http_actions.py tests/test_sql_scope.py
+  tests/test_destinations.py -q`. **Expect:** all pass. The RLS test
+  skips if the dev Postgres is down.
+
+### 18.4 Knowledge groups, revocation, the scan and share links (9.4)
+
+The owner, a builder, and two employees: Pat, in a group "HR", and Sam,
+in no group. An assistant with two text sources, "HR handbook" and
+"Office hours", whose audience is everyone, made live.
+
+- [ ] **18.4.1 Restricting.** As the builder, Sources › "HR handbook" ›
+  **Change** › **Only these groups** › HR › **Save**. **Expect:** "Who can
+  read it: HR", and the audit log has `data_source.access` with before
+  and after. Pick no group. **Expect:** the warning "nobody can read it".
+- [ ] **18.4.2 Offered only to readers.** Make it live again. **Expect:**
+  Pat sees the assistant in Chat; Sam doesn't. Add Sam to HR. **Expect:**
+  Sam sees it.
+- [ ] **18.4.3 Answers follow the reader.** In a preview, the builder asks
+  about leave. **Expect:** an answer citing the handbook (editors read
+  all). As Pat, the same.
+- [ ] **18.4.4 Losing access.** As Pat, ask about leave, then have an admin
+  remove Pat from HR. **Expect:**
+  - Pat no longer sees the assistant in Chat;
+  - Pat's open conversation still shows the earlier answer, without its
+    citation;
+  - added back, Pat's next message starts fresh: it doesn't remember the
+    earlier exchange.
+- [ ] **18.4.5 Deleting a group.** Delete HR. **Expect:** the message says 1
+  knowledge source named it; the handbook reads "a deleted group" and
+  reaches nobody until given readers again.
+- [ ] **18.4.6 The scan.** Add a text source, open to everyone, containing
+  a made-up key like `sk-ant-` followed by 30 letters. **Expect:**
+  "Waiting for you", one credential found, the example masked as `sk-a…`,
+  nothing indexed. **Everyone may read it**. **Expect:** queued, then
+  indexed; the audit log has `data_source.sensitive_confirmed`. Paste text
+  with three PAN-shaped values. **Expect:** held. **Choose groups** › a
+  group. **Expect:** indexed. Text with only phone numbers. **Expect:**
+  indexed, with the count shown under it.
+- [ ] **18.4.7 Sharing.** As Pat, in a Chat conversation that cites the
+  handbook, **Share** › **Create a link**. **Expect:** the link is shown
+  once, with **Copy**, and listed under Open links. Then:
+  1. Open it as Sam, not in HR. **Expect:** "doesn't open for you".
+  2. Add Sam to HR and open it again. **Expect:** the questions, answers
+     and citations, read-only, with no tool steps. Pat's list says
+     "Opened 1 time".
+  3. **Revoke** it. **Expect:** Sam's reload says it doesn't open any more.
+  4. Deactivate Pat and open another of Pat's links. **Expect:** the same.
+  5. Open a preview conversation. **Expect:** it has no Share.
+- [ ] **18.4.8 The tests.** From `apps/api`: `python -m pytest
+  tests/test_knowledge_groups.py -q`. **Expect:** all pass.
+
+### 18.5 Hand-off, screenshots, builder budget, the sample (9.5 to 9.8)
+
+- [ ] **18.5.1 Hand-off.** Settings › Hand-off on, with an admin's email.
+  In Chat, **Get help from a person** › a note › Send. **Expect:** the
+  contact's email has only who, which assistant and a link; the dialog
+  shows the summary; a second try within 10 minutes is refused.
+- [ ] **18.5.2 Screenshots.** Paste a screenshot and send. **Expect:** it
+  shows in your message; a .svg or a 6 MB file is refused.
+- [ ] **18.5.3 Typed secrets.** Send "my password: Hunter2!". **Expect:** a
+  note that it was hidden; the stored message shows it masked.
+- [ ] **18.5.4 Builder budget.** Set a $1 builder budget and preview until
+  it runs out. **Expect:** previews stop with the builder message; Chat
+  still answers.
+- [ ] **18.5.5 The sample.** Start from **IT helpdesk**, run `python -m
+  scripts.demo_helpdesk`, add the connection and paste the actions.
+  **Expect:** "my tickets" answers; an access request waits for the
+  person's confirmation.
+
+### 18.6 Insight (10.1 to 10.5)
+
+- [ ] **18.6.1 Analytics.** The Analytics tab after a few rated
+  conversations. **Expect:** figures with the previous period; Usage ›
+  report and its CSV (audited).
+- [ ] **18.6.2 Traffic.** Canvas › Traffic while someone chats. **Expect:**
+  counts on stations, busy lines.
+- [ ] **18.6.3 Needs review.** Thumbs-down an answer; Feedback › turn it
+  into a test case; fix the assistant, approve, run the suite. **Expect:**
+  the person gets one "fixed in version N" email.
+- [ ] **18.6.4 Evidence.** Submit a version with a suite run. **Expect:** the
+  approval card shows the scorecard, "no unapproved write" and a
+  forecast.
+- [ ] **18.6.5 Export and erasure.** Chat › Export. **Expect:** a Markdown
+  file. Erase a person. **Expect:** What was erased lists what went with
+  them.
 
 ## Reporting a failure
 

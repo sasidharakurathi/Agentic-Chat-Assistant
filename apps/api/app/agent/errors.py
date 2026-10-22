@@ -62,6 +62,15 @@ _KNOWN: dict[str, tuple[str, bool]] = {
         False,
     ),
     "invalid_request": ("The model rejected the request.", False),
+    # The provider's own cap (Phase 8.9): a 429 `enforced_spend_limit_reached`
+    # lasts until the 1st of the month, and a limit the account set itself
+    # comes back as a 400. Neither passes "in a minute", and trying again
+    # spends nothing but time.
+    "provider_spend_cap": (
+        "The model provider's spending limit has been reached, so answers have stopped until "
+        "an administrator raises it or it resets.",
+        False,
+    ),
     # The API refuses a model the bundled CLI is too old for (Phase 7a.6:
     # "Claude Code 2.1.258 does not support this model; version 2.1.280 or
     # newer is required"). Trying again can't help.
@@ -99,6 +108,10 @@ _BY_STATUS = {
 #: "prompt is too long" comes back as a plain 400.
 _BY_TEXT: tuple[tuple[tuple[str, ...], str], ...] = (
     (("prompt is too long", "context length"), "context_too_long"),
+    (
+        ("enforced_spend_limit", "spend limit", "specified api usage limits", "usage limit"),
+        "provider_spend_cap",
+    ),
     (("timed out", "timeout"), "timeout"),
     (("overloaded",), "overloaded"),
     (("rate limit",), "rate_limited"),
@@ -107,14 +120,15 @@ _BY_TEXT: tuple[tuple[tuple[str, ...], str], ...] = (
 
 def _api_failure(status: int | None, text: str) -> str:
     lowered = text.lower()
-    for needles, code in _BY_TEXT[:1]:
+    # Read before the status: both come back as a plain 400 or 429.
+    for needles, code in _BY_TEXT[:2]:
         if any(n in lowered for n in needles):
             return code
     if status in _BY_STATUS:
         return _BY_STATUS[status]
     if status is not None and status >= 500:  # noqa: PLR2004 - HTTP server errors
         return "overloaded"
-    for needles, code in _BY_TEXT[1:]:
+    for needles, code in _BY_TEXT[2:]:
         if any(n in lowered for n in needles):
             return code
     return "agent_error"

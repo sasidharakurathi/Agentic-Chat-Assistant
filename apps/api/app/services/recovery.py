@@ -95,8 +95,9 @@ async def notice_unanswered(now: datetime | None = None) -> int:
 
 
 async def sweep(now: datetime | None = None) -> tuple[int, int]:
-    """(approvals closed, questions noticed)."""
-    return await approvals.sweep_orphaned(now), await notice_unanswered(now)
+    """(requests expired, questions noticed). The request sweep also
+    reminds approvers and settles what a dead process left (Phase 9.1)."""
+    return (await approvals.sweep(now))["expired"], await notice_unanswered(now)
 
 
 __all__ = ["INTERRUPTED_NOTICE", "UNANSWERED_AFTER_S", "notice_unanswered", "sweep"]

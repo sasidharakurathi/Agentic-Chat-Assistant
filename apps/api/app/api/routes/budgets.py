@@ -8,6 +8,7 @@ is audit-logged. Enforcement is in `services/budgets.py`.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path
@@ -15,12 +16,21 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AssistantCtx, ClientIP, OrgMembership, SessionDep, require_role
-from app.api.errors import Forbidden
+from app.api.errors import Forbidden, NotFound
 from app.models.assistant import Assistant
 from app.models.budget import BudgetPeriod
 from app.models.enums import MemberRole
 from app.models.membership import Membership
-from app.schemas.budget import BudgetLimits, BudgetsOut, BudgetStatusOut
+from app.schemas.budget import (
+    BudgetLimits,
+    BudgetsOut,
+    BudgetStatusOut,
+    BuilderSpendOut,
+    PeopleBudgetsOut,
+    PersonBudgetOut,
+    PersonDefaultIn,
+    PersonDefaultOut,
+)
 from app.services import budgets as svc
 
 router = APIRouter(tags=["budgets"])
@@ -61,6 +71,24 @@ async def _out(
     )
 
 
+async def _with_builder(session: AsyncSession, org_id: uuid.UUID, out: BudgetsOut) -> BudgetsOut:
+    """The organisation's page adds builder testing's line (Phase 9.7)."""
+    now = datetime.now(UTC)
+    start, resets = svc.period_bounds(BudgetPeriod.month, now)
+    status = await svc.builder_status(session, org_id, now)
+    spent = (
+        status.spent_usd if status is not None else await svc.builder_spent(session, org_id, start)
+    )
+    out.builder = BuilderSpendOut(
+        spent_usd=round(spent, 6),
+        limit_usd=status.limit_usd if status else None,
+        ratio=round(status.ratio, 4) if status else None,
+        state=status.state if status else "ok",
+        resets_at=resets,
+    )
+    return out
+
+
 def _limits(body: BudgetLimits) -> dict[BudgetPeriod, float | None]:
     return {BudgetPeriod.day: body.daily_usd, BudgetPeriod.month: body.monthly_usd}
 
@@ -69,8 +97,10 @@ def _limits(body: BudgetLimits) -> dict[BudgetPeriod, float | None]:
 async def get_org_budgets(
     org_id: Annotated[uuid.UUID, Path()], m: OrgMembership, session: SessionDep
 ) -> BudgetsOut:
-    """Every budget in the org (its own and each assistant's), with spend."""
-    return await _out(session, await svc.list_for_org(session, org_id), _is_admin(m))
+    """Every budget in the org (its own and each assistant's), with spend,
+    and builder testing's spend this month (Phase 9.7)."""
+    out = await _out(session, await svc.list_for_org(session, org_id), _is_admin(m))
+    return await _with_builder(session, org_id, out)
 
 
 @router.put("/orgs/{org_id}/budgets", response_model=BudgetsOut)
@@ -89,7 +119,95 @@ async def put_org_budgets(
         actor_id=m.user_id,
         ip=ip,
     )
-    return await _out(session, await svc.list_for_org(session, org_id), True)
+    out = await _out(session, await svc.list_for_org(session, org_id), True)
+    return await _with_builder(session, org_id, out)
+
+
+async def _people_out(session: AsyncSession, org_id: uuid.UUID) -> PeopleBudgetsOut:
+    defaults, rows = await svc.people(session, org_id)
+    day, month = BudgetPeriod.day, BudgetPeriod.month
+    return PeopleBudgetsOut(
+        defaults=[
+            PersonDefaultOut(
+                role="employee" if key == svc.ROLE_EMPLOYEE else "builder",
+                daily_usd=defaults[key].get(day),
+                monthly_usd=defaults[key].get(month),
+            )
+            for key in svc.ROLE_KEYS
+        ],
+        people=[
+            PersonBudgetOut(
+                user_id=r.user_id,
+                name=r.name,
+                email=r.email,
+                role=r.role.value,
+                spent_today_usd=round(r.spent_day, 6),
+                spent_month_usd=round(r.spent_month, 6),
+                daily_usd=r.limits[day][0] if day in r.limits else None,
+                monthly_usd=r.limits[month][0] if month in r.limits else None,
+                own_daily=r.limits.get(day, (0, False))[1],
+                own_monthly=r.limits.get(month, (0, False))[1],
+            )
+            for r in rows
+        ],
+    )
+
+
+@router.get("/orgs/{org_id}/budgets/people", response_model=PeopleBudgetsOut)
+async def get_people_budgets(
+    org_id: Annotated[uuid.UUID, Path()], m: OrgAdmin, session: SessionDep
+) -> PeopleBudgetsOut:
+    """Per-person caps and everyone's spend (Phase 8.9): the admins' alone,
+    since one person's spend is about that person."""
+    return await _people_out(session, org_id)
+
+
+@router.put("/orgs/{org_id}/budgets/people", response_model=PeopleBudgetsOut)
+async def put_people_default(
+    org_id: Annotated[uuid.UUID, Path()],
+    body: PersonDefaultIn,
+    m: OrgAdmin,
+    session: SessionDep,
+    ip: ClientIP,
+) -> PeopleBudgetsOut:
+    """The cap each Employee gets, or each builder, admin and owner. Null
+    removes that limit."""
+    await svc.set_person_default(
+        session,
+        org_id=org_id,
+        key=svc.ROLE_EMPLOYEE if body.role == "employee" else svc.ROLE_BUILDER,
+        limits=_limits(body),
+        actor_id=m.user_id,
+        ip=ip,
+    )
+    return await _people_out(session, org_id)
+
+
+@router.put("/orgs/{org_id}/members/{user_id}/budget", response_model=PeopleBudgetsOut)
+async def put_person_budget(
+    org_id: Annotated[uuid.UUID, Path()],
+    user_id: Annotated[uuid.UUID, Path()],
+    body: BudgetLimits,
+    m: OrgAdmin,
+    session: SessionDep,
+    ip: ClientIP,
+) -> PeopleBudgetsOut:
+    """One person's own cap, in place of their role's. Both null: back to
+    the role's."""
+    member = await session.scalar(
+        select(Membership).where(Membership.org_id == org_id, Membership.user_id == user_id)
+    )
+    if member is None:
+        raise NotFound("Member not found")
+    await svc.set_person_override(
+        session,
+        org_id=org_id,
+        user_id=user_id,
+        limits=_limits(body),
+        actor_id=m.user_id,
+        ip=ip,
+    )
+    return await _people_out(session, org_id)
 
 
 @router.get("/assistants/{assistant_id}/budget", response_model=BudgetsOut)

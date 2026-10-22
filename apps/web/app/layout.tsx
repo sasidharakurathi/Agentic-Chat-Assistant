@@ -1,7 +1,8 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Fira_Code, Fira_Sans, Fira_Sans_Condensed } from "next/font/google";
 import type { ReactNode } from "react";
 
+import { ServiceWorker } from "@/components/service-worker";
 import { ThemeProvider } from "@/components/theme-provider";
 import { DialogProvider } from "@/components/ui/dialog";
 import { ToastProvider } from "@/components/ui/toast";
@@ -30,6 +31,15 @@ export const metadata: Metadata = {
   title: "Assistant Studio",
   description:
     "Build an assistant by wiring together what it can use: your documents, databases, tools and MCP servers. Then chat with it and see every step it took.",
+  // Added to a phone's home screen (Phase 8.6), it is Chat.
+  appleWebApp: { capable: true, title: "Chat", statusBarStyle: "default" },
+};
+
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f3f6f4" },
+    { media: "(prefers-color-scheme: dark)", color: "#141b18" },
+  ],
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
@@ -47,6 +57,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           <ToastProvider>
             <DialogProvider>
               <AuthProvider>{children}</AuthProvider>
+              <ServiceWorker />
             </DialogProvider>
           </ToastProvider>
         </ThemeProvider>

@@ -28,8 +28,9 @@ from app.rag.embedders import get_embedder
 from app.rag.vectorstore import ChunkRecord, PgVectorStore
 from app.schemas.assistant_config import RagConfig
 from sqlalchemy.ext.asyncio import AsyncSession
+from tests.infra import unavailable
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.local_models]
 
 POSTGRES_URL = os.environ.get(
     "INTEGRATION_DATABASE_URL", "postgresql+asyncpg://app:app@localhost:45432/app"
@@ -47,7 +48,7 @@ async def _point_app_db_at_postgres(monkeypatch: pytest.MonkeyPatch) -> AsyncIte
     except Exception as exc:  # pragma: no cover - environment-dependent
         db_session.get_engine.cache_clear()
         db_session.get_sessionmaker.cache_clear()
-        pytest.skip(f"Postgres not reachable at {POSTGRES_URL}: {exc}")
+        unavailable("postgres", f"Postgres not reachable at {POSTGRES_URL}: {exc}")
     yield
     db_session.get_engine.cache_clear()
     db_session.get_sessionmaker.cache_clear()

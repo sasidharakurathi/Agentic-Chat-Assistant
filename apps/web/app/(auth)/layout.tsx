@@ -2,7 +2,6 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 
 import { BrandLockup } from "@/components/brand-mark";
-import { DesktopOnlyNote } from "@/components/desktop-only";
 
 export default function AuthLayout({ children }: { children: ReactNode }) {
   return (
@@ -14,10 +13,8 @@ export default function AuthLayout({ children }: { children: ReactNode }) {
         >
           <BrandLockup size="lg" />
         </Link>
-        {/* Signing in is for a computer: on a phone, the note instead of
-            the form. */}
-        <DesktopOnlyNote className="md:hidden" />
-        <div className="hidden md:block">{children}</div>
+        {/* Signing in works on a phone (Phase 8.6, plan D12): Chat does. */}
+        {children}
       </div>
     </div>
   );

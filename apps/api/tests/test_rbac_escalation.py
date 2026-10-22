@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import pytest
 from httpx import AsyncClient
 from tests.test_orgs import Actor, _register
+from tests.versions import go_live
 
 pytestmark = pytest.mark.anyio
 
@@ -145,8 +146,12 @@ async def test_a_refusal_is_audited_nowhere_but_a_change_is(client: AsyncClient)
 async def _conversation_of(client: AsyncClient, team: Team, creator: Actor) -> str:
     a = await client.post("/api/v1/assistants", json={"name": "Shared"}, headers=team.h(team.owner))
     assert a.status_code == 201, a.text
+    # The owner's assistant, live: the member chats with it as Chat would.
+    await go_live(client, a.json()["id"], team.h(team.owner), approver=team.h(team.admin))
     c = await client.post(
-        f"/api/v1/assistants/{a.json()['id']}/conversations", json={}, headers=team.h(creator)
+        f"/api/v1/assistants/{a.json()['id']}/conversations",
+        json={},
+        headers=team.h(creator),
     )
     assert c.status_code == 201, c.text
     return str(c.json()["id"])
@@ -181,14 +186,16 @@ async def test_admins_read_a_teammates_conversation_but_cannot_act_in_it(
 ) -> None:
     """Phase 7a.4: a message runs the agent as the conversation's owner (their
     memory, and soon their identity), so an admin posting into it would act
-    in their name. Reading stays open to admins; acting does not."""
+    in their name. Reading stays open to admins, with a recorded reason
+    (7b.2); acting does not."""
     t = await _team(client)
     cid = await _conversation_of(client, t, t.member)
     url = f"/api/v1/conversations/{cid}"
     for admin in (t.admin, t.owner):
         h = t.h(admin)
+        why = {**h, "X-Read-Reason": "review"}
         for read in (url, f"{url}/messages", f"{url}/runs", f"{url}/approvals", f"{url}/turn"):
-            assert (await client.get(read, headers=h)).status_code == 200, read
+            assert (await client.get(read, headers=why)).status_code == 200, read
         acts = [
             await client.post(f"{url}/messages", json={"text": "hi"}, headers=h),
             await client.post(f"{url}:interrupt", headers=h),
@@ -206,16 +213,19 @@ async def test_a_conversation_says_who_started_it(client: AsyncClient) -> None:
     """The web app shows a read-only view to everyone else (Phase 7a.4)."""
     t = await _team(client)
     cid = await _conversation_of(client, t, t.member)
-    got = (await client.get(f"/api/v1/conversations/{cid}", headers=t.h(t.admin))).json()
+    why = {**t.h(t.admin), "X-Read-Reason": "review"}
+    got = (await client.get(f"/api/v1/conversations/{cid}", headers=why)).json()
     assert got["created_by"] == t.member.user_id
 
 
-async def test_reading_a_teammates_conversation_is_unchanged(client: AsyncClient) -> None:
-    """Visibility within the org is not what was broken; only mutation was."""
+async def test_a_teammate_cannot_read_your_conversation(client: AsyncClient) -> None:
+    """Conversations are private between employees (Phase 7b.2, plan D5).
+    Until then any member could read any; `test_conversation_privacy.py`
+    covers the rest."""
     t = await _team(client)
     cid = await _conversation_of(client, t, t.member)
     got = await client.get(f"/api/v1/conversations/{cid}", headers=t.h(t.member2))
-    assert got.status_code == 200
+    assert (got.status_code, got.json()["error"]["code"]) == (403, "not_conversation_owner")
 
 
 async def test_rename_and_archive_are_audited(client: AsyncClient) -> None:

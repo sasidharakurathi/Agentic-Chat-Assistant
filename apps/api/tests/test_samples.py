@@ -40,9 +40,9 @@ def test_there_are_samples_and_their_ids_are_their_file_names() -> None:
     assert len(set(IDS)) == len(IDS)
     on_disk = sorted(p.stem for p in samples.FOLDER.glob("*.json"))
     assert on_disk == sorted(IDS)
-    # The gallery's order is chosen, not the alphabet's: the one that shows
-    # the most, first.
-    assert IDS[0] == "store-support"
+    # The gallery's order is chosen, not the alphabet's: the pilot's own,
+    # the IT helpdesk (Phase 9.8), first.
+    assert IDS[0] == "it-helpdesk"
     assert [s.order for s in SAMPLES] == sorted(s.order for s in SAMPLES)
 
 

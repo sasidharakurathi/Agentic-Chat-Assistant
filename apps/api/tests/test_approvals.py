@@ -1,19 +1,24 @@
-"""Human-in-the-loop approvals (task 3.8).
+"""Human-in-the-loop approvals (task 3.8; Phase 9.1).
 
-Two layers: the classifier (does this even need a human?) and the round trip
-(a tool call blocks, an event reaches the client, a decision unblocks it).
-The property worth pinning hardest is the *default*: every path that isn't an
-explicit "approved" must end in a denial — timeouts included.
+Two layers: the classifier (does this even need a person?) and the hand-off
+(since Phase 9.1 a call that needs one is stored as a request and the turn
+goes on: nothing waits inside it). The property worth pinning hardest is
+the *default*: no path runs a call that needs a person, in the turn.
 """
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 
 import pytest
-from app.agent import approval_registry as registry
-from app.agent.approvals import ApprovalRequest, build_can_use_tool, classify, describe, redact
+from app.agent.approvals import (
+    ApprovalRequest,
+    RequestOutcome,
+    build_can_use_tool,
+    classify,
+    describe,
+    redact,
+)
 from app.schemas.assistant_config import ApprovalPolicy, DatabaseRef
 from claude_agent_sdk import PermissionResultDeny
 
@@ -122,52 +127,68 @@ def test_credentials_are_redacted_before_display_or_logging() -> None:
     assert "hunter2" not in str(clean)
 
 
-# ── the round trip ───────────────────────────────────────────
+# ── the hand-off (Phase 9.1) ─────────────────────────────────
 
 
-async def _decide(tool: str, sql: str, answer: str | None, *, delay: float = 0.0) -> object:
-    """Run `can_use_tool` against a stub reviewer that answers `answer`
-    (or never answers, when None)."""
+async def _decide(
+    tool: str, sql: str, outcome: RequestOutcome
+) -> tuple[object, dict[str, object], dict[str, str]]:
+    """Run `can_use_tool` against a stub that stores the request and says
+    `outcome`. Returns the result, what the stub saw, and the labels."""
     seen: dict[str, object] = {}
+    labels: dict[str, str] = {}
 
     async def request(
-        tool_name: str, tool_input: dict, risk: str, rationale: str, **_k: object
-    ) -> str:
-        seen.update(tool=tool_name, risk=risk, rationale=rationale)
-        if delay:
-            await asyncio.sleep(delay)
-        if answer is None:
-            await asyncio.sleep(3600)
-        return answer
+        tool_name: str, tool_input: dict, risk: str, rationale: str, **k: object
+    ) -> RequestOutcome:
+        seen.update(tool=tool_name, risk=risk, rationale=rationale, **k)
+        return outcome
 
     can_use = build_can_use_tool(
         POLICY,
         ApprovalRequest(conversation_id=uuid.uuid4(), org_id=uuid.uuid4(), request=request),
+        permissions=labels,
     )
-    result = await can_use(q(tool), {"sql": sql}, None)  # type: ignore[arg-type]
-    return result, seen
+
+    class Ctx:
+        tool_use_id = "call-1"
+
+    result = await can_use(q(tool), {"sql": sql}, Ctx())  # type: ignore[arg-type]
+    return result, seen, labels
 
 
-async def test_an_approval_lets_the_tool_run() -> None:
-    result, seen = await _decide("sql_query", "DELETE FROM t", "approved")
-    assert type(result).__name__ == "PermissionResultAllow"
+async def test_a_write_is_stored_and_the_turn_goes_on() -> None:
+    """Nothing runs in the turn and nothing waits: the model is told it is
+    saved, and is not interrupted, so it can tell the person."""
+    result, seen, labels = await _decide(
+        "sql_query", "DELETE FROM t", RequestOutcome("queued", "Saved as request R-1.")
+    )
+    assert isinstance(result, PermissionResultDeny)
+    assert result.message == "Saved as request R-1."
+    assert result.interrupt is False
     assert seen["risk"] == "high"
     assert seen["rationale"] == "DELETE FROM t"
+    assert seen["tier"] == "approver", "a free-form write is an approver's"
+    assert seen["tool_use_id"] == "call-1"
+    assert labels == {"call-1": "queued"}
 
 
-async def test_a_denial_stops_the_tool_and_says_a_human_declined() -> None:
-    result, _ = await _decide("sql_query", "DELETE FROM t", "denied")
-    assert type(result).__name__ == "PermissionResultDeny"
-    assert "declined" in result.message
-    # High-risk denials interrupt rather than let the agent try another route.
+async def test_a_request_that_cant_be_stored_says_why() -> None:
+    result, _, labels = await _decide(
+        "sql_query", "DELETE FROM t", RequestOutcome("refused", "The values don't fit.")
+    )
+    assert isinstance(result, PermissionResultDeny)
+    assert result.message == "The values don't fit."
+    assert labels == {"call-1": "refused"}
+
+
+async def test_an_eval_declines_what_needs_a_person() -> None:
+    result, _, labels = await _decide("sql_query", "DELETE FROM t", RequestOutcome("unattended"))
+    assert isinstance(result, PermissionResultDeny)
+    assert "automated test run" in result.message
+    # High risk stops the agent rather than letting it find another route.
     assert result.interrupt is True
-
-
-async def test_an_expiry_denies_rather_than_allows() -> None:
-    """The most important default in this module."""
-    result, _ = await _decide("sql_query", "DELETE FROM t", "expired")
-    assert type(result).__name__ == "PermissionResultDeny"
-    assert "in time" in result.message
+    assert labels == {"call-1": "unattended"}
 
 
 async def test_without_a_reviewer_anything_needing_one_is_denied() -> None:
@@ -181,10 +202,10 @@ async def test_without_a_reviewer_anything_needing_one_is_denied() -> None:
 async def test_a_read_never_reaches_the_reviewer_at_all() -> None:
     called = False
 
-    async def request(*_a: object, **_k: object) -> str:  # pragma: no cover
+    async def request(*_a: object, **_k: object) -> RequestOutcome:  # pragma: no cover
         nonlocal called
         called = True
-        return "approved"
+        return RequestOutcome("queued")
 
     can_use = build_can_use_tool(
         POLICY,
@@ -194,44 +215,34 @@ async def test_a_read_never_reaches_the_reviewer_at_all() -> None:
     assert called is False
 
 
-# ── the waiting-room registry ────────────────────────────────
+# ── declared actions (Phase 9.1) ─────────────────────────────
 
 
-async def test_register_then_resolve_wakes_the_waiter() -> None:
-    aid = uuid.uuid4()
-    future = registry.register(aid)
-    assert registry.resolve_local(aid, "approved") is True
-    assert await future == "approved"
+@pytest.mark.parametrize(
+    ("tier", "mode", "risk"),
+    [("read", "auto", "low"), ("confirm", "confirm", "medium"), ("approver", "require", "high")],
+)
+def test_a_declared_action_runs_as_its_tier_says(tier: str, mode: str, risk: str) -> None:
+    tiers = {q("act_request_access"): tier}
+    assert classify(q("act_request_access"), {}, POLICY, action_tiers=tiers) == (mode, risk)
 
 
-async def test_a_decision_arriving_before_the_await_is_not_lost() -> None:
-    """Why `register()` is called before the approval is announced."""
-    aid = uuid.uuid4()
-    future = registry.register(aid)
-    registry.resolve_local(aid, "denied")  # resolved while nobody is awaiting
-    assert await registry.wait(aid, future, timeout=1.0) == "denied"
+async def test_a_confirm_action_goes_to_the_asker_and_an_approver_one_does_not() -> None:
+    seen: list[object] = []
 
+    async def request(*_a: object, **k: object) -> RequestOutcome:
+        seen.append(k["tier"])
+        return RequestOutcome("queued", "saved")
 
-async def test_waiting_times_out_to_expired() -> None:
-    aid = uuid.uuid4()
-    future = registry.register(aid)
-    assert await registry.wait(aid, future, timeout=0.05) == "expired"
-    # ...and the slot is released rather than leaking for the process's life.
-    assert registry.pending_count() == 0
-
-
-async def test_resolving_something_nobody_is_waiting_for_is_not_an_error() -> None:
-    """Normal when the turn already timed out, or the decision landed on a
-    different worker."""
-    assert registry.resolve_local(uuid.uuid4(), "approved") is False
-
-
-async def test_a_second_decision_does_not_overwrite_the_first() -> None:
-    aid = uuid.uuid4()
-    future = registry.register(aid)
-    assert registry.resolve_local(aid, "approved") is True
-    assert registry.resolve_local(aid, "denied") is False
-    assert await future == "approved"
+    approvals = ApprovalRequest(conversation_id=uuid.uuid4(), org_id=uuid.uuid4(), request=request)
+    can_use = build_can_use_tool(
+        POLICY,
+        approvals,
+        action_tiers={q("act_mine"): "confirm", q("act_theirs"): "approver"},
+    )
+    await can_use(q("act_mine"), {}, None)  # type: ignore[arg-type]
+    await can_use(q("act_theirs"), {}, None)  # type: ignore[arg-type]
+    assert seen == ["asker", "approver"]
 
 
 # ── the node gate comes before the human (regression) ────────
@@ -341,9 +352,11 @@ async def test_an_ordinary_refusal_keeps_the_generic_message() -> None:
 async def test_a_guard_refused_statement_is_denied_without_asking(sql: str) -> None:
     asked: list[str] = []
 
-    async def request(_tool: str, _input: dict, _risk: str, _why: str, **_k: object) -> str:
+    async def request(
+        _tool: str, _input: dict, _risk: str, _why: str, **_k: object
+    ) -> RequestOutcome:
         asked.append(_why)
-        return "approved"
+        return RequestOutcome("queued")
 
     approvals = ApprovalRequest(conversation_id=uuid.uuid4(), org_id=uuid.uuid4(), request=request)
     can_use = build_can_use_tool(POLICY, approvals, [_db("c1", expose_write=True)])
@@ -369,12 +382,15 @@ async def test_the_guard_reason_wins_over_the_expose_writes_hint() -> None:
 
 
 async def test_a_legitimate_write_still_asks() -> None:
-    """The deny path must stay narrow: an ordinary UPDATE still escalates."""
+    """The deny path must stay narrow: an ordinary UPDATE is still stored
+    for a person to decide."""
     asked: list[str] = []
 
-    async def request(_tool: str, _input: dict, _risk: str, why: str, **_k: object) -> str:
+    async def request(
+        _tool: str, _input: dict, _risk: str, why: str, **_k: object
+    ) -> RequestOutcome:
         asked.append(why)
-        return "denied"
+        return RequestOutcome("queued")
 
     approvals = ApprovalRequest(conversation_id=uuid.uuid4(), org_id=uuid.uuid4(), request=request)
     can_use = build_can_use_tool(POLICY, approvals, [_db("c1", expose_write=True)])

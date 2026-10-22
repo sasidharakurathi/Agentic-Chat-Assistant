@@ -19,9 +19,18 @@ does), or a redirect would be the way around all of this.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import httpx2
 
-from app.security.ssrf import Resolver, SsrfBlocked, resolve_public, system_resolver
+from app.security.ssrf import (
+    InternalDestination,
+    Resolver,
+    SsrfBlocked,
+    matching_destination,
+    resolve_public,
+    system_resolver,
+)
 
 
 class PinnedTransport(httpx2.AsyncBaseTransport):
@@ -32,9 +41,12 @@ class PinnedTransport(httpx2.AsyncBaseTransport):
         allow_private: bool = False,
         resolver: Resolver = system_resolver,
         inner: httpx2.AsyncBaseTransport | None = None,
+        internal: Sequence[InternalDestination] = (),
     ) -> None:
         self._allow_insecure = allow_insecure
         self._allow_private = allow_private
+        #: The organisation's internal destinations (Phase 9.3).
+        self._internal = tuple(internal)
         self._resolver = resolver
         self._inner = inner or httpx2.AsyncHTTPTransport()
 
@@ -42,13 +54,19 @@ class PinnedTransport(httpx2.AsyncBaseTransport):
         url = request.url
         if url.scheme not in ("https", "http") or not url.host:
             raise SsrfBlocked("only http(s) URLs can be reached")
-        if url.scheme == "http" and not self._allow_insecure:
+        port = url.port or (443 if url.scheme == "https" else 80)
+        if (
+            url.scheme == "http"
+            and not self._allow_insecure
+            and matching_destination(self._internal, url.host, port, "http") is None
+        ):
             raise SsrfBlocked("the server must be reached over https")
         if self._allow_private:
             return await self._inner.handle_async_request(request)
 
-        port = url.port or (443 if url.scheme == "https" else 80)
-        ip = await resolve_public(url.host, port, self._resolver)
+        ip = await resolve_public(
+            url.host, port, self._resolver, internal=self._internal, scheme=url.scheme
+        )
         request.url = url.copy_with(host=str(ip))
         request.headers["host"] = url.host if url.port is None else f"{url.host}:{url.port}"
         if url.scheme == "https":
@@ -68,6 +86,7 @@ def pinned_client(
     allow_private: bool = False,
     resolver: Resolver = system_resolver,
     inner: httpx2.AsyncBaseTransport | None = None,
+    internal: Sequence[InternalDestination] = (),
 ) -> httpx2.AsyncClient:
     """An MCP-ready client that never follows redirects and ignores proxy
     settings from the environment (a proxy would resolve the name itself)."""
@@ -82,6 +101,7 @@ def pinned_client(
             allow_private=allow_private,
             resolver=resolver,
             inner=inner,
+            internal=internal,
         ),
     )
 

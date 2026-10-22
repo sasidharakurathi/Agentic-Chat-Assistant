@@ -136,6 +136,8 @@ def _usage(
         org_id=conv.org_id,
         assistant_id=conv.assistant_id,
         conversation_id=conv.id,
+        # Whose (Phase 8.9): the starter's; an eval's is nobody's.
+        user_id=None if conv.eval_run_id is not None else conv.created_by,
         kind=UsageKind.llm,
         model=model,
         tokens_in=tokens_in,
@@ -156,7 +158,7 @@ async def summarize(conversation_id: uuid.UUID, expected_version: int) -> bool:
         conv = await session.get(Conversation, conversation_id)
         if conv is None or conv.summary_version != expected_version:
             return False
-        config = await config_for(session, conv)
+        config = await config_for(session, conv, answering=False)
         rows = await messages_since_summary(session, conv)
         older, _recent = split_recent(_as_history(rows), config.memory.summarize_after_tokens)
         if not older:

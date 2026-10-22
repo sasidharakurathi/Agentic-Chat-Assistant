@@ -7,9 +7,9 @@ import type { ToolCallView } from "@/lib/tool-tree";
  *  messages persisted before task 2.9 have blocks with no `type` key at all,
  *  so filtering for `type === "tool_call"` would silently stop rendering
  *  tool cards across every existing conversation. Every new kind of block
- *  (citations in 2.9, guardrail findings in 5.3) must be listed here, or it
- *  shows up as an empty tool card. */
-const NOT_TOOLS = new Set(["citation", "guardrail"]);
+ *  (citations in 2.9, guardrail findings in 5.3, screenshots in 9.6) must
+ *  be listed here, or it shows up as an empty tool card. */
+const NOT_TOOLS = new Set(["citation", "guardrail", "image"]);
 
 export function splitBlocks(blocks?: MessageBlock[]): {
   tools: ToolCallView[];
@@ -22,6 +22,14 @@ export function splitBlocks(blocks?: MessageBlock[]): {
     cites: all.filter((b) => b?.type === "citation") as unknown as Citation[],
     guards: all.filter((b) => b?.type === "guardrail") as unknown as GuardrailFinding[],
   };
+}
+
+/** The screenshots sent with a message (Phase 9.6), by attachment id. */
+export function imageIds(blocks?: MessageBlock[]): string[] {
+  const all = (blocks ?? []) as Array<Record<string, unknown>>;
+  return all
+    .filter((b) => b?.type === "image" && typeof b.attachment_id === "string")
+    .map((b) => String(b.attachment_id));
 }
 
 /** How a guardrail finding is headed in the chat. */
@@ -39,6 +47,8 @@ export function guardrailTitle(f: Pick<GuardrailFinding, "check" | "where">): st
       return "Invalid tool input refused";
     case "budget":
       return "Budget reached";
+    case "secret":
+      return "Password or key hidden";
     default:
       return "Guardrail";
   }

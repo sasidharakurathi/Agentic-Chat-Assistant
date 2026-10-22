@@ -6,7 +6,7 @@ import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ApiError, type BudgetLimits, type BudgetStatus } from "@/lib/api";
+import { ApiError, type BudgetLimits, type BudgetStatus, type BuilderSpend } from "@/lib/api";
 import { budgetPercent, budgetTitle, budgetTone, parseLimit, resetsLabel } from "@/lib/budgets";
 import { failureMessage, formatUsd } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -50,6 +50,61 @@ export function BudgetBar({ budget }: { budget: BudgetStatus }) {
       <div className="text-small text-muted-foreground flex flex-wrap justify-between gap-x-3 gap-y-0.5">
         <span className="num">{stateNote(budget.state, pct)}</span>
         <span>{resetsLabel(budget)}</span>
+      </div>
+    </div>
+  );
+}
+
+/** Builder testing this month (Phase 9.7): previews and eval runs, which
+ *  spend from their own limit, not the budgets above. A meter when the
+ *  owner set a limit; otherwise the amount alone. */
+export function BuilderSpendLine({ spend }: { spend: BuilderSpend }) {
+  const title = "Builder testing this month";
+  const limit = spend.limit_usd;
+  const pct = limit != null ? budgetPercent({ ratio: spend.ratio ?? 0 }) : 0;
+  const readout =
+    limit != null
+      ? `${formatUsd(spend.spent_usd)} of ${formatUsd(limit)}`
+      : formatUsd(spend.spent_usd);
+  const state =
+    limit == null
+      ? "No limit. The owner can set one in Members, under Organisation."
+      : spend.state === "exceeded"
+        ? "Used up. Previews and eval runs stop until it resets; Chat carries on."
+        : `${pct}% used`;
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+        <span className="font-medium">{title}</span>
+        <span className="num">{readout}</span>
+      </div>
+      {limit != null && (
+        <div
+          className="bg-muted relative h-2 rounded-full"
+          role="meter"
+          aria-label={title}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={pct}
+          aria-valuetext={`${readout}, ${pct}% used`}
+        >
+          <div
+            className={cn("h-full rounded-full", budgetTone(spend.state))}
+            style={{ width: `${pct}%` }}
+          />
+          <div
+            aria-hidden
+            className="bg-foreground absolute -top-0.5 -bottom-0.5 left-[80%] w-px"
+          />
+        </div>
+      )}
+      <div className="text-small text-muted-foreground flex flex-wrap justify-between gap-x-3 gap-y-0.5">
+        <span className="num">
+          Previews and eval runs, not counted in the budgets above. {state}
+        </span>
+        {limit != null && (
+          <span>{resetsLabel({ period: "month", resets_at: spend.resets_at })}</span>
+        )}
       </div>
     </div>
   );

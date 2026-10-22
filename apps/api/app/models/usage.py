@@ -32,6 +32,8 @@ class UsageEvent(UUIDPrimaryKeyMixin, Base):
     __table_args__ = (
         Index("ix_usage_events_org_created", "org_id", "created_at"),
         Index("ix_usage_events_assistant_created", "assistant_id", "created_at"),
+        # Per-person caps sum one person's spend in the period (Phase 8.9).
+        Index("ix_usage_events_org_user_created", "org_id", "user_id", "created_at"),
     )
 
     org_id: Mapped[uuid.UUID] = mapped_column(
@@ -45,6 +47,12 @@ class UsageEvent(UUIDPrimaryKeyMixin, Base):
     )
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    #: Whose spend it is (Phase 8.9): the person in whose conversation, or
+    #: with whose AI helper, it happened. Null for evals and indexing, which
+    #: are the organisation's. SET NULL like the rest: spend stays spent.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     kind: Mapped[UsageKind] = mapped_column(
         SAEnum(UsageKind, name="usage_kind", native_enum=False, length=20), nullable=False

@@ -94,6 +94,15 @@ class ApprovalRequiredEvent(_Ev):
     risk: Literal["low", "medium", "high"] = "medium"
     rationale: str = ""
     expires_at: str | None = None
+    #: Since Phase 9.1 the request is stored and the turn goes on: who
+    #: decides it (`asker` or `approver`), where it stands, what to call it,
+    #: and the hash a decision must name.
+    tier: Literal["asker", "approver"] = "approver"
+    status: str = "pending"
+    title: str = ""
+    reference: str = ""
+    action_name: str | None = None
+    input_sha256: str | None = None
 
 
 class UsageEvent(_Ev):
@@ -125,6 +134,11 @@ class ErrorEvent(_Ev):
     code: str
     message: str
     retryable: bool = False
+    #: Phase 8.6: how long to wait before trying again (`busy`), and when a
+    #: used-up budget starts again (`budget_exceeded`, ISO 8601), for the
+    #: page to say in the reader's own time.
+    retry_after_s: int | None = None
+    resets_at: str | None = None
 
 
 class GuardrailEvent(_Ev):
@@ -132,7 +146,8 @@ class GuardrailEvent(_Ev):
     Saved with the answer too, so the chat shows it after a reload."""
 
     type: Literal["guardrail"] = "guardrail"
-    check: Literal["injection", "exfiltration", "pii", "schema", "budget"]
+    #: "secret": a password or key the person typed was hidden (Phase 9.6).
+    check: Literal["injection", "exfiltration", "pii", "schema", "budget", "secret"]
     where: Literal["user_message", "tool_input", "tool_result"]
     detail: str
     tool: str | None = None
@@ -151,10 +166,21 @@ class BudgetEvent(_Ev):
     events, once per budget. Not saved: it describes the moment."""
 
     type: Literal["budget"] = "budget"
-    scope: Literal["org", "assistant"]
+    #: "person": the asker's own cap (Phase 8.9). "builder": previews' and
+    #: eval runs' own monthly budget (Phase 9.7).
+    scope: Literal["org", "assistant", "person", "builder"]
     period: Literal["day", "month"]
     ratio: float
     message: str
+
+
+class AcceptedEvent(_Ev):
+    """The asker's message is saved (Phase 8.6). Before this, a failure
+    means it was never kept, and the page gives the text back to send
+    again; after it, sending again would ask twice."""
+
+    type: Literal["accepted"] = "accepted"
+    message_id: str
 
 
 class DoneEvent(_Ev):
@@ -176,6 +202,7 @@ AgentEvent = Annotated[
     | GuardrailEvent
     | TitleEvent
     | BudgetEvent
+    | AcceptedEvent
     | DoneEvent,
     Field(discriminator="type"),
 ]
@@ -186,6 +213,7 @@ def sse_frame(event: BaseModel) -> str:
 
 
 __all__ = [
+    "AcceptedEvent",
     "AgentEvent",
     "ApprovalRequiredEvent",
     "BudgetEvent",

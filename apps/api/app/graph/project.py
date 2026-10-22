@@ -172,6 +172,7 @@ class _Projection:
                     system_prompt=config.system_prompt,
                     models=config.models.model_copy(deep=True),
                     approval_policy=config.approval_policy.model_copy(deep=True),
+                    handoff=config.handoff.model_copy(deep=True),
                 ),
             ),
             OutputNode(
@@ -242,6 +243,7 @@ class _Projection:
                         connection_id=db.connection_id,
                         nl2sql=db.nl2sql,
                         expose_write=db.expose_write,
+                        actions=[a.model_copy(deep=True) for a in db.actions],
                     ),
                 )
             )
@@ -455,13 +457,10 @@ def _enabled_tools(config: AssistantConfig) -> list[tuple[str, dict[str, object]
             )
         )
     if t.http_request.enabled:
-        out.append(
-            (
-                "http_request",
-                {"allowed_domains": list(t.http_request.allowed_domains)},
-                t.http_request.approval,
-            )
-        )
+        http: dict[str, object] = {"allowed_domains": list(t.http_request.allowed_domains)}
+        if t.http_request.actions:
+            http["actions"] = [a.model_dump() for a in t.http_request.actions]
+        out.append(("http_request", http, t.http_request.approval))
     if t.calculator.enabled:
         out.append(("calculator", {}, "auto"))
     if t.datetime.enabled:

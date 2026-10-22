@@ -19,6 +19,7 @@ from app.db.session import get_sessionmaker
 from app.models.conversation import Conversation, Message, MessageRole
 from httpx import AsyncClient
 from sqlalchemy import update
+from tests.versions import go_live
 
 pytestmark = pytest.mark.anyio
 
@@ -36,7 +37,9 @@ def test_a_bad_or_foreign_cursor_is_refused(bad: str) -> None:
 
 async def _assistant(client: AsyncClient, headers: dict[str, str]) -> str:
     r = await client.post("/api/v1/assistants", json={"name": "Pager"}, headers=headers)
-    return str(r.json()["id"])
+    aid = str(r.json()["id"])
+    await go_live(client, aid, headers)
+    return aid
 
 
 async def _conversations(

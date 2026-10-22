@@ -88,4 +88,23 @@ def redact(text: str) -> tuple[str, list[str]]:
     return text, found
 
 
-__all__ = ["redact"]
+def find(text: str) -> list[tuple[str, str]]:
+    """Each value found, as (kind, value), in the order `redact` takes them:
+    a value counted as one kind is not counted again as another (Phase 9.4,
+    the scan at ingest)."""
+    found: list[tuple[str, str]] = []
+    for kind, pattern, check in _KINDS:
+
+        def sub(
+            m: re.Match[str], kind: str = kind, check: Callable[[str], bool] | None = check
+        ) -> str:
+            if check is not None and not check(m.group(0)):
+                return m.group(0)
+            found.append((kind, m.group(0)))
+            return f"[{kind}]"
+
+        text = pattern.sub(sub, text)
+    return found
+
+
+__all__ = ["find", "redact"]

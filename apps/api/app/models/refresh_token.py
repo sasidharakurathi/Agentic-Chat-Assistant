@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import ForeignKey, String, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -34,6 +34,9 @@ class RefreshToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     revoked_at: Mapped[datetime | None] = mapped_column(TZDateTime())
     user_agent: Mapped[str | None] = mapped_column(String(400))
     ip: Mapped[str | None] = mapped_column(String(64))
+    #: The sign-in that began this session passed a second factor (Phase
+    #: 8.4): its renewals keep that.
+    strong: Mapped[bool] = mapped_column(default=False, server_default=false(), nullable=False)
 
     user: Mapped[User] = relationship()
 

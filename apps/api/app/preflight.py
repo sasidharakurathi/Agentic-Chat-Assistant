@@ -22,11 +22,13 @@ Nothing here prints a secret's value, only its name.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import sys
 import warnings
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 Level = Literal["ok", "warn", "fail", "skip"]
 
@@ -100,7 +102,14 @@ def review(settings, report: Report) -> None:  # type: ignore[no-untyped-def]
     """Settings that are valid and probably not meant, in production."""
     if not settings.is_production:
         return
-    if settings.registration == "open":
+    if settings.org_mode == "multi":
+        report.add(
+            "warn",
+            "ORG_MODE",
+            "multi: anyone signed in can create an organisation outside the company's "
+            "admins and budgets. Set ORG_MODE=single for an internal install",
+        )
+    if settings.registration == "open" and settings.org_mode == "multi":
         report.add(
             "warn",
             "REGISTRATION",
@@ -128,6 +137,190 @@ def review(settings, report: Report) -> None:  # type: ignore[no-untyped-def]
             "TRUSTED_PROXY_HOPS",
             "0: behind a reverse proxy every request appears to come from the proxy, "
             "so per-address rate limits are shared by everyone",
+        )
+
+
+def review_hosting(settings, report: Report) -> None:  # type: ignore[no-untyped-def]
+    """How the server is reached, in production (Phase 8.2, plan D15): an
+    internal install gets its certificate through DNS and listens on one
+    private address. What the name resolves to is checked by the probe."""
+    if not settings.is_production:
+        return
+    if settings.tls_mode == "public":
+        report.add(
+            "warn",
+            "TLS_MODE",
+            "public: the certificate needs ports 80 and 443 open to the internet. For a "
+            "server only the office and the VPN reach, use acmedns or cloudflare "
+            "(OPERATIONS §2)",
+        )
+    elif settings.tls_mode == "local":
+        report.add(
+            "warn", "TLS_MODE", "local: every browser warns about the certificate until trusted"
+        )
+    bind = settings.bind_ip.strip()
+    if bind in ("", "0.0.0.0", "::"):
+        report.add(
+            "warn",
+            "BIND_IP",
+            "not set: the proxy listens on every interface. Set the server's office or "
+            "Tailscale address, or make sure a firewall closes the others",
+        )
+    elif _is_global(bind):
+        report.add("warn", "BIND_IP", "a public address: the proxy listens to the internet")
+
+
+def _is_global(address: str) -> bool:
+    """A public internet address. Private ranges, loopback and the shared
+    range Tailscale uses (100.64.0.0/10) are not."""
+    try:
+        return ipaddress.ip_address(address).is_global
+    except ValueError:
+        return False
+
+
+async def _hosting() -> str:
+    """What the site's name resolves to, from here (Phase 8.2). For an
+    internal install it should be a private or Tailscale address: a public
+    one means people outside can find it."""
+    from app.config import settings
+
+    if not settings.is_production:
+        return "skip: development"
+    host = urlsplit(settings.app_base_url).hostname or ""
+    if not host or host in ("localhost", "127.0.0.1"):
+        return "skip: no site name"
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, None)
+    except OSError as exc:
+        raise RuntimeError(f"{host} doesn't resolve from this server: check its DNS") from exc
+    addresses = sorted({str(info[4][0]) for info in infos})
+    public = [a for a in addresses if _is_global(a)]
+    if public and settings.tls_mode != "public":
+        raise RuntimeError(
+            f"{host} resolves to a public address ({', '.join(public)}). For an internal "
+            "install, answer the name with the private address (internal DNS or Tailscale "
+            "split DNS) and keep the public zone for the certificate's record only"
+        )
+    return f"{host} resolves to {', '.join(addresses)}"
+
+
+def review_two_factor(settings, report: Report) -> None:  # type: ignore[no-untyped-def]
+    """Admins and a second factor, in production (Phase 8.4)."""
+    if not settings.is_production:
+        return
+    if not settings.require_admin_2fa:
+        report.add(
+            "warn",
+            "REQUIRE_ADMIN_2FA",
+            "off: an admin's password alone opens every conversation and every approval. "
+            "Turn it on",
+        )
+    if settings.trusted_internal_nets:
+        try:
+            from app.api.ratelimit import _internal_nets
+
+            _internal_nets(settings.trusted_internal_nets)
+        except ValueError:
+            report.add("fail", "TRUSTED_INTERNAL_NETS", "not a list of address ranges (CIDRs)")
+
+
+def review_privacy(settings, report: Report) -> None:  # type: ignore[no-untyped-def]
+    """The privacy notice before the first chat, in production (Phase 8.7)."""
+    if settings.is_production and not settings.privacy_notice_required:
+        report.add(
+            "warn",
+            "PRIVACY_NOTICE_REQUIRED",
+            "off: people can chat without being told that admins can read conversations "
+            "or where messages go. Turn it on",
+        )
+
+
+def review_tracing(settings, report: Report) -> None:  # type: ignore[no-untyped-def]
+    """Tracing in production (Phase 8.10): full content is a second copy of
+    every conversation that erasure and retention don't reach."""
+    exporting = bool(settings.langfuse_host or settings.otel_exporter_otlp_endpoint)
+    if settings.is_production and exporting and settings.trace_full:
+        report.add(
+            "warn",
+            "TRACE_CONTENT",
+            "full: traces carry every message and answer, a copy that erasing a person or "
+            "the retention rule doesn't reach. Use metadata unless you need it",
+        )
+
+
+def review_google(settings, report: Report) -> None:  # type: ignore[no-untyped-def]
+    """Google sign-in (Phase 8.3): set up whole, and limited to the company's
+    domain in production. Never prints a value."""
+    has_id, has_secret = bool(settings.google_client_id), bool(settings.google_client_secret)
+    if has_id != has_secret:
+        report.add(
+            "fail",
+            "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET",
+            "only one is set: Google sign-in needs both",
+        )
+        return
+    if not has_id or not settings.is_production:
+        return
+    if not settings.google_allowed_domain:
+        report.add(
+            "warn",
+            "GOOGLE_ALLOWED_DOMAIN",
+            "not set: any Google account can be used with an invite, and auto-join is off. "
+            "Set the company's Google Workspace domain",
+        )
+    if not settings.app_base_url.startswith("https://"):
+        report.add("warn", "APP_BASE_URL", "Google sends people back only to an https address")
+
+
+def review_mail(settings, report: Report) -> None:  # type: ignore[no-untyped-def]
+    """Email in production (Phase 7b.5): configured to work, and not through
+    a mailbox that would put the company at risk. Never prints a value."""
+    if not settings.is_production:
+        return
+    transport = settings.mail_transport
+    if transport in ("console", "memory"):
+        report.add(
+            "fail",
+            "MAIL_BACKEND",
+            f"{transport} in production: messages, invite links included, would be logged or "
+            "kept in memory. Use smtp, or off",
+        )
+        return
+    if transport == "off":
+        report.add(
+            "warn",
+            "SMTP_HOST",
+            "not set: no email is sent. Invite links are copied by hand, and nobody is told "
+            "when a version waits for review",
+        )
+        return
+    if not (settings.mail_from or settings.smtp_username):
+        report.add("fail", "MAIL_FROM", "not set: there is no address to send from")
+    if settings.smtp_username and not settings.smtp_password:
+        report.add("fail", "SMTP_PASSWORD", "not set, although SMTP_USERNAME is")
+    if settings.smtp_security == "none" and settings.smtp_host not in ("localhost", "127.0.0.1"):
+        report.add(
+            "warn",
+            "SMTP_SECURITY",
+            "none to another host: the password and every message cross the network in clear",
+        )
+    personal = [
+        name
+        for name, value in (
+            ("MAIL_FROM", settings.mail_from),
+            ("SMTP_USERNAME", settings.smtp_username),
+        )
+        if value.lower().endswith(("@gmail.com", "@googlemail.com"))
+    ]
+    if personal:
+        report.add(
+            "warn",
+            " / ".join(personal),
+            "a personal gmail.com account: its app password opens the whole account, mail "
+            "included, and changing its password stops all email. Prefer a company mailbox "
+            "or a send-only address",
         )
 
 
@@ -276,6 +469,7 @@ CHECKS: dict[str, tuple[Callable[[], Awaitable[str]], bool]] = {
     "redis": (_redis, False),
     "object storage": (_storage, False),
     "models in use": (_models_in_use, False),
+    "site name": (_hosting, False),
 }
 
 
@@ -303,7 +497,13 @@ async def run() -> Report:
     if settings is None:
         return report
     review(settings, report)
+    review_hosting(settings, report)
+    review_google(settings, report)
+    review_two_factor(settings, report)
+    review_privacy(settings, report)
+    review_tracing(settings, report)
     review_models(settings, report)
+    review_mail(settings, report)
     await probe(report)
     return report
 

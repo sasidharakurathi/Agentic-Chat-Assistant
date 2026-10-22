@@ -1,9 +1,8 @@
-"""A conversation follows the assistant's current published version.
+"""Each run records the version that answered it.
 
-Conversations used to keep the version live when they started, so a publish
-reached only new conversations. Now every turn reads the current version (or
-the draft while nothing is published), and each run records which version
-answered it.
+A live conversation answers from the approved version it started on; a
+preview from the draft (recorded as no version) or from the version it was
+opened on (Phase 7b.1; `test_approval_gate.py` covers the gate itself).
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from app.models.conversation import Run
 from app.services import chat as chat_svc
 from httpx import AsyncClient
 from sqlalchemy import select
-from tests.test_chat import _new_conversation
+from tests.versions import PREVIEW, go_live
 
 pytestmark = pytest.mark.anyio
 
@@ -42,9 +41,12 @@ async def _set_prompt(client: AsyncClient, h: dict[str, str], aid: str, prompt: 
     assert r.status_code == 200, r.text
 
 
-async def _publish(client: AsyncClient, h: dict[str, str], aid: str) -> None:
-    r = await client.post(f"/api/v1/assistants/{aid}/versions", json={"note": ""}, headers=h)
-    assert r.status_code in (200, 201), r.text
+async def _conversation(
+    client: AsyncClient, h: dict[str, str], aid: str, body: dict[str, Any]
+) -> uuid.UUID:
+    r = await client.post(f"/api/v1/assistants/{aid}/conversations", json=body, headers=h)
+    assert r.status_code == 201, r.text
+    return uuid.UUID(r.json()["id"])
 
 
 async def _turn(cid: uuid.UUID) -> None:
@@ -61,38 +63,23 @@ async def _run_versions(cid: uuid.UUID) -> list[int | None]:
         return [r.version_number for r in rows]
 
 
-async def test_an_existing_conversation_picks_up_a_new_version(
+async def test_each_run_records_the_version_that_answered(
     client: AsyncClient, org_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spy = _PromptSpy()
     monkeypatch.setattr("app.agent.runtime.get_driver", lambda: spy)
     a = (await client.post("/api/v1/assistants", json={"name": "V"}, headers=org_headers)).json()
     aid = a["id"]
-
     await _set_prompt(client, org_headers, aid, "You are version one.")
-    await _publish(client, org_headers, aid)
-    cid = uuid.UUID(await _new_conversation(client, org_headers, aid))
-    await _turn(cid)
+    await go_live(client, aid, org_headers)
+    await _set_prompt(client, org_headers, aid, "The draft.")
 
-    await _set_prompt(client, org_headers, aid, "You are version two.")
-    await _turn(cid)  # draft changed, not published: still v1
-    await _publish(client, org_headers, aid)
-    await _turn(cid)  # same conversation, now v2
+    live = await _conversation(client, org_headers, aid, {})
+    draft = await _conversation(client, org_headers, aid, PREVIEW)
+    pinned = await _conversation(client, org_headers, aid, {**PREVIEW, "version": 1})
+    for cid in (live, draft, pinned):
+        await _turn(cid)
 
-    assert "version one" in spy.prompts[0]
-    assert "version one" in spy.prompts[1], "an unpublished draft must not leak in"
-    assert "version two" in spy.prompts[2]
-    assert await _run_versions(cid) == [1, 1, 2]
-
-
-async def test_an_unpublished_assistant_runs_its_draft(
-    client: AsyncClient, org_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    spy = _PromptSpy()
-    monkeypatch.setattr("app.agent.runtime.get_driver", lambda: spy)
-    a = (await client.post("/api/v1/assistants", json={"name": "D"}, headers=org_headers)).json()
-    await _set_prompt(client, org_headers, a["id"], "Draft prompt.")
-    cid = uuid.UUID(await _new_conversation(client, org_headers, a["id"]))
-    await _turn(cid)
-    assert "Draft prompt." in spy.prompts[0]
-    assert await _run_versions(cid) == [None]
+    assert ["version one" in p for p in spy.prompts] == [True, False, True]
+    assert "The draft." in spy.prompts[1]
+    assert [await _run_versions(c) for c in (live, draft, pinned)] == [[1], [None], [1]]

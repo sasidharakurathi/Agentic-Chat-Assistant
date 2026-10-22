@@ -20,9 +20,12 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.agent.caps import CapabilityTool, _err, _text
+
+if TYPE_CHECKING:
+    from app.agent.actions import Asker
 from app.api.errors import AppError
 from app.datasources import ConnectionInfo, DbError, get_sql_adapter
 from app.datasources.sql_guard import Permissions, SqlBlocked, guard
@@ -139,7 +142,10 @@ async def _current_schema(assistant_id: uuid.UUID, connection_id: uuid.UUID) -> 
             return cached
 
 
-def build_sql_tools(assistant_id: uuid.UUID, databases: list[DatabaseRef]) -> list[CapabilityTool]:
+def build_sql_tools(
+    assistant_id: uuid.UUID, databases: list[DatabaseRef], asker: Asker | None = None
+) -> list[CapabilityTool]:
+    """`asker`: who is asking, for a connection scoped to them (Phase 9.3)."""
     if not databases:
         return []
     refs = {ref.connection_id: ref for ref in databases}
@@ -183,7 +189,7 @@ def build_sql_tools(assistant_id: uuid.UUID, databases: list[DatabaseRef]) -> li
         payload = [ns.model_dump() for ns in namespaces]
         return _text(json.dumps({"schemas": payload}, default=str))
 
-    async def run_query(args: dict[str, Any]) -> dict[str, Any]:
+    async def run_query(args: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0911 - refusals
         sql = str(args.get("sql", "")).strip()
         if not sql:
             return _err("error: no sql provided")
@@ -196,6 +202,10 @@ def build_sql_tools(assistant_id: uuid.UUID, databases: list[DatabaseRef]) -> li
             return _err("error: this is a MongoDB connection; use mongo_find / mongo_aggregate")
 
         perms = _effective_permissions(conn, ref)
+        if perms.scope_to_asker and asker is None:
+            # Never run unscoped (Phase 9.3): an eval or a dry run has nobody
+            # to scope to, and the policies would see no asker.
+            return _err("error: this database answers only for a signed-in person")
         try:
             guarded = guard(sql, engine=conn.engine.value, permissions=perms)
         except SqlBlocked as exc:
@@ -218,6 +228,7 @@ def build_sql_tools(assistant_id: uuid.UUID, databases: list[DatabaseRef]) -> li
                 max_rows=perms.row_limit,
                 mutating=guarded.mutating,
                 returns_rows=guarded.returns_rows,
+                asker_email=asker.email if perms.scope_to_asker and asker else None,
             )
         except DbError as exc:
             return _err(f"error: {exc}")

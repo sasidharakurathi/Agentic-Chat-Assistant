@@ -8,6 +8,12 @@ describe("toolLabel", () => {
     expect(toolLabel("mcp__github__search_issues")).toBe("github: search_issues");
     expect(toolLabel("mcp__my-tools__do_it")).toBe("my-tools: do_it");
     expect(toolLabel("WebSearch")).toBe("WebSearch");
+    // A declared action (Phase 9.1), in words.
+    expect(toolLabel("mcp__caps__act_request_access")).toBe("request access");
+    expect(toolNodeType("mcp__caps__act_request_access")).toBe("database");
+    expect(toolSentence("mcp__caps__act_request_access", { app: "Figma" })).toBe(
+      'Used the action "request access"',
+    );
   });
 
   it("gives the bare name for behaviour that depends on the tool", () => {

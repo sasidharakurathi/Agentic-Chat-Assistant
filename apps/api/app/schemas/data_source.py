@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -56,6 +56,9 @@ class IngestReportOut(ApiModel):
     context_failed: int = 0
     context_skipped: str | None = None
     cost_usd: float = 0.0
+    #: The scan at ingest (Phase 9.4): counts by kind, masked examples, why
+    #: it was held back (empty if it wasn't), and the content's checksum.
+    sensitive: dict[str, Any] | None = None
 
 
 class DataSourceSummary(ORMModel):
@@ -77,6 +80,16 @@ class DataSourceSummary(ORMModel):
     ingest_report: IngestReportOut | None = None
     #: Only while the source is being processed.
     progress: IngestProgress | None = None
+    #: Who may read it (Phase 9.4): everyone, or these groups.
+    everyone: bool = True
+    group_ids: list[str] = Field(default_factory=list)
+
+
+class SourceAccess(ApiModel):
+    """Who may read a source. Nobody, if not everyone and no groups."""
+
+    everyone: bool
+    group_ids: list[uuid.UUID] = Field(default_factory=list, max_length=50)
 
 
 class ContentUrl(ApiModel):

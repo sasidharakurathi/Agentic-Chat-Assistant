@@ -13,8 +13,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Awaitable, Callable
-from functools import lru_cache
+from functools import cache, lru_cache
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -30,9 +31,12 @@ _MESSAGES = {
     "user": "Too many requests.",
     "auth": "Too many sign-in attempts from this address.",
     "login": "Too many sign-in attempts for this account.",
+    # Phase 8.4: creating accounts, and starting Google sign-in.
+    "signup": "Too many sign-ups from this address.",
     "refresh": "This session is being refreshed too often.",
     "refresh_ip": "Too many session refreshes from this address.",
     "chat_user": "You're sending messages too quickly.",
+    "chat_employee": "You're sending messages too quickly.",
     "chat_org": "This organisation is sending messages too quickly.",
     "assist": "Too many requests to the AI helpers.",
     "heavy": "Too many of these requests.",
@@ -62,6 +66,32 @@ def client_ip(request: Request) -> str:
     return chain[-hops] if len(chain) >= hops else (chain[0] if chain else peer)
 
 
+@cache
+def _internal_nets(raw: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    nets = []
+    for part in raw.split(","):
+        if part.strip():
+            nets.append(ipaddress.ip_network(part.strip(), strict=False))
+    return tuple(nets)
+
+
+def is_internal(ip: str | None) -> bool:
+    """From TRUSTED_INTERNAL_NETS (Phase 8.4): an office or VPN range, where
+    many people arrive from one address."""
+    if not ip or not settings.trusted_internal_nets:
+        return False
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(address in net for net in _internal_nets(settings.trusted_internal_nets))
+
+
+def per_address(ip: str | None, spec: str, internal_spec: str) -> str:
+    """The per-address limit for this address."""
+    return internal_spec if is_internal(ip) else spec
+
+
 async def enforce(bucket: str, subject: str, spec: str, *, cost: int = 1) -> None:
     """Take from `bucket` for `subject`, or raise a 429."""
     if not settings.rate_limit_enabled:
@@ -84,7 +114,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         ):
             return await call_next(request)
         try:
-            await enforce("ip", client_ip(request), settings.rate_limit_ip)
+            ip = client_ip(request)
+            await enforce(
+                "ip", ip, per_address(ip, settings.rate_limit_ip, settings.rate_limit_ip_internal)
+            )
         except RateLimited as exc:
             return JSONResponse(
                 status_code=exc.status_code,
@@ -94,4 +127,4 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-__all__ = ["RateLimitMiddleware", "client_ip", "enforce"]
+__all__ = ["RateLimitMiddleware", "client_ip", "enforce", "is_internal", "per_address"]

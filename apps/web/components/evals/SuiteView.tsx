@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronLeft, Upload } from "lucide-react";
+import { ChevronLeft, Download, Upload } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState, type ChangeEvent } from "react";
 
 import { Toggle } from "@/components/config/panels";
@@ -30,6 +30,8 @@ import {
 } from "@/lib/api";
 import {
   RUN_STATUS,
+  casesToCsv,
+  casesToJson,
   expectations,
   isActive,
   metricsOf,
@@ -213,6 +215,21 @@ export function SuiteView({
     });
   };
 
+  /** The cases as a file in the import format (Phase 9.8), to edit and
+   *  import again or keep beside the code. */
+  const download = (kind: "csv" | "json") => {
+    if (!suite) return;
+    const cases = suite.cases as EvalCase[];
+    const text = kind === "csv" ? casesToCsv(cases) : casesToJson(cases);
+    const blob = new Blob([text], { type: kind === "csv" ? "text/csv" : "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${suite.name.trim().replace(/[^A-Za-z0-9_-]+/g, "-") || "cases"}.${kind}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const start = () =>
     act("Couldn't start the run.", "Try again in a moment.", async () => {
       const run = await evals.start(suiteId, target === DRAFT ? null : target);
@@ -284,43 +301,58 @@ export function SuiteView({
           level={3}
           title={`Cases (${suite.cases.length})`}
           actions={
-            canEdit && (
-              <>
-                <input
-                  ref={file}
-                  type="file"
-                  accept=".csv,.json,text/csv,application/json"
-                  className="sr-only"
-                  aria-label="Import cases from a CSV or JSON file"
-                  tabIndex={-1}
-                  onChange={(ev) => void importFile(ev)}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => file.current?.click()}
-                >
-                  <Upload aria-hidden className="size-4" />
-                  Import a file
-                </Button>
-                <Button size="sm" disabled={busy} onClick={() => setForm({ editing: null })}>
-                  Add a case
-                </Button>
-              </>
-            )
+            <>
+              {suite.cases.length > 0 && (
+                <>
+                  <Button variant="outline" size="sm" onClick={() => download("csv")}>
+                    <Download aria-hidden className="size-4" />
+                    Download CSV
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => download("json")}>
+                    <Download aria-hidden className="size-4" />
+                    Download JSON
+                  </Button>
+                </>
+              )}
+              {canEdit && (
+                <>
+                  <input
+                    ref={file}
+                    type="file"
+                    accept=".csv,.json,text/csv,application/json"
+                    className="sr-only"
+                    aria-label="Import cases from a CSV or JSON file"
+                    tabIndex={-1}
+                    onChange={(ev) => void importFile(ev)}
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => file.current?.click()}
+                  >
+                    <Upload aria-hidden className="size-4" />
+                    Import a file
+                  </Button>
+                  <Button size="sm" disabled={busy} onClick={() => setForm({ editing: null })}>
+                    Add a case
+                  </Button>
+                </>
+              )}
+            </>
           }
         />
         {suite.cases.length === 0 ? (
           <EmptyState
             headingLevel={4}
             title="No cases yet"
-            description="Add the questions this assistant must get right. Import a CSV with an input column (and optionally reference, contains, not_contains, tools, cites, refuses, relevant_sources; lists separated by |), or a JSON list of cases."
+            description="Add the questions this assistant must get right. Import a CSV with an input column (and optionally follow_ups, reference, contains, not_contains, tools, cites, refuses, expects_approval, relevant_sources; lists separated by |), or a JSON list of cases."
           />
         ) : (
           <ol className="border-border border-t">
             {suite.cases.map((c, n) => {
               const asks = expectations(c.expected, c.labels);
+              const followUps = (c as EvalCase).follow_ups ?? [];
               return (
                 <li key={c.id} className="border-border flex items-start gap-3 border-b py-2.5">
                   <span className="num text-small text-muted-foreground w-6 shrink-0 pt-0.5 text-right">
@@ -328,6 +360,15 @@ export function SuiteView({
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium break-words">{c.input}</p>
+                    {followUps.length > 0 && (
+                      <ol className="text-small text-muted-foreground mt-0.5 flex flex-col gap-0.5">
+                        {followUps.map((f, i) => (
+                          <li key={i} className="break-words">
+                            Then asks: {f}
+                          </li>
+                        ))}
+                      </ol>
+                    )}
                     <p className="text-small text-muted-foreground break-words">
                       {asks.length > 0 ? asks.join(". ") + "." : "Passes if the assistant answers."}
                     </p>

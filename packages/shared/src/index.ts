@@ -20,7 +20,7 @@ import type { components } from "./api.gen";
 /** Every response/request model the API declares, by its Pydantic name. */
 export type Schemas = components["schemas"];
 
-export const MEMBER_ROLES = ["owner", "admin", "member"] as const;
+export const MEMBER_ROLES = ["owner", "admin", "member", "employee"] as const;
 export type MemberRole = (typeof MEMBER_ROLES)[number];
 
 /** SSE event kinds streamed by POST /conversations/{id}/messages. */

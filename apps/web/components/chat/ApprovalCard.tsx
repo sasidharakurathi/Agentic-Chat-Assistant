@@ -1,210 +1,255 @@
 "use client";
 
 import { ChevronRight } from "lucide-react";
-import { useEffect, useId, useState } from "react";
+import Link from "next/link";
+import { useId, useState, type FormEvent } from "react";
 
 import { CodeBlock } from "@/components/chat/CodeBlock";
 import { failureText } from "@/components/chat/error-text";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { LineBullet } from "@/components/ui/line-bullet";
+import { Select } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { ApiError, approvals, type ActionField, type Approval } from "@/lib/api";
 import {
   approvalQuestion,
-  formatCountdown,
+  asText,
+  closesIn,
+  editedParams,
   inputAddsDetail,
-  riskLabel,
-  URGENT_S,
+  requestLine,
 } from "@/lib/approvals";
 import { toolNodeType } from "@/lib/tool-label";
-import { ApiError, approvals, type ApprovalRisk } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-export type PendingApproval = {
-  approval_id: string;
-  tool: string;
-  input: Record<string, unknown>;
-  risk: ApprovalRisk;
-  /** The exact thing that will run — for SQL, the statement itself. */
-  rationale: string;
-  expires_at: string | null;
-};
-
-const RISK_VARIANT: Record<ApprovalRisk, "muted" | "warning" | "destructive"> = {
-  low: "muted",
-  medium: "warning",
-  high: "destructive",
-};
-
-function useCountdown(expiresAt: string | null): number | null {
-  const [left, setLeft] = useState<number | null>(null);
-  useEffect(() => {
-    if (!expiresAt) return;
-    const end = new Date(expiresAt).getTime();
-    const tick = () => setLeft(Math.max(0, Math.round((end - Date.now()) / 1000)));
-    tick();
-    const t = setInterval(tick, 1000);
-    return () => clearInterval(t);
-  }, [expiresAt]);
-  return left;
-}
-
-/** A tool call waiting on a person (docs/DESIGN.md section 7): a plate with
- *  an ochre left bar (red at high risk), the question in plain words, the
- *  exact statement that would run, and how long is left. At high risk the
- *  safe answer is the prominent one: Deny is the default button and
- *  approving reads "Approve and run". */
+/** A request in the thread (docs/DESIGN.md section 7; Phase 9.1): a plate
+ *  with an ochre left bar (red at high risk), what it is in plain words,
+ *  where it stands, and what the reader can do about it.
+ *
+ *  Nothing waits inside the answer any more: the request is stored, and the
+ *  card is how the person asking confirms their own, or sees that it waits
+ *  for an approver, or that it is running. How it ended is posted into the
+ *  conversation, and the card goes. */
 export function ApprovalCard({
-  approval,
-  onDecided,
+  request,
+  mine,
+  employee = false,
+  onChanged,
   onGone,
 }: {
-  approval: PendingApproval;
-  onDecided: (decision: "approved" | "denied") => void;
-  /** The server no longer has this approval pending (it expired, the turn
-   *  was stopped, or someone else answered): the card should go. */
+  request: Approval;
+  /** The person reading asked for it. */
+  mine: boolean;
+  /** The reader is an employee: what would run is never sent to them. */
+  employee?: boolean;
+  /** Decided or withdrawn: look again. */
+  onChanged: () => void;
+  /** No longer open on the server (decided elsewhere, expired, changed). */
   onGone?: (reason: string) => void;
 }) {
-  const [busy, setBusy] = useState<"approved" | "denied" | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [showInput, setShowInput] = useState(false);
   const headingId = useId();
   const inputId = useId();
-  const secondsLeft = useCountdown(approval.expires_at);
-  const expired = secondsLeft !== null && secondsLeft <= 0;
-  const high = approval.risk === "high";
+  const [busy, setBusy] = useState<"approved" | "denied" | "withdraw" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [showInput, setShowInput] = useState(false);
+  const fields = request.fields ?? [];
+  const [values, setValues] = useState<Record<string, string | boolean>>(() =>
+    Object.fromEntries(
+      fields.map((f) => [
+        f.name,
+        f.type === "boolean" ? request.input[f.name] === true : asText(request.input[f.name]),
+      ]),
+    ),
+  );
+  const high = request.risk === "high";
+  const pending = request.status === "pending";
+  const confirmHere = pending && mine && request.tier === "asker";
+  const editable = confirmHere && fields.length > 0;
+  const heading = request.title || approvalQuestion(request.tool_name);
+  const closes = pending ? closesIn(request.expires_at) : null;
+
+  const fail = (err: unknown, what: string) => {
+    const closed = ["approval_not_pending", "approval_expired", "input_changed"];
+    if (err instanceof ApiError && closed.includes(err.code) && onGone) {
+      onGone(err.message);
+      return;
+    }
+    setError(failureText(what, err));
+    setBusy(null);
+  };
 
   const decide = async (decision: "approved" | "denied") => {
     setBusy(decision);
     setError(null);
     try {
-      await approvals.resolve(approval.approval_id, decision);
-      onDecided(decision);
+      await approvals.resolve(request.id, {
+        decision,
+        input_sha256: request.input_sha256,
+        params: decision === "approved" && editable ? editedParams(fields, values) : undefined,
+      });
+      onChanged();
     } catch (err) {
-      // Already decided, or past its expiry (Phase 7a.7): either way it is
-      // closed, and the card goes.
-      const closed = ["approval_not_pending", "approval_expired"];
-      if (err instanceof ApiError && closed.includes(err.code) && onGone) {
-        onGone(err.message);
-        return;
-      }
-      // Anything else: say what happened, rather than "something went wrong".
-      setError(failureText("Couldn't record your answer.", err));
-      setBusy(null);
+      fail(err, "Couldn't record your answer.");
     }
   };
 
-  const approve = (
-    <Button
-      size="sm"
-      variant={high ? "destructive" : "default"}
-      disabled={busy !== null}
-      onClick={() => void decide("approved")}
-    >
-      {busy === "approved" ? "Approving…" : high ? "Approve and run" : "Approve"}
-    </Button>
-  );
-  const deny = (
-    <Button
-      size="sm"
-      variant={high ? "default" : "outline"}
-      disabled={busy !== null}
-      onClick={() => void decide("denied")}
-    >
-      {busy === "denied" ? "Denying…" : "Deny"}
-    </Button>
-  );
+  const withdraw = async () => {
+    setBusy("withdraw");
+    setError(null);
+    try {
+      await approvals.withdraw(request.id);
+      onChanged();
+    } catch (err) {
+      fail(err, "Couldn't withdraw it.");
+    }
+  };
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    void decide("approved");
+  };
 
   return (
     <section
       aria-labelledby={headingId}
       className={cn(
-        "bg-card border-border flex max-w-[72ch] flex-col gap-3 rounded-lg border border-l-4 py-4 pr-4 pl-4",
-        expired ? "border-l-border" : high ? "border-l-destructive" : "border-l-warning",
+        "bg-card border-border flex max-w-[72ch] flex-col gap-3 rounded-lg border border-l-4 p-4",
+        !pending ? "border-l-border" : high ? "border-l-destructive" : "border-l-warning",
       )}
     >
-      {/* Announced once, when the card appears; the countdown below is a
-          timer, which screen readers don't read out every second. */}
-      <div role="alert" className="flex flex-wrap items-start gap-x-3 gap-y-2">
-        <LineBullet type={toolNodeType(approval.tool)} size={20} className="mt-px" />
+      {/* Announced once, when the card appears. */}
+      <div
+        role={confirmHere ? "alert" : "status"}
+        className="flex flex-wrap items-start gap-x-3 gap-y-2"
+      >
+        <LineBullet type={toolNodeType(request.tool_name)} size={20} className="mt-px" />
         <h3 id={headingId} className="text-h3 min-w-0 flex-1 font-semibold break-words">
-          {approvalQuestion(approval.tool)}
+          {heading}
         </h3>
-        <Badge variant={RISK_VARIANT[approval.risk]}>{riskLabel(approval.risk)}</Badge>
+        <Badge variant={!pending ? "muted" : high ? "destructive" : "warning"}>
+          {requestLine(request.status, request.tier, mine)}
+        </Badge>
       </div>
+      <p className="text-small text-muted-foreground">
+        <span className="num">{request.reference}</span>
+        {closes ? `, ${closes}` : ""}
+      </p>
 
-      {/* The exact statement, never a summary of it. "Approve a database
-          write?" is unanswerable; this is answerable. */}
-      {approval.rationale && <CodeBlock code={approval.rationale} label="What would run" />}
-
-      {/* The full input, when it says more than the statement above: an
-          MCP tool's arguments, an HTTP request's body. */}
-      {inputAddsDetail(approval.rationale ?? "", approval.input) && (
-        <div>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="group -ml-2"
-            aria-expanded={showInput}
-            aria-controls={inputId}
-            onClick={() => setShowInput((v) => !v)}
-          >
-            <ChevronRight
-              aria-hidden
-              className="transition-transform duration-120 ease-out group-aria-expanded:rotate-90 motion-reduce:transition-none"
+      {editable ? (
+        <form id={`${headingId}-form`} onSubmit={submit} className="flex flex-col gap-3">
+          {fields.map((f) => (
+            <FieldInput
+              key={f.name}
+              field={f}
+              value={values[f.name]}
+              onChange={(v) => setValues((old) => ({ ...old, [f.name]: v }))}
             />
-            Everything it would send
-          </Button>
-          {showInput && (
-            <div id={inputId} className="mt-1">
-              <CodeBlock
-                code={JSON.stringify(approval.input, null, 2)}
-                label="Everything it would send"
-              />
-            </div>
-          )}
-        </div>
+          ))}
+        </form>
+      ) : request.action_name ? (
+        <Values input={request.input} fields={fields} />
+      ) : (
+        !employee &&
+        request.rationale && (
+          // The exact statement, never a summary of it.
+          <CodeBlock code={request.rationale} label="What would run" />
+        )
       )}
 
-      {expired ? (
-        <p className="text-muted-foreground">
-          This request timed out and was declined automatically.
-        </p>
-      ) : (
-        <div className="flex flex-col gap-2">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            <div className="flex items-center gap-2">
-              {high ? (
-                <>
-                  {deny}
-                  {approve}
-                </>
-              ) : (
-                <>
-                  {approve}
-                  {deny}
-                </>
-              )}
-            </div>
-            {secondsLeft !== null && (
-              <span
-                role="timer"
-                className={cn(
-                  "num text-small",
-                  secondsLeft <= URGENT_S
-                    ? "text-destructive font-semibold"
-                    : "text-muted-foreground",
-                )}
-                aria-label={`${formatCountdown(secondsLeft)} left to answer`}
-              >
-                {formatCountdown(secondsLeft)} left
-              </span>
+      {!employee &&
+        !request.action_name &&
+        inputAddsDetail(request.rationale ?? "", request.input) && (
+          <div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="group -ml-2"
+              aria-expanded={showInput}
+              aria-controls={inputId}
+              onClick={() => setShowInput((v) => !v)}
+            >
+              <ChevronRight
+                aria-hidden
+                className="transition-transform duration-120 ease-out group-aria-expanded:rotate-90 motion-reduce:transition-none"
+              />
+              Everything it would send
+            </Button>
+            {showInput && (
+              <div id={inputId} className="mt-1">
+                <CodeBlock
+                  code={JSON.stringify(request.input, null, 2)}
+                  label="Everything it would send"
+                />
+              </div>
             )}
           </div>
+        )}
+
+      {confirmHere ? (
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              type={editable ? "submit" : "button"}
+              form={editable ? `${headingId}-form` : undefined}
+              variant={high ? "destructive" : "default"}
+              disabled={busy !== null}
+              onClick={editable ? undefined : () => void decide("approved")}
+            >
+              {busy === "approved" ? "Confirming…" : "Confirm"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy !== null}
+              onClick={() => void decide("denied")}
+            >
+              {busy === "denied" ? "Cancelling…" : "Don't do it"}
+            </Button>
+          </div>
           <p className="text-small text-muted-foreground">
-            Nothing runs until you choose. If nobody answers in time, it is denied.
+            Nothing happens until you confirm. Check the details first
+            {editable ? ", and change them if they're wrong." : "."}
           </p>
         </div>
+      ) : pending && request.tier === "approver" ? (
+        <div className="flex flex-col gap-2">
+          <p className="text-muted-foreground">
+            {mine
+              ? "An approver decides this. You'll get an email when they have, and the outcome shows here."
+              : "It waits for one of this assistant's approvers."}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            {mine && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy !== null}
+                onClick={() => void withdraw()}
+              >
+                {busy === "withdraw" ? "Withdrawing…" : "Withdraw"}
+              </Button>
+            )}
+            {!employee && !mine && (
+              <Link
+                href="/approvals"
+                className={buttonVariants({ size: "sm", variant: "outline" })}
+              >
+                Decide it in Approvals
+              </Link>
+            )}
+          </div>
+        </div>
+      ) : (
+        !pending && (
+          <p role="status" className="text-muted-foreground">
+            {request.status === "executing" ? "Running it now." : "Approved. It runs in a moment."}
+          </p>
+        )
       )}
 
       {error && (
@@ -213,5 +258,88 @@ export function ApprovalCard({
         </p>
       )}
     </section>
+  );
+}
+
+/** A declared action's values, as given. */
+function Values({ input, fields }: { input: Record<string, unknown>; fields: ActionField[] }) {
+  const entries = Object.entries(input).filter(([, v]) => v !== null && v !== "");
+  if (entries.length === 0) return null;
+  return (
+    <dl className="grid grid-cols-[minmax(0,auto)_1fr] gap-x-4 gap-y-1">
+      {entries.map(([k, v]) => (
+        <div key={k} className="contents">
+          <dt className="text-muted-foreground">
+            {fields.find((f) => f.name === k)?.description || k.replace(/_/g, " ")}
+          </dt>
+          <dd className="break-words whitespace-pre-wrap">{asText(v)}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/** One value the asker may correct before confirming. */
+function FieldInput({
+  field,
+  value,
+  onChange,
+}: {
+  field: ActionField;
+  value: string | boolean | undefined;
+  onChange: (v: string | boolean) => void;
+}) {
+  const id = useId();
+  const label = field.description || field.name.replace(/_/g, " ");
+  if (field.type === "boolean") {
+    return (
+      <label htmlFor={id} className="flex items-center gap-2">
+        <input
+          id={id}
+          type="checkbox"
+          className="size-4"
+          checked={value === true}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        {label}
+      </label>
+    );
+  }
+  const text = typeof value === "string" ? value : "";
+  return (
+    <div className="flex flex-col gap-1">
+      <Label htmlFor={id}>
+        {label}
+        {!field.required && <span className="text-muted-foreground"> (optional)</span>}
+      </Label>
+      {field.choices && field.choices.length > 0 ? (
+        <Select id={id} value={text} onChange={(e) => onChange(e.target.value)}>
+          {!field.required && <option value="">None</option>}
+          {field.choices.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </Select>
+      ) : field.type === "string" && (field.max_length ?? 500) > 200 ? (
+        <Textarea
+          id={id}
+          value={text}
+          maxLength={field.max_length ?? 500}
+          required={field.required}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      ) : (
+        <Input
+          id={id}
+          value={text}
+          required={field.required}
+          type={field.type === "date" ? "date" : field.type === "string" ? "text" : "number"}
+          step={field.type === "number" ? "any" : undefined}
+          maxLength={field.type === "string" ? (field.max_length ?? 500) : undefined}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </div>
   );
 }

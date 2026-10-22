@@ -13,6 +13,7 @@ from __future__ import annotations
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Collection
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
@@ -159,14 +160,35 @@ async def retrieve(
     query: str,
     config: RagRetrieval,
     source_ids: list[uuid.UUID] | None = None,
+    documents: Collection[uuid.UUID] | None = None,
 ) -> list[RetrievedChunk]:
+    """`documents`: the knowledge an approved version was approved with
+    (Phase 7b.1); only those are searched. Without it, the assistant's
+    current documents: a copy kept for an approved version is not the
+    draft's."""
     started = time.perf_counter()
     try:
-        return await _retrieve(session, assistant_id, query, config, source_ids)
+        if documents is None:
+            documents = await current_documents(session, assistant_id)
+        if not documents:
+            return []
+        return await _retrieve(session, assistant_id, query, config, source_ids, list(documents))
     finally:
         # Timed whether it found anything or failed: a slow failure is still
         # time the turn spent here.
         RETRIEVAL_DURATION.observe(time.perf_counter() - started)
+
+
+async def current_documents(session: AsyncSession, assistant_id: uuid.UUID) -> list[uuid.UUID]:
+    """The assistant's documents as they are now: not the superseded copies
+    kept for the versions that were approved with them."""
+    return list(
+        await session.scalars(
+            select(Document.id).where(
+                Document.assistant_id == assistant_id, Document.superseded_at.is_(None)
+            )
+        )
+    )
 
 
 #: (embedder, query) -> (when it was stored, the vector). Oldest first.
@@ -216,6 +238,7 @@ async def _retrieve(
     query: str,
     config: RagRetrieval,
     source_ids: list[uuid.UUID] | None,
+    documents: list[uuid.UUID],
 ) -> list[RetrievedChunk]:
     store = PgVectorStore()
     query_vector = await query_embedding(get_embedder(), query)
@@ -226,6 +249,7 @@ async def _retrieve(
         embedding=query_vector,
         top_k=config.top_k_dense,
         source_ids=source_ids,
+        document_ids=documents,
     )
     sparse: list[ScoredChunk] = []
     if config.hybrid:
@@ -235,6 +259,7 @@ async def _retrieve(
             query_text=query,
             top_k=config.top_k_sparse,
             source_ids=source_ids,
+            document_ids=documents,
         )
 
     candidates = rrf_fuse(dense, sparse, rrf_k=config.rrf_k)
@@ -252,4 +277,4 @@ async def _retrieve(
     return await _attach_source_metadata(session, kept)
 
 
-__all__ = ["RetrievedChunk", "retrieve", "rrf_fuse"]
+__all__ = ["RetrievedChunk", "current_documents", "retrieve", "rrf_fuse"]

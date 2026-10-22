@@ -197,6 +197,11 @@ class Permissions:
     deny_tables: list[str] = field(default_factory=list)
     row_limit: int = 500
     statement_timeout_ms: int = 10_000
+    #: Each statement runs with the asker's email set for its transaction
+    #: (`app.asker_email`), for the database's row-level security policies
+    #: (Phase 9.3). Postgres only. Not the guard's to enforce: the adapter
+    #: sets it, and the guard already refuses SET and set_config.
+    scope_to_asker: bool = False
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> Permissions:
@@ -209,6 +214,7 @@ class Permissions:
             deny_tables=[str(t).lower() for t in raw.get("deny_tables", [])],
             row_limit=int(raw.get("row_limit", 500)),
             statement_timeout_ms=int(raw.get("statement_timeout_ms", 10_000)),
+            scope_to_asker=bool(raw.get("scope_to_asker", False)),
         )
 
 

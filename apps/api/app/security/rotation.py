@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.second_factor import SEALED_KIND, UserSecondFactor
 from app.models.secret import Secret
 from app.security.crypto import CryptoError, SealedSecret, open_sealed, rewrap
 
@@ -40,13 +41,21 @@ class RotationError(RuntimeError):
     pass
 
 
-def _sealed(row: Secret) -> SealedSecret:
+Sealed = Secret | UserSecondFactor
+
+
+def _kind(row: Sealed) -> str:
+    # Authenticator secrets (Phase 8.4) are sealed under one kind of their own.
+    return row.kind.value if isinstance(row, Secret) else SEALED_KIND
+
+
+def _sealed(row: Sealed) -> SealedSecret:
     return SealedSecret(ciphertext=row.ciphertext, dek_wrapped=row.dek_wrapped, nonce=row.nonce)
 
 
-def _opens_with(row: Secret, kek: str) -> bool:
+def _opens_with(row: Sealed, kek: str) -> bool:
     try:
-        open_sealed(_sealed(row), kind=row.kind.value, kek=kek)
+        open_sealed(_sealed(row), kind=_kind(row), kek=kek)
     except CryptoError:
         return False
     return True
@@ -59,7 +68,12 @@ async def rotate_kek(
         raise RotationError("the new KEK is the same as the old one")
     report = RotationReport()
     now = datetime.now(UTC)
-    rows = (await session.scalars(select(Secret).order_by(Secret.created_at))).all()
+    rows: list[Sealed] = [
+        *(await session.scalars(select(Secret).order_by(Secret.created_at))).all(),
+        *(
+            await session.scalars(select(UserSecondFactor).order_by(UserSecondFactor.created_at))
+        ).all(),
+    ]
     for row in rows:
         # Captured up front: a rollback expires every loaded object, and
         # reading `row.id` afterwards would be a lazy load outside the
@@ -69,7 +83,7 @@ async def rotate_kek(
             report.already_current += 1
             continue
         try:
-            fresh = rewrap(_sealed(row), kind=row.kind.value, old_kek=old_kek, new_kek=new_kek)
+            fresh = rewrap(_sealed(row), kind=_kind(row), old_kek=old_kek, new_kek=new_kek)
         except CryptoError as exc:
             await session.rollback()
             raise RotationError(
@@ -81,11 +95,44 @@ async def rotate_kek(
             await session.rollback()
             raise RotationError(f"secret {row_id} failed verification; nothing was changed")
         report.rotated += 1
+    report.rotated += await _rotate_requests(session, old_kek=old_kek, new_kek=new_kek)
     if dry_run:
         await session.rollback()
     else:
         await session.commit()
     return report
+
+
+async def _rotate_requests(session: AsyncSession, *, old_kek: str, new_kek: str) -> int:
+    """Requests still waiting carry their exact input sealed (Phase 9.1)."""
+    from app.models.approval import SEALED_KIND as REQUEST_KIND
+    from app.models.approval import Approval
+
+    rotated = 0
+    rows = (
+        await session.scalars(select(Approval).where(Approval.sealed_ciphertext.is_not(None)))
+    ).all()
+    for row in rows:
+        row_id = row.id
+        assert row.sealed_ciphertext and row.sealed_dek and row.sealed_nonce
+        box = SealedSecret(
+            ciphertext=row.sealed_ciphertext, dek_wrapped=row.sealed_dek, nonce=row.sealed_nonce
+        )
+        try:
+            open_sealed(box, kind=REQUEST_KIND, kek=new_kek)
+            continue
+        except CryptoError:
+            pass
+        try:
+            fresh = rewrap(box, kind=REQUEST_KIND, old_kek=old_kek, new_kek=new_kek)
+        except CryptoError as exc:
+            await session.rollback()
+            raise RotationError(
+                f"request {row_id} opens with neither key; nothing was changed"
+            ) from exc
+        row.sealed_dek = fresh.dek_wrapped
+        rotated += 1
+    return rotated
 
 
 __all__ = ["RotationError", "RotationReport", "rotate_kek"]

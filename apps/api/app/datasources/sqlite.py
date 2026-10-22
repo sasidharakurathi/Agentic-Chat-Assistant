@@ -97,7 +97,11 @@ class SqliteAdapter:
         max_rows: int,
         mutating: bool = False,
         returns_rows: bool = False,
+        asker_email: str | None = None,
     ) -> QueryResult:
+        if asker_email is not None:
+            # Only Postgres can scope a statement to the asker (Phase 9.3).
+            raise DbError("SQLite connections can't be scoped to the person asking")
         started = time.perf_counter()
         writable = bool(info.options.get("writable"))
         affected: int | None = None

@@ -21,7 +21,7 @@ import zlib
 from typing import Any
 
 import pytest
-from app.models.rag import Chunk
+from app.models.rag import Chunk, Document
 from app.rag.rerankers.base import RankedResult
 from app.rag.vectorstore.base import ScoredChunk
 from sqlalchemy import select
@@ -99,13 +99,20 @@ class LexicalStore:
     on, and ranks them in Python."""
 
     async def _chunks(
-        self, session: AsyncSession, assistant_id: uuid.UUID, source_ids: list[uuid.UUID] | None
+        self,
+        session: AsyncSession,
+        assistant_id: uuid.UUID,
+        source_ids: list[uuid.UUID] | None,
+        document_ids: list[uuid.UUID] | None = None,
     ) -> list[Chunk]:
-        rows = (
-            await session.scalars(select(Chunk).where(Chunk.assistant_id == assistant_id))
-        ).all()
-        assert source_ids is None, "the fixture suite doesn't narrow by source"
-        return list(rows)
+        stmt = select(Chunk).where(Chunk.assistant_id == assistant_id)
+        if document_ids is not None:
+            stmt = stmt.where(Chunk.document_id.in_(document_ids))
+        if source_ids:
+            stmt = stmt.join(Document, Document.id == Chunk.document_id).where(
+                Document.data_source_id.in_(source_ids)
+            )
+        return list((await session.scalars(stmt)).all())
 
     @staticmethod
     def _scored(chunk: Chunk, score: float) -> ScoredChunk:
@@ -126,8 +133,9 @@ class LexicalStore:
         embedding: list[float],
         top_k: int,
         source_ids: list[uuid.UUID] | None = None,
+        document_ids: list[uuid.UUID] | None = None,
     ) -> list[ScoredChunk]:
-        chunks = await self._chunks(session, assistant_id, source_ids)
+        chunks = await self._chunks(session, assistant_id, source_ids, document_ids)
         ranked = sorted(
             ((c, _cosine(embedding, embed(c.content))) for c in chunks),
             key=lambda pair: pair[1],
@@ -143,9 +151,10 @@ class LexicalStore:
         query_text: str,
         top_k: int,
         source_ids: list[uuid.UUID] | None = None,
+        document_ids: list[uuid.UUID] | None = None,
     ) -> list[ScoredChunk]:
         wanted = set(stems(query_text))
-        chunks = await self._chunks(session, assistant_id, source_ids)
+        chunks = await self._chunks(session, assistant_id, source_ids, document_ids)
         hits = [(c, len(wanted & set(stems(c.content)))) for c in chunks]
         ranked = sorted((h for h in hits if h[1] > 0), key=lambda pair: pair[1], reverse=True)
         return [self._scored(c, float(n)) for c, n in ranked[:top_k]]

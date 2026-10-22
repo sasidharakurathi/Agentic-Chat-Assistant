@@ -36,6 +36,8 @@ from app.services import db_connections as db_svc
 from app.services.mcp_discovery import normalize_tools
 from httpx import AsyncClient
 from pydantic import ValidationError
+from tests.pending import decide, waiting_request
+from tests.versions import go_live
 
 from test_orgs import Actor, _register  # type: ignore[import-not-found]
 
@@ -188,13 +190,14 @@ async def test_an_admin_cannot_invite_someone_above_their_own_rank(client: Async
 
 
 async def _pending(client: AsyncClient, headers: dict[str, str], aid: str) -> tuple[str, str]:
+    """A Chat conversation `headers` starts on the (approved) assistant, with
+    a write waiting in it."""
     conv = await client.post(f"{API}/assistants/{aid}/conversations", json={}, headers=headers)
     assert conv.status_code == 201, conv.text
     async with get_sessionmaker()() as s:
-        row = await approvals_svc.create(
+        row = await waiting_request(
             s,
             conversation_id=uuid.UUID(conv.json()["id"]),
-            org_id=uuid.UUID(headers["X-Org-Id"]),
             tool_name="mcp__caps__sql_query",
             tool_input={"sql": "DELETE FROM orders"},
             risk="high",
@@ -203,40 +206,41 @@ async def _pending(client: AsyncClient, headers: dict[str, str], aid: str) -> tu
         return str(conv.json()["id"]), str(row.id)
 
 
-async def test_only_the_person_in_the_conversation_or_an_admin_decides_an_approval(
+async def test_only_an_approver_decides_a_request_and_never_its_asker(
     client: AsyncClient,
 ) -> None:
     """Before: any member who could read a teammate's conversation could
-    approve the change it was waiting on."""
+    approve the change it was waiting on. Since Phase 9.1 the asker can't
+    decide their own either: an approver does."""
     owner, admin, member, _org = await _team(client)
     aid = await _assistant(client, owner)
+    await go_live(client, aid, owner, approver=admin)
 
     async def resolve(who: dict[str, str], approval_id: str) -> int:
-        r = await client.post(
-            f"{API}/approvals/{approval_id}:resolve", json={"decision": "approved"}, headers=who
-        )
-        return r.status_code
+        return (await decide(client, who, approval_id, "approved")).status_code
 
     cid, first = await _pending(client, owner, aid)
-    # The member can see it is pending (members read conversations)...
+    # The member can't see it (conversations are private since 7b.2)...
     seen = await client.get(f"{API}/conversations/{cid}/approvals", headers=member)
-    assert [a["id"] for a in seen.json()["items"]] == [first]
-    # ...and cannot decide it.
+    assert seen.status_code == 403
+    # ...nor decide it.
     assert await resolve(member, first) == 403
     async with get_sessionmaker()() as s:
         assert (await approvals_svc.get(s, uuid.UUID(first))).status is ApprovalStatus.pending
     assert await resolve(admin, first) == 200, "an admin reviewing a teammate's write"
 
-    # The person whose conversation it is decides their own.
+    # The person whose conversation it is doesn't decide their own.
     _, mine = await _pending(client, member, aid)
-    assert await resolve(member, mine) == 200
+    assert await resolve(member, mine) == 403
+    assert await resolve(owner, mine) == 200
 
 
 async def test_only_an_editor_starts_a_conversation_as_an_end_user(client: AsyncClient) -> None:
     """Before: a member named any end user's reference, and the assistant's
     memory tool read (and could rewrite) what it remembered about them."""
-    owner, _admin, member, _org = await _team(client)
+    owner, admin, member, _org = await _team(client)
     aid = await _assistant(client, owner)
+    await go_live(client, aid, owner, approver=admin)
     url = f"{API}/assistants/{aid}/conversations"
     as_customer = {"external_user_ref": "cust-1"}
     refused = await client.post(url, json=as_customer, headers=member)
@@ -343,7 +347,9 @@ async def test_a_crashed_turn_tells_the_browser_nothing_about_why(
 
     monkeypatch.setattr(chat_svc, "run_message", boom)
     aid = await _assistant(client, org_headers)
-    conv = await client.post(f"{API}/assistants/{aid}/conversations", json={}, headers=org_headers)
+    conv = await client.post(
+        f"{API}/assistants/{aid}/conversations", json={"mode": "preview"}, headers=org_headers
+    )
     r = await client.post(
         f"{API}/conversations/{conv.json()['id']}/messages",
         json={"text": "hi"},

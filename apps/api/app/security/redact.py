@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import MutableMapping
+from itertools import pairwise
 from typing import Any
 
 REDACTED = "<redacted>"
@@ -100,6 +101,20 @@ def _header(m: re.Match[str]) -> str:
 _COOKIE_LINE = re.compile(r"(?im)\b((?:set-)?cookie)(\s*:\s*)([^\r\n\"'=]+=[^\r\n\"']*)")
 
 
+def find_secrets(text: str) -> list[str]:
+    """The credentials in `text` (Phase 9.4, the scan at ingest): the token
+    shapes, bearer tokens and database URI passwords `strip_secrets` takes."""
+    spans = [(m.start(), m.end()) for p in _SECRET_PATTERNS for m in p.finditer(text)]
+    spans += [(m.start(), m.end()) for m in _BEARER.finditer(text)]
+    spans += [(m.start(2), m.end(2)) for m in _DB_URI_PASSWORD.finditer(text)]
+    # One credential once: an Anthropic key is also OpenAI-shaped.
+    kept: list[tuple[int, int]] = []
+    for start, end in sorted(spans, key=lambda s: (s[0], -s[1])):
+        if not any(a <= start and end <= b for a, b in kept):
+            kept.append((start, end))
+    return [text[a:b] for a, b in kept]
+
+
 def strip_secrets(text: str) -> str:
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(REDACTED, text)
@@ -115,6 +130,46 @@ def strip_secrets(text: str) -> str:
     text = _KEY_EQUALS.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
     text = _DB_URI_PASSWORD.sub(lambda m: m.group(1) + REDACTED + m.group(3), text)
     return _URI_PASSWORD.sub(lambda m: m.group(1) + REDACTED + m.group(3), text)
+
+
+#: A password typed into a chat message (Phase 9.6): `password: Hunter2!`,
+#: `my pin is 4821`, `api key = abc123XYZ`. Looser than `_KEY_EQUALS`, since a
+#: person writes prose, not query strings, so the value must look like a
+#: credential too (`_credential_like`): "my password: can you reset it?"
+#: keeps its words.
+_TYPED = re.compile(
+    r"(?i)\b(password|passwd|pwd|passcode|pin|secret|api[ _\-]?key|token)"
+    r"(\s*[:=]\s*|\s+is\s+)(\S+)"
+)
+_TRAILING = ".,;:!?)\"'"
+_MIN_TYPED = 4
+
+
+def _credential_like(value: str) -> bool:
+    """A digit, a symbol, or a capital after a lower-case letter: `hunter2`,
+    `Summer2024!`, `4821`, `xYz`; not `expired`, `Invalid` or `see`."""
+    if len(value) < _MIN_TYPED:
+        return False
+    if any(c.isdigit() or not c.isalnum() for c in value):
+        return True
+    return any(a.islower() and b.isupper() for a, b in pairwise(value))
+
+
+def _typed(m: re.Match[str]) -> str:
+    raw = m.group(3)
+    value = raw.rstrip(_TRAILING)
+    if not _credential_like(value) or value == REDACTED:
+        return m.group(0)
+    return m.group(1) + m.group(2) + REDACTED + raw[len(value) :]
+
+
+def mask_typed_secrets(text: str) -> tuple[str, bool]:
+    """A person's chat message with its credentials masked, and whether any
+    were (Phase 9.6): the shapes and `key=value` forms `strip_secrets` takes,
+    and a password written into a sentence. Masked before the message is
+    stored or reaches the model; the original is kept nowhere."""
+    masked = _TYPED.sub(_typed, strip_secrets(text))
+    return masked, masked != text
 
 
 #: A field whose value is a credential by its name, whatever it looks like:
@@ -171,4 +226,11 @@ def redact_event(
     return scrubbed
 
 
-__all__ = ["REDACTED", "is_secret_key", "redact_event", "strip_secrets"]
+__all__ = [
+    "REDACTED",
+    "find_secrets",
+    "is_secret_key",
+    "mask_typed_secrets",
+    "redact_event",
+    "strip_secrets",
+]

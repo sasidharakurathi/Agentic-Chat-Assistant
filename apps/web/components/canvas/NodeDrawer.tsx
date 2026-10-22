@@ -49,8 +49,11 @@ export function NodeDrawer({
   onPatch,
   onDelete,
   onClose,
+  assistantId,
 }: {
   node: GraphNode | null;
+  /** The assistant being built: the database drawer checks actions with it. */
+  assistantId?: string;
   models: string[];
   sources: DataSource[];
   databases: DbConnection[];
@@ -161,7 +164,14 @@ export function NodeDrawer({
           </p>
         )}
         {t === "output" && <OutputPanel data={node.data} onChange={onPatch} />}
-        {t === "tool" && <ToolNodePanel data={node.data} policy={httpPolicy} onChange={onPatch} />}
+        {t === "tool" && (
+          <ToolNodePanel
+            data={node.data}
+            policy={httpPolicy}
+            assistantId={assistantId}
+            onChange={onPatch}
+          />
+        )}
         {t === "database" && (
           <DatabasePanel
             data={node.data}
@@ -172,6 +182,7 @@ export function NodeDrawer({
               write: d.permissions.write,
               permissions: d.permissions,
             }))}
+            assistantId={assistantId}
             onChange={onPatch}
           />
         )}

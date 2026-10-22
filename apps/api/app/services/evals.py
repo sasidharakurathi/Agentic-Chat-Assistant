@@ -12,7 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import BadRequest, Conflict, NotFound
 from app.models.assistant import Assistant, AssistantVersion
-from app.models.evals import EvalCase, EvalCaseResult, EvalRun, EvalRunStatus, EvalSuite
+from app.models.evals import (
+    FOLLOW_UPS_KEY,
+    EvalCase,
+    EvalCaseResult,
+    EvalRun,
+    EvalRunStatus,
+    EvalSuite,
+)
 from app.schemas.evals import MAX_CASES, EvalCaseIn, EvalSuiteConfig
 from app.services import audit
 
@@ -117,11 +124,16 @@ async def list_cases(session: AsyncSession, suite_id: uuid.UUID) -> list[EvalCas
 
 
 def _fields(case: EvalCaseIn) -> dict[str, Any]:
+    # Follow-ups (Phase 9.8) ride in the metadata JSON under a reserved key;
+    # a single-question case stores exactly what it did before.
+    meta = {k: v for k, v in case.metadata.items() if k != FOLLOW_UPS_KEY}
+    if case.follow_ups:
+        meta[FOLLOW_UPS_KEY] = list(case.follow_ups)
     return {
         "input": case.input,
         "expected": case.expected.model_dump(),
         "labels": case.labels.model_dump(),
-        "meta": case.metadata,
+        "meta": meta,
     }
 
 

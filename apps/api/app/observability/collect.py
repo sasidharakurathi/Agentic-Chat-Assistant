@@ -167,7 +167,7 @@ async def _integrations(session: AsyncSession) -> list[Sample]:
     ).all():
         servers.values.append(((_text(status),), float(n)))
     pending = Sample(
-        "assistant_studio_approvals_pending", "Tool calls waiting for a person.", "gauge", ()
+        "assistant_studio_approvals_pending", "Requests waiting for a person.", "gauge", ()
     )
     # Past its expiry a row can't be decided (Phase 7a.7): not waiting.
     waiting = await session.scalar(

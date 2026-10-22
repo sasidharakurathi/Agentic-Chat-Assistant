@@ -363,7 +363,9 @@ async def _turn(
     )
     assert r.status_code == 200, r.text
     c = (
-        await client.post(f"/api/v1/assistants/{a['id']}/conversations", json={}, headers=headers)
+        await client.post(
+            f"/api/v1/assistants/{a['id']}/conversations", json={"mode": "preview"}, headers=headers
+        )
     ).json()
     async with client.stream(
         "POST", f"/api/v1/conversations/{c['id']}/messages", json={"text": text}, headers=headers

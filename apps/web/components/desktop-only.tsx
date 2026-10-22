@@ -2,10 +2,9 @@ import { Monitor } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-/** Said wherever signing in would be offered on a phone: signing in and
- *  creating an account are for a computer (the builder is a canvas). The
- *  landing page and the auth pages show it below `md` in place of their
- *  forms and buttons. */
+/** Said on a phone where building is offered (Phase 8.6): the builder is a
+ *  canvas that needs a computer; Chat, and signing in to it, work here.
+ *  The landing page shows it below `md`, beside its buttons. */
 export function DesktopOnlyNote({ className }: { className?: string }) {
   return (
     <div
@@ -14,10 +13,10 @@ export function DesktopOnlyNote({ className }: { className?: string }) {
     >
       <Monitor aria-hidden className="text-muted-foreground mt-0.5 size-5 shrink-0" />
       <div className="text-sm">
-        <p className="font-semibold">Sign in from a computer</p>
+        <p className="font-semibold">Building needs a computer</p>
         <p className="text-muted-foreground mt-1">
-          Assistant Studio is built on a canvas that needs a larger screen, so signing in and
-          creating an account work on desktop only.
+          Assistants are built on a canvas that needs a larger screen. Chat works on your phone:
+          sign in to ask your company&apos;s assistants.
         </p>
       </div>
     </div>

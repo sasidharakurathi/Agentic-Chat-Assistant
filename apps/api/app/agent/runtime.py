@@ -16,7 +16,9 @@ from typing import Any, cast
 import anyio
 from sqlalchemy import select
 
+from app.agent.actions import Asker, tiers
 from app.agent.approvals import ApprovalRequest, CanUseTool, build_can_use_tool, redact
+from app.agent.caps_handoff import HandOff
 from app.agent.caps_mcp import McpToolset, build_mcp_toolset
 from app.agent.caps_memory import MemoryScope
 from app.agent.citations import Citation, CitationRegistry
@@ -32,6 +34,7 @@ from app.agent.events import (
     ToolResultEvent,
     UsageEvent,
 )
+from app.agent.images import PromptImage
 from app.agent.options import RuntimeSpec, build_runtime_spec
 from app.config import settings
 from app.datasources.sql_guard import Permissions
@@ -115,8 +118,22 @@ class Turn:
         approvals: ApprovalRequest | None = None,
         history: str | None = None,
         memory_scope: MemoryScope | None = None,
+        knowledge: frozenset[uuid.UUID] | None = None,
+        asker: Asker | None = None,
+        images: list[PromptImage] | None = None,
+        handoff: HandOff | None = None,
     ) -> None:
         self._config = config
+        #: Hands the conversation to a person (Phase 9.5): the `hand_off`
+        #: tool's work, bound to this conversation. None: no such tool.
+        self._handoff = handoff
+        #: Screenshots sent with the message (Phase 9.6), beside the text.
+        self._images = list(images or [])
+        #: Who is asking (Phase 9.1): what a declared action's `:asker_*`
+        #: slots are filled with. None for an eval or a dry run.
+        self._asker = asker
+        #: On an approved version, the documents it may search (Phase 7b.1).
+        self._knowledge = knowledge
         #: What the guardrails found this turn (task 5.3): emitted live, and
         #: saved with the answer.
         self.guard = turn_guard.TurnGuard(
@@ -251,6 +268,10 @@ class Turn:
             mcp_tools=mcp.tools,
             history=self._history,
             memory_scope=self._memory_scope,
+            knowledge=self._knowledge,
+            asker=self._asker,
+            org_id=self._memory_scope.org_id if self._memory_scope else None,
+            handoff=self._handoff,
         )
         spec.guard = self.guard
         spec.over_budget = self._over_budget
@@ -358,6 +379,7 @@ class Turn:
             read_only_mcp=frozenset(t.qualified_name for t in mcp.tools if t.read_only),
             mcp_modes=mcp.modes,
             permissions=self.outcome.permissions,
+            action_tiers=tiers(self._config),
         )
 
     async def _pump(
@@ -433,6 +455,7 @@ class Turn:
             session_id=self._session_id,
             can_use_tool=can_use_tool,
             interrupt=self._interrupt,
+            images=self._images,
         )
         # Both drivers are async generators; closed here on every exit.
         async with contextlib.aclosing(cast(AsyncGenerator[AgentEvent, None], stream)) as events:

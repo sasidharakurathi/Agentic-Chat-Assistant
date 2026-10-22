@@ -14,8 +14,10 @@ from app.graph.project import project_config
 from app.graph.trace_nodes import always_nodes, nodes_for_tool
 from app.models.conversation import Message
 from app.schemas.assistant_config import AssistantConfig
+from app.services import executor
 from httpx import AsyncClient
 from sqlalchemy import select
+from tests.versions import go_live
 
 from test_chat_approvals import (  # type: ignore[import-not-found]
     _assistant_with_db,
@@ -144,7 +146,7 @@ async def test_a_tool_call_is_timed_and_placed_on_the_canvas(
     assert set(trace["nodes"]) == {"input", "guardrail", "agent", "output", "tool:calculator"}
 
 
-async def test_an_approval_shows_who_answered_and_how_long_it_waited(
+async def test_a_request_shows_who_answered_and_how_long_it_waited(
     client: AsyncClient,
     org_headers: dict[str, str],
     fake_sql: dict[str, Any],  # noqa: F811 (the fixture imported above)
@@ -152,19 +154,20 @@ async def test_an_approval_shows_who_answered_and_how_long_it_waited(
     aid = await _assistant_with_db(client, org_headers)
     cid = await _conversation(client, org_headers, aid)
     events: list[Any] = []
-    turn = asyncio.create_task(_run_turn(cid, "sql: DELETE FROM sessions WHERE expired", events))
+    await _run_turn(cid, "sql: DELETE FROM sessions WHERE expired", events)
     prompt = await _await_prompt(events)
     await asyncio.sleep(0.05)
     assert (await _resolve(client, org_headers, prompt.approval_id, "approved")).status_code == 200
-    await asyncio.wait_for(turn, timeout=15)
+    await executor.drain()
 
     trace = await _trace(client, org_headers, cid)
     (step,) = [s for s in trace["timeline"] if s["kind"] == "tool"]
     approval = step["approval"]
-    assert (approval["status"], approval["risk"]) == ("approved", "high")
+    assert (approval["status"], approval["risk"]) == ("succeeded", "high")
     assert approval["decided_by"] == "Test User"
     assert approval["wait_ms"] >= 50
-    assert step["permission"] == "approved"
+    # The call itself was stored, not run (Phase 9.1).
+    assert step["permission"] == "queued"
     assert step["nodes"] and step["nodes"][0].startswith("db:")
 
 
@@ -220,12 +223,8 @@ async def test_a_published_version_is_traced_against_its_own_graph(
     client: AsyncClient, org_headers: dict[str, str]
 ) -> None:
     aid = await _assistant(client, org_headers, tools={"calculator": {"enabled": True}})
-    assert (
-        await client.post(f"/api/v1/assistants/{aid}/versions", json={}, headers=org_headers)
-    ).status_code == 201
-    r = await client.post(
-        f"/api/v1/assistants/{aid}/conversations", json={"version": 1}, headers=org_headers
-    )
+    await go_live(client, aid, org_headers)
+    r = await client.post(f"/api/v1/assistants/{aid}/conversations", json={}, headers=org_headers)
     cid = r.json()["id"]
     events: list[Any] = []
     await _run_turn(cid, "what is 6 * 7?", events)

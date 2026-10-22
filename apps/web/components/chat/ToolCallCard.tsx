@@ -58,9 +58,10 @@ function StepList({ label, children }: { label: string; children: ReactNode[] })
   );
 }
 
-/** Whether a finished call went wrong, in a word. */
-function failedWord(status?: string): string | null {
-  if (!status || status === "success") return null;
+/** Whether a finished call went wrong, in a word. A call stored as a
+ *  request (Phase 9.1) didn't go wrong: it waits, and its card says so. */
+function failedWord(status?: string, permission?: string | null): string | null {
+  if (!status || status === "success" || permission === "queued") return null;
   return status === "error" ? "Failed" : "Didn't finish";
 }
 
@@ -92,7 +93,8 @@ export function ToolCallCard({
   const sql = typeof input.sql === "string" ? (input.sql as string) : null;
   const rows = parseRows(call.output);
   const running = live && !call.status && call.output == null;
-  const failed = failedWord(call.status);
+  const failed = failedWord(call.status, call.permission);
+  const saved = call.permission === "queued";
   const permission = permissionText(call.permission);
   const hasInput = Object.keys(input).length > 0;
 
@@ -123,6 +125,12 @@ export function ToolCallCard({
             <span className="text-small inline-flex shrink-0 items-center gap-1.5 font-medium">
               <Lamp tone="destructive" />
               {failed}
+            </span>
+          )}
+          {saved && (
+            <span className="text-small text-muted-foreground inline-flex shrink-0 items-center gap-1.5">
+              <Lamp tone="warning" />
+              Saved as a request
             </span>
           )}
           {call.duration_ms != null && (

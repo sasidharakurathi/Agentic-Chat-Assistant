@@ -2,6 +2,7 @@
   "name": "assistant-studio",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT",
   "description": "Self-hosted platform to build dynamic agentic chat assistants (RAG + DB + tools + MCP).",
   "workspaces": [
     "apps/web",

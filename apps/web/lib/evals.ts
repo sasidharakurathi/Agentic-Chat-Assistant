@@ -15,12 +15,14 @@ import type {
 /** Columns a CSV may have. Lists go in one cell, separated by `|`. */
 export const CSV_COLUMNS = [
   "input",
+  "follow_ups",
   "reference",
   "contains",
   "not_contains",
   "tools",
   "cites",
   "refuses",
+  "expects_approval",
   "relevant_sources",
 ] as const;
 
@@ -87,8 +89,11 @@ function fromCsv(text: string): ParsedCases {
       problems.push(`Row ${n + 2} has no input. It was skipped.`);
       return;
     }
+    // Phase 9.8: only when there are some, so older files read as they did.
+    const followUps = list(get("follow_ups"));
     cases.push({
       input,
+      ...(followUps.length ? { follow_ups: followUps } : {}),
       expected: {
         reference: get("reference")?.trim() || null,
         contains: list(get("contains")),
@@ -96,6 +101,8 @@ function fromCsv(text: string): ParsedCases {
         tools: list(get("tools")),
         cites: yes(get("cites")),
         refuses: yes(get("refuses")),
+        // Phase 10.4: only when set, so older files read as they did.
+        ...(yes(get("expects_approval")) ? { expects_approval: true } : {}),
       },
       labels: { relevant_sources: list(get("relevant_sources")) },
     });
@@ -133,8 +140,12 @@ function fromJson(text: string): ParsedCases {
     // CSV row would be).
     const e = (r.expected ?? r) as Record<string, unknown>;
     const l = (r.labels ?? r) as Record<string, unknown>;
+    const followUps = strings(r.follow_ups)
+      .map((s) => s.trim())
+      .filter(Boolean);
     cases.push({
       input,
+      ...(followUps.length ? { follow_ups: followUps } : {}),
       expected: {
         reference: typeof e.reference === "string" && e.reference.trim() ? e.reference : null,
         contains: strings(e.contains),
@@ -142,6 +153,7 @@ function fromJson(text: string): ParsedCases {
         tools: strings(e.tools),
         cites: e.cites === true,
         refuses: e.refuses === true,
+        ...(e.expects_approval === true ? { expects_approval: true } : {}),
       },
       labels: {
         relevant_sources: strings(l.relevant_sources),
@@ -159,6 +171,48 @@ export function parseCasesFile(text: string, filename: string): ParsedCases {
   return json ? fromJson(text) : fromCsv(text);
 }
 
+// ── exporting cases ──────────────────────────────────────────
+
+/** A CSV cell: quoted when it holds a comma, quote, line break or edge
+ *  spaces, with quotes doubled. */
+function csvCell(value: string): string {
+  return /[",\r\n]|^\s|\s$/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/** Cases as a CSV in the import format (`CSV_COLUMNS`), so a download can be
+ *  edited and imported again. Lists are joined with `|`, so a follow-up that
+ *  itself holds a `|` only survives the JSON export. */
+export function casesToCsv(cases: EvalCaseDraft[]): string {
+  const rows = cases.map((c) => {
+    const e = c.expected ?? {};
+    const cells: Record<(typeof CSV_COLUMNS)[number], string> = {
+      input: c.input,
+      follow_ups: (c.follow_ups ?? []).join(" | "),
+      reference: e.reference ?? "",
+      contains: (e.contains ?? []).join(" | "),
+      not_contains: (e.not_contains ?? []).join(" | "),
+      tools: (e.tools ?? []).join(" | "),
+      cites: e.cites ? "yes" : "",
+      refuses: e.refuses ? "yes" : "",
+      expects_approval: e.expects_approval ? "yes" : "",
+      relevant_sources: (c.labels?.relevant_sources ?? []).join(" | "),
+    };
+    return CSV_COLUMNS.map((col) => csvCell(cells[col])).join(",");
+  });
+  return [CSV_COLUMNS.join(","), ...rows].join("\n") + "\n";
+}
+
+/** Cases as JSON in the import format: everything the form can set. */
+export function casesToJson(cases: EvalCaseDraft[]): string {
+  const out = cases.map((c) => ({
+    input: c.input,
+    follow_ups: c.follow_ups ?? [],
+    expected: c.expected ?? {},
+    labels: c.labels ?? {},
+  }));
+  return JSON.stringify({ cases: out }, null, 2) + "\n";
+}
+
 // ── saying what a case checks ────────────────────────────────
 
 const quote = (items: string[]) => items.map((s) => `"${s}"`).join(", ");
@@ -174,6 +228,7 @@ export function expectations(
   if (expected?.not_contains?.length) out.push(`Doesn't say ${quote(expected.not_contains)}`);
   if (expected?.tools?.length) out.push(`Uses ${expected.tools.join(", ")}`);
   if (expected?.cites) out.push("Cites a source");
+  if (expected?.expects_approval) out.push("Waits for approval");
   if (expected?.reference) out.push("Has a reference answer");
   const found = [...(labels?.relevant_sources ?? []), ...(labels?.relevant_chunk_ids ?? [])];
   if (found.length) out.push(`Should find ${found.join(", ")}`);
@@ -193,6 +248,10 @@ export function checkText(c: CheckScore): string {
       return c.passed ? `Used ${c.target}` : `Didn't use ${c.target}`;
     case "cites":
       return c.passed ? "Cites a source" : "Cites no source";
+    case "approval":
+      return c.passed
+        ? "Asked for approval and changed nothing"
+        : "Didn't wait for approval, or changed something";
     default:
       return `${c.kind} ${c.target}`.trim();
   }

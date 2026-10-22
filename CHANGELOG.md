@@ -12,8 +12,349 @@ with what was measured and what is known to be missing, are in
 
 ## [Unreleased]
 
+### Action needed
+
+- **Pointing a connection somewhere else needs its credential again**
+  (the second security pass, EXPLAINER §19, 9.9). Changing a database
+  connection's host, port, database or user, or an HTTP connection's
+  address, now asks for the password or headers again
+  (`password_required`, `headers_required`). Eval suites and runs are now
+  only for the assistant's editors, eval conversations can't be replied
+  in, and connecting Google needs an account with the same email.
+- **Builder testing no longer spends the pilot's budget** (9.7). If you
+  relied on the org budget to cap previews and eval runs, set a builder
+  budget in Members › Organisation.
+- **The production networks now have fixed address ranges** (EXPLAINER
+  §19, 9.3): `172.31.240.0/24`, `.241.0/24` and `.242.0/24` for `edge`,
+  `data` and `mcp`, which the API is told about (`PLATFORM_NETWORKS`) so
+  it never reaches its own datastores. If they clash with your office or
+  VPN ranges, set `EDGE_SUBNET`, `DATA_SUBNET` and `MCP_SUBNET` in
+  `.env.production`. Docker keeps a network's range once it exists, so
+  run `docker compose -f docker-compose.prod.yml down` (volumes are kept)
+  before the next `up` (OPERATIONS, "Company systems").
+- **Requests that need a person no longer wait inside the answer**
+  (EXPLAINER §19, 9.1). `APPROVAL_TIMEOUT_S` is gone: an approver's
+  request waits for the organisation's expiry (72 hours by default,
+  Members › Organisation), with one reminder. In production the `mailer`
+  service now runs approved requests too: keep it running. Requests
+  waiting before the upgrade are closed as expired.
+- **Rehearse the upgrade on a copy of your database first** (OPERATIONS
+  §7). The 7b releases change who can chat with what, and migrations go
+  one way. Then run `python -m scripts.upgrade_report` and read it before
+  and after upgrading the real one.
+- **Production now runs one organisation** (`ORG_MODE=single` in
+  `docker-compose.prod.yml`; EXPLAINER §17, 7b.8): nobody can create a
+  second one, and sign-up is by invite after the first account whatever
+  `REGISTRATION` says. To keep several, set `ORG_MODE=multi`.
+- **Personal orgs are sorted out by the upgrade:** one that others joined
+  becomes the team's; an empty one whose people have another org is
+  archived (nothing deleted). Personal orgs with something in them are
+  listed by the report, to archive, freeze or keep.
+
 ### Changed
 
+- **The rest of the second security pass, and what the first builds left**
+  (EXPLAINER §19, 9.9):
+  - **Knowledge:** answers written from knowledge someone lost are
+    hidden, and so are their search results.
+  - **Previews:** a schema change the model wrote waits for an
+    approver.
+  - **Hand-off:** an email contact must be an admin.
+  - **Screenshots:** served through the API (`GET
+/conversations/{id}/attachments/{attachment_id}/content`; the
+    presigned-link route is gone), and unsent ones are deleted after a
+    day.
+  - **Evals:** cases can ask follow-ups (`follow_ups`), and results carry
+    `turns`.
+- **Insight (Phase 10, EXPLAINER §19, 10.1 to 10.5):**
+  - **Analytics** per assistant (resolution, cost per resolved, compared
+    with the previous period) and a per-assistant report for admins, with
+    a CSV download.
+  - **Traffic drawn on the canvas.**
+  - **A needs-review queue** that turns complaints into test cases and
+    emails the person once it is fixed.
+  - **Approval evidence:** eval scorecard, "no unapproved write" and a
+    cost forecast; eval cases can require an approval.
+  - **Erasure counts,** and conversation export.
+  - **For API clients:**
+    - `GET /assistants/{id}/analytics`;
+    - `GET /orgs/{org}/analytics` (and `.csv`);
+    - `GET /assistants/{id}/traffic`;
+    - `GET /assistants/{id}/review-queue`, with `POST .../{item_id}:to-case`
+      and `:dismiss`;
+    - `GET /assistants/{id}/versions/{n}/evidence`;
+    - `GET /conversations/{id}/export`;
+    - `details` on erasures.
+  - Migration `ca03b4c5d6e7`.
+- **Hand-off, screenshots and builder budgets (EXPLAINER §19, 9.5 to
+  9.8):**
+  - **Hand-off.** Hand a conversation to a person: an email that only
+    links, or a ticket through a declared HTTP action.
+  - **Screenshots.** Paste or attach screenshots in Chat.
+  - **Typed secrets.** Passwords and keys typed into Chat are masked
+    before anything stores or sends them.
+  - **Builder budget.** Previews and eval runs spend from their own
+    optional monthly builder budget, and the pilot's budgets count live
+    spend only.
+  - **The IT helpdesk sample** comes first, with `python -m
+scripts.demo_helpdesk` for its demo database.
+  - **For API clients:**
+    - `POST /conversations/{id}/handoff` and `GET .../handoffs`;
+    - `POST /conversations/{id}/attachments`, `GET
+.../attachments/{attachment_id}`, and `attachment_ids` on messages;
+    - `builder` on budgets;
+    - `builder_monthly_usd` in settings;
+    - `handoff` in the config.
+  - Migrations `c9a5b6c7d8e9` and `c9a6b7c8d9e0`.
+- **Knowledge groups, revocation, the ingest scan and share links**
+  (EXPLAINER §19, 9.4):
+  - **Who reads a source.** Each knowledge source is everyone's or
+    readable by groups (deny by default). Answers and citations use only
+    what the asker may read, and an assistant is offered only to people
+    who can read all of its restricted sources.
+  - **Losing access.** A conversation on restricted knowledge starts
+    fresh after someone loses access, and earlier citations hide.
+  - **The scan.** A source open to everyone that holds a credential, or
+    several Aadhaar, PAN or card numbers, waits until its builder chooses
+    groups or confirms (audited).
+  - **Share links.** Conversations can be shared as read-only links
+    inside the organisation, re-checked at each opening and audited.
+  - **For API clients:**
+    - `PUT /assistants/{id}/data-sources/{id}/access`;
+    - `POST .../{id}:confirm-everyone`;
+    - `everyone`, `group_ids` and the `held` status on sources;
+    - `ingest_report.sensitive`;
+    - `POST`/`GET /conversations/{id}/shares`;
+    - `DELETE /conversations/{id}/shares/{share_id}`;
+    - `GET /shared/{token}`.
+  - Migration `c9a4b5c6d7e8`.
+- **Data scoped to the asker, company systems over HTTP, and internal
+  destinations** (EXPLAINER §19, 9.3):
+  - **A Postgres connection can answer only for the person asking.**
+    Each statement sets `app.asker_email` for the database's row-level
+    security, and it refuses with nobody signed in. Testing it checks
+    that row-level security binds the role.
+  - **HTTP connections and declared calls.** A connection holds a company
+    system's address and sealed headers, and can say who is asking. The
+    HTTP request tool can carry declared calls on it, with the tiers of
+    SQL actions.
+  - **Internal destinations.** The owner lists the internal systems that
+    assistants may reach (host, address range, ports, plain http). The
+    server's own networks are always refused.
+  - **For API clients:**
+    - `GET`/`POST /assistants/{id}/http-connections`;
+    - `PATCH`/`DELETE /assistants/{id}/http-connections/{http_connection_id}`;
+    - `permissions.scope_to_asker` on database connections;
+    - `warnings` on a connection test;
+    - `internal_destinations` in organisation settings;
+    - `kind: "http"` on `POST /assistants/{id}/actions:check`;
+    - `tools.http_request.actions` in the config;
+    - an `http_connection` drift kind.
+  - Migration `c9a3b4c5d6e7`.
+- **The approvals inbox, emails that only link, and My requests**
+  (EXPLAINER §19, 9.2). Each request has its own page, where emails link;
+  Approvals shows what waits for you, what you decided and, for admins,
+  every request in the organisation; everyone has **My requests** in
+  Chat. The sidebar shows how many wait for you. A burst of requests is
+  one email per approver. For API clients: `GET /approvals/{id}`,
+  `/approvals/mine`, `/approvals/decided`, `/approvals/summary`, and
+  `GET /orgs/{org}/approvals` (admins, with `status` and `assistant_id`).
+  Migration `c9a2b3c4d5e6`.
+- **Declared actions, and requests that wait safely** (EXPLAINER §19,
+  9.1). A database node can carry named statements the builder writes,
+  with values the model fills and the asker's own address, name and id
+  filled by the platform; each runs at once (a read), once the asker
+  confirms (only a statement pinned to their own rows), or once an
+  approver decides. Any write that needs a person is stored with its
+  exact input sealed, and the answer goes on; the asker or an approver
+  decides whenever they can, and it runs once, after everything is
+  checked again, with the outcome posted back and the asker emailed.
+  Each assistant can name its approvers (groups or people; the admins
+  when nobody is named); approvers can hand their requests to someone
+  while away. A new **Approvals** queue for whoever may decide. For API
+  clients: `POST /approvals/{id}:resolve` takes `input_sha256` (required
+  when the request has one), `note` and `params`; `GET
+/conversations/{id}/approvals?all=true`; `POST /approvals/{id}:withdraw`;
+  `GET /approvals/decidable`; `GET`/`PUT /assistants/{id}/approvers`;
+  `GET`/`POST /approvals/delegations`, `DELETE
+/approvals/delegations/{id}`; `POST /assistants/{id}/actions:check`.
+  `GET /orgs/{org}/approvals` is gone. Migration `c9a1b2c3d4e5`.
+- **Browser tests for the employee flows** (EXPLAINER §18, 8.11). A
+  Playwright suite (`npm run e2e -w web`) on its own throwaway stack (an
+  API on 8020 with SQLite and the fake driver, the web app on 3020): an
+  employee never sees the Studio, the privacy notice comes first, links
+  survive signing in, a dropped connection picks the answer up, phones sign
+  in and chat, removing is honest and undoable. In `scripts/check.ps1` and
+  a CI job. New dev dependency `@playwright/test` 1.62.1.
+- **One purge path, retention and legal holds** (EXPLAINER §18, 8.10).
+  Conversations are erased for good 365 days after their last message (an
+  admin can change it; below a year the page warns about DPDP), every
+  night, in small batches, with their memory notes, CLI transcript and
+  session key. The owner can erase one person's data and put people or
+  conversations on a legal hold that every purge skips. Each erasure is
+  recorded, and `restore.sh` saves the record so it can be applied again
+  after a restore. Traces carry metadata only in production
+  (`TRACE_CONTENT`). For API clients: `PUT /orgs/{org}/retention`, `POST
+/orgs/{org}/members/{user_id}:erase`, `GET`/`POST /orgs/{org}/holds`,
+  `POST /orgs/{org}/holds:release`, `GET /orgs/{org}/erasures`;
+  `retention_days` in organisation settings and the notice. Migration
+  `c8a9b4c5d6e7`.
+- **Per-person caps, the provider's limit, and alerts** (EXPLAINER §18,
+  8.9). Spend is recorded per person. Admins set a daily and monthly limit
+  for each Employee and each builder, and their own for one person;
+  reaching it stops only that person, who is told without money at 80% and
+  100%. Employees get a smaller message rate. The model provider's spending
+  limit is now its own failure instead of "try again in a minute". When
+  something stops Chat for everyone, admins get an email (at most hourly),
+  a banner and an Alerts page. For API clients: `GET`/`PUT
+/orgs/{org}/budgets/people`, `PUT /orgs/{org}/members/{user_id}/budget`,
+  `GET /orgs/{org}/alerts`, `POST /orgs/{org}/alerts:resolve`; the
+  `person_limit` and `provider_spend_cap` failure codes; budget events with
+  `scope: "person"`; `RATE_LIMIT_CHAT_EMPLOYEE`. Migration `c8a8a3b4c5d6`.
+- **History and feedback** (EXPLAINER §18, 8.8). Removing a conversation
+  now says what it does: out of your lists and search, kept for the
+  company, admins can still open it, and **Removed** puts it back.
+  Search your conversations across assistants. A thumbs (with an optional
+  comment) on each answer, and "Did this solve it?" once per conversation.
+  Builders get a Feedback tab: thumbs by version, the solved rate with how
+  many answered, and comments with their question and answer, never who
+  asked. For API clients: `POST /conversations/{id}:restore`, `PUT
+/conversations/{id}/messages/{message_id}/feedback`, `PUT
+/conversations/{id}/outcome`, `GET /assistants/{id}/feedback`; `GET
+/chat/conversations` takes `q` and `removed`; a conversation's detail
+  carries `feedback` and `solved`. Migration `c8a7f2a3b4c5`.
+- **How Chat uses your data** (EXPLAINER §18, 8.7). Before their first
+  message in Chat, everyone reads and accepts a notice: what is kept,
+  that admins can open conversations, the rules, where messages go (from
+  the server's setup) and who to ask. The owner edits it and chooses
+  whether a change asks everyone again; every text and acceptance is kept.
+  **Privacy & help** shows each time an admin opened one of your
+  conversations, and why. Each assistant has a card (**About**): what its
+  approved version uses, can do and sends out, and what it remembers about
+  you. New `docs/DATA_FLOWS.md`. For API clients: a live conversation's
+  message is refused with `notice_required` until the notice is accepted;
+  `GET /chat/notice`, `POST /chat/notice:accept`, `GET /chat/access`, `GET
+/chat/assistants/{id}/about`, `GET`/`PUT /orgs/{org}/notice` and
+  `/notice/revisions`; the `privacy_contact` setting;
+  `PRIVACY_NOTICE_REQUIRED` (on). Migration `c8a6e1f2a3b4`.
+- **The Chat app** (EXPLAINER §18, 8.6). Answers survive a dropped
+  connection: keep-alives while a turn is quiet, and the app picks the
+  answer up from the last event it saw. A message the server never kept
+  goes back in the box, **Try again** waits when the server says how long,
+  and employees read failures without money or settings. Links come back
+  after sign-in, conversations have a stable link (`/chat/c/{id}`), and a
+  withdrawn assistant leaves its conversations readable. Employees get
+  their own slim shell. Sign-in works on phones, Chat installs to the home
+  screen with an offline page, and an iPhone app signs in with a code from
+  another device. For API clients: an `accepted` stream event; `busy` is
+  retryable with `retry_after_s`; `budget_exceeded` carries `resets_at`;
+  `POST /auth/device-code` and `/auth/device-code/redeem`; `GET
+/chat/help`; the `offline_help` setting; the `X-Turn-Id` header is
+  readable across origins.
+- **Audiences, groups and the catalog** (EXPLAINER §18, 8.5). Admins make
+  groups; builders set each assistant's audience (everyone, groups or
+  named people), category and conversation starters on the new Listing
+  tab, frozen into the next version and reviewed with it. Chat shows each
+  person only what they are in (admins and an assistant's builders see
+  it always); Official assistants come first; search and categories. For
+  API clients: `/orgs/{org}/groups` and its members; `GET`/`PUT
+/assistants/{id}/listing`; `POST /assistants/{id}:official`;
+  `GET /chat/assistants` takes `q` and `category`; versions carry
+  `listing`. Every existing version is for everyone. Migration
+  `c8a5d1e2f3a4`.
+- **Two-step sign-in** (EXPLAINER §18, 8.4). An authenticator app, with ten
+  recovery codes, set up in Your account. With `REQUIRE_ADMIN_2FA` (on in
+  the production compose), the owner and admins act as admins only after a
+  second factor: a code, or a Google sign-in limited to the company's
+  domain. `python -m scripts.reset_two_factor` turns it off for someone
+  locked out. Sign-in limits are now per person, sign-up has its own
+  bucket, and `TRUSTED_INTERNAL_NETS` raises per-address ceilings for
+  office and VPN ranges. For API clients: `POST /auth/login` returns
+  `LoginOut` (tokens, or `two_factor_challenge`), finished at
+  `POST /auth/login/two-factor`; `/auth/two-factor` and its `setup`,
+  `confirm`, `verify`, `recovery-codes` and `disable`; `/auth/me` gains
+  `two_factor`. Migration `c8a4c1d2e3f4`.
+- **Google sign-in** (EXPLAINER §18, 8.3; OPERATIONS §3). Off until
+  `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and (recommended)
+  `GOOGLE_ALLOWED_DOMAIN` are set. Accounts are found by Google's id, never
+  by address: an existing account connects Google from Your account; new
+  ones come through an invite or the owner's opt-in auto-join (as
+  Employees), and have no password. For API clients: `GET /auth/providers`,
+  `GET /auth/google/start`, `GET /auth/google/callback`,
+  `POST /auth/google/exchange`, `POST /auth/google/link-ticket`,
+  `DELETE /auth/google`; `/auth/me` gains `sign_in`; a new
+  `google_auto_join` organisation switch. Migration `c8a3b1c2d3e4`
+  (`user_identities`; `users.password_hash` may be empty).
+- **An internal host** (EXPLAINER §18, 8.2; OPERATIONS §2). The proxy can
+  get its certificate through DNS (`TLS_MODE=acmedns` or `cloudflare`,
+  with the proxy image built from `deploy/proxy/caddy.Dockerfile`), so the
+  server needs no port open to the internet, and listens on one address
+  (`BIND_IP`). The preflight warns about a production server set up to
+  face the internet, or whose name resolves to a public address. New
+  settings: `TLS_MODE` (default `public`, as before), `BIND_IP`,
+  `CLOUDFLARE_API_TOKEN`, `ACMEDNS_USERNAME`, `ACMEDNS_PASSWORD`,
+  `ACMEDNS_SUBDOMAIN`, `ACMEDNS_SERVER_URL`.
+- **The Employee role** (EXPLAINER §18, 8.1). People who only chat: they
+  see the assistants that answer in Chat and their own conversations, and
+  receive answers without the tool inputs and outputs, model, tokens or
+  cost. Their requests that need approval wait for an admin, who is
+  emailed and finds them on a new **Approvals** page. **Invites now make
+  employees by default**; choose Builder for people who build. For API
+  clients: role `employee`; new `GET /chat/assistants`,
+  `GET /chat/assistants/{id}`, `GET /chat/conversations` and
+  `GET /orgs/{org}/approvals` (admins); `POST /approvals/{id}:resolve`
+  answers 403 `admin_decides` to an employee; a new `approval_emails`
+  organisation switch. Every other route refuses an employee with 403
+  `studio_access_required`.
+- **The threat model is rewritten for one company** (EXPLAINER §17,
+  7b.10): the deployment it assumes, the insider admin and the other
+  people who might attack, a wall for each Phase 7 change, what is still
+  open, and what must hold before Chat opens to employees. Its list of
+  who may call each route is written from the tested role matrix, and a
+  test fails when they differ.
+- **CI runs the integration tier** (EXPLAINER §17, 7b.9). A new
+  `api-integration` job starts the compose datastores on every pull
+  request, migrates Postgres, runs `alembic check` there and the
+  Postgres, Redis, MySQL and Mongo tests; `api-retrieval` runs the
+  local-model retrieval tests nightly and on `main`. A test that can't
+  reach a service named in `REQUIRE_INTEGRATION` now fails instead of
+  skipping (`scripts/check.ps1` requires Postgres and Redis). Phase 7's
+  migrations are taken down and back up with data, on SQLite and Postgres.
+- **Organisation settings** (EXPLAINER §17, 7b.8). The owner can rename
+  the organisation and switch off review emails, decision emails, or the
+  sole owner approving their own version. Each change is in the audit
+  log. For API clients: `GET` and `PATCH /orgs/{org}/settings`;
+  `POST /orgs` answers 403 `org_creation_closed` in single-org mode; an
+  archived organisation answers 404 and leaves `GET /orgs` and
+  `/auth/me`. Migration `c7b8a1b2c3d4`.
+
+- **Email** (EXPLAINER §17, 7b.5). With `SMTP_HOST` and `MAIL_FROM` set,
+  invites are emailed, admins hear when a version waits for review and
+  builders when theirs is decided. Messages only notify, with a link into
+  the app; plain text; no conversation content. Sending runs on its own
+  queue with retries, in a new `mailer` container (prod and dev compose).
+  New settings: `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`,
+  `SMTP_USERNAME`, `SMTP_PASSWORD`, `MAIL_FROM`, `MAIL_FROM_NAME`,
+  `MAIL_BACKEND`, `MAIL_MAX_TRIES`. Without them nothing is emailed.
+- **An assistant answers in Chat only once an admin approves it**
+  (EXPLAINER §17, 7b.1). Publish is now **Submit for review**: an admin or
+  the owner approves or rejects each version, with a note, and can roll
+  back and pause. For API clients:
+  - `POST /assistants/{id}/versions` submits; it no longer goes live.
+    Approve, reject, withdraw and roll back are
+    `POST .../versions/{n}/approve|reject|withdraw|make-live`; pausing is
+    `POST /assistants/{id}/archive` (with a reason) and `/unarchive`.
+  - `PATCH /assistants/{id}` refuses `status` (422): the status follows
+    the review.
+  - Starting or posting in a conversation on an assistant with no
+    approved version, or a paused one, is refused (409
+    `assistant_unavailable`). Builders test drafts in a preview:
+    `{"mode": "preview"}` (optionally `"version": n`) when creating a
+    conversation; `?mode=preview` lists them.
+  - A conversation stays on the version it started on.
+  - On upgrade every existing version is approved (an audit row per
+    assistant says so), and conversations that ran on a draft become
+    previews.
 - **An HTTP request tool with no allowed sites now reaches no sites**
   (it used to reach any public site). Assistants that use it with an empty
   list stop fetching until their builder lists the sites; the builder's
@@ -44,6 +385,12 @@ with what was measured and what is known to be missing, are in
 
 ### Fixed
 
+- The Phase 8.5 audiences migration no longer fails on SQLite, where a
+  version's id comes back as text.
+- Loading saved erasures after a restore no longer inserts one twice when
+  the file lists it twice (EXPLAINER §18, 8.10).
+- Too many sign-ups from one address now says so ("Too many sign-ups from
+  this address.").
 - A conversation no longer breaks after a redeploy: when the CLI's saved
   session is gone, the next turn carries on from the stored messages.
 - Stopping the API leaves time to record running turns as stopped, instead
@@ -71,6 +418,64 @@ with what was measured and what is known to be missing, are in
 
 ### Security
 
+- **Nobody decides their own request** (EXPLAINER §19, 9.1, plan D7): the
+  person in the conversation used to approve their own write. Now the
+  asker confirms only a declared action pinned to their own rows (or a
+  builder's test write in a preview); everything else waits for an
+  approver. A decision names the hash of what it was shown. The exact
+  input is kept sealed under the KEK, never re-asked of the model, and
+  wiped once the request ends.
+- **A tamper-evident, complete audit log** (EXPLAINER §17, 7b.7). Entries
+  form a hash chain, sealed each minute by the worker; the owner's
+  **Check integrity** finds an edited, deleted or inserted entry and shows
+  the newest hash to keep elsewhere. Sign-ins (and failed ones), sign-outs
+  and the remaining unrecorded changes are now recorded, and a test fails
+  when a new route records nothing. A new **Audit log** page for admins,
+  with filters, and a CSV export for the owner. For API clients:
+  `GET /orgs/{org}/audit-log` takes `action` (a prefix), `actor`,
+  `target`, `since` and `until`, and entries carry `actor_label`, `ip`
+  and `seq`; `GET .../audit-log.csv` and `.../audit-log/integrity` are
+  the owner's. Migration `c7b7a2b3c4d5` adds the chain columns and lets
+  the trigger allow the one-time seal.
+- **Password reset, change and confirmed addresses** (EXPLAINER §17,
+  7b.6). One-time links, stored hashed, with the token after `#` so it
+  reaches no log; a reset form that doesn't reveal who has an account; a
+  reset or change ends every session, older access tokens included, and
+  emails a notice. Access tokens carry their issue time to the microsecond
+  (`iat_us`), so one issued in the same second as a reset ends with it.
+  `python -m scripts.reset_link` makes a link on the
+  server when email can't. New settings: `PASSWORD_RESET_TTL_MINUTES`,
+  `VERIFY_EMAIL_TTL_HOURS`.
+- **Members can be removed** (EXPLAINER §17, 7b.4). Deactivating someone
+  ends their access and signs them out everywhere, hands their assistants
+  to someone who stays, closes their pending approvals and withdraws the
+  invites they sent; reactivating brings back the person only. An
+  organisation always keeps an owner who can sign in. Invites can be
+  listed and withdrawn, one is open per address, and an invite stops
+  working when its sender is demoted or removed. Signing up with an
+  invite joins that organisation only. Assistants can have co-editors
+  (`/assistants/{id}/editors`). New setting: `INVITE_TTL_DAYS`.
+- **Nobody approves their own assistant** (EXPLAINER §17, 7b.3).
+  Whoever submitted a version or built the assistant can't approve it
+  while another active admin or the owner could (`cannot_approve_own`);
+  the owner, with nobody else to ask, approves their own with a required
+  note, recorded as self-approved. Tool-call approvals stay with the
+  person in the conversation until Phase 9, but each decision now records
+  who asked, who decided, their role and whether it was the same person.
+- **Conversations are private** (EXPLAINER §17, 7b.2). Each person lists
+  and reads only their own. Admins and the owner can open anyone's by
+  giving a reason (the `X-Read-Reason` header; the web app asks for it),
+  and each read is recorded in the audit log before anything is returned.
+  Other people's titles are left out of lists and Usage, and a rename no
+  longer stores titles in the audit log.
+- **An approved version is frozen.** Its knowledge, database connections,
+  MCP servers and tools are recorded when it is submitted. Chat keeps
+  answering from the approved copy of a reindexed document; a connection,
+  server or tool changed after approval is left out of the live version's
+  answers until a new version is approved; approving or rolling back
+  refuses while anything has drifted; a source the live version answers
+  from can't be deleted. Each run records what it answered with
+  (EXPLAINER §17, 7b.1).
 - Uploaded knowledge files can no longer run as part of the app. The server
   decides each file's type from its contents and refuses anything outside
   PDF, Word, HTML, Markdown and plain text; citation links serve text

@@ -5,15 +5,20 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from app.models.conversation import ConversationStatus, MessageRole, RunStatus
+from app.models.conversation import ConversationMode, ConversationStatus, MessageRole, RunStatus
 from app.schemas.common import ApiModel, ORMModel
+from app.schemas.feedback import FeedbackOut
 
 
 class ConversationCreate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     external_user_ref: str | None = Field(default=None, max_length=200)
+    #: `preview` is the Studio's test chat, for the assistant's builders and
+    #: admins: it runs the draft, or `version` (Phase 7b.1).
+    mode: ConversationMode = ConversationMode.live
+    version: int | None = Field(default=None, ge=1)
 
 
 class ConversationRename(BaseModel):
@@ -21,13 +26,25 @@ class ConversationRename(BaseModel):
 
 
 class MessageIn(BaseModel):
-    text: str = Field(min_length=1, max_length=32_000)
+    text: str = Field(default="", max_length=32_000)
+    #: Screenshots uploaded into this conversation (Phase 9.6), sent with
+    #: the message. Each can be sent once.
+    attachment_ids: list[uuid.UUID] = Field(default_factory=list, max_length=4)
+
+    @model_validator(mode="after")
+    def _something_to_send(self) -> MessageIn:
+        # A screenshot alone is a message too ("this came up"); nothing at
+        # all is not.
+        if not self.text.strip() and not self.attachment_ids:
+            raise ValueError("Write a message or attach a screenshot")
+        return self
 
 
 class ConversationSummary(ORMModel):
     id: uuid.UUID
     assistant_id: uuid.UUID
     assistant_version_id: uuid.UUID | None
+    mode: ConversationMode = ConversationMode.live
     title: str
     external_user_ref: str | None = None
     #: Who started it: the only person who can reply in it or change it
@@ -41,6 +58,10 @@ class ConversationSummary(ORMModel):
     #: An answer is being written in it right now (QOS-01): it carries on
     #: whether or not anyone is watching, and can be watched again.
     running: bool = False
+    #: Someone else's, listed for an admin (Phase 7b.2): its title is the
+    #: start of its first message, so it is left out until they open it,
+    #: which is recorded with their reason.
+    title_hidden: bool = False
 
 
 class TurnState(ApiModel):
@@ -169,6 +190,10 @@ class ConversationDetail(ConversationSummary):
     messages_next_cursor: str | None = None
     #: The turn running now, to attach to; null when none is.
     turn_id: str | None = None
+    #: Phase 8.8: the starter's thumbs on each answer, by message id, and
+    #: whether they said it solved it.
+    feedback: dict[str, FeedbackOut] = Field(default_factory=dict)
+    solved: bool | None = None
 
 
 __all__ = [

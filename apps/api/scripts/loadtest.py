@@ -205,8 +205,13 @@ async def run(
     async def chatter(n: int) -> None:
         nonlocal remaining
         try:
+            # The builder's preview (Phase 7b.1): the assistant this script
+            # made has no approved version, so Chat would refuse it. A
+            # preview turn runs the same path, on the draft.
             made = await client.post(
-                f"{API}/assistants/{assistant_id}/conversations", json={}, headers=headers
+                f"{API}/assistants/{assistant_id}/conversations",
+                json={"mode": "preview"},
+                headers=headers,
             )
             made.raise_for_status()
         except httpx.HTTPError as exc:

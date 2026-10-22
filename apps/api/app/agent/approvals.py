@@ -2,8 +2,11 @@
 
 Deny-by-default (ADR 0003): anything not explicitly allowed is refused.
 Phase 1 shipped the classifier with the "wait for a human" half stubbed out;
-task 3.8 fills it in — a durable `approvals` row, an SSE `approval_required`
-event, a real wait, and a resolve endpoint.
+task 3.8 filled it in with a wait inside the turn. Phase 9.1 (plan D17)
+takes the wait out: a call that needs a person is **stored as a request**,
+with its exact input sealed, and the turn goes on and ends. The asker (for
+an action on their own rows) or an approver decides whenever they can, and
+the executor (`services/executor.py`) runs it once, afterwards.
 
 **Risk is derived by parsing, not by trusting the tool name.** `sql_query` is
 not inherently dangerous: `SELECT count(*)` and `DROP TABLE users` arrive
@@ -40,6 +43,12 @@ from app.security.redact import is_secret_key, strip_secrets
 log = get_logger(__name__)
 
 Risk = Literal["low", "medium", "high"]
+#: How a call is handled: `auto` runs, `deny` refuses, `require` stores a
+#: request for an approver, `confirm` one for the asker (a declared action
+#: on their own rows, Phase 9.1).
+Mode = Literal["auto", "require", "deny", "confirm"]
+#: Who decides a stored request.
+Tier = Literal["asker", "approver"]
 
 CanUseTool = Callable[
     [str, dict[str, Any], ToolPermissionContext],
@@ -68,6 +77,11 @@ _READ_ONLY_CAPS = {
 #: tool unusable.
 _OWN_NOTES = {_qual("memory")}
 
+#: Getting a person for the person asking (Phase 9.5, `caps_handoff`): it
+#: tells one contact inside the organisation where to look. Asking someone
+#: first would defeat it: the person wants help now.
+_OWN_REQUESTS = {_qual("hand_off")}
+
 #: SDK built-ins that take no action of their own.
 _NO_ACTION_BUILTINS = {
     "WebSearch",
@@ -82,8 +96,21 @@ _NO_ACTION_BUILTINS = {
 _BODY_PREVIEW = 2_000
 
 
+@dataclass(frozen=True)
+class RequestOutcome:
+    """What became of a call that needs a person (Phase 9.1).
+
+    `queued`: stored as a request; `message` tells the model what happens
+    next. `refused`: it could not be stored (the parameters don't fit, the
+    connection can't write); `message` says why, so the model can fix it.
+    `unattended`: an eval, with nobody to ask."""
+
+    decision: Literal["queued", "refused", "unattended"]
+    message: str = ""
+
+
 class Requester(Protocol):
-    """async (tool_name, input, risk, rationale, *, tool_use_id) -> decision"""
+    """async (tool_name, input, risk, rationale, *, tier, tool_use_id) -> outcome"""
 
     def __call__(
         self,
@@ -92,13 +119,14 @@ class Requester(Protocol):
         risk: Risk,
         rationale: str,
         *,
+        tier: Tier,
         tool_use_id: str | None = None,
-    ) -> Awaitable[str]: ...
+    ) -> Awaitable[RequestOutcome]: ...
 
 
 @dataclass
 class ApprovalRequest:
-    """What the router needs from the turn to raise an approval. Supplied by
+    """What the router needs from the turn to store a request. Supplied by
     `chat.run_message`; absent on paths with no conversation (a dry run), in
     which case anything needing a human is simply denied."""
 
@@ -108,12 +136,12 @@ class ApprovalRequest:
 
 
 def sanitize(tool_input: dict[str, Any]) -> dict[str, Any]:
-    """The input that will run, pinned at the moment a human is asked.
+    """The input that will run, pinned at the moment a person is asked.
 
-    The dict the SDK hands the permission callback is a live object. Handing
-    back a deep copy taken *before* the wait guarantees the statement that
-    executes is the one the reviewer read, whatever touches the original in
-    between (plan §4.4 `updated_input=sanitize(input)`)."""
+    The dict the SDK hands the permission callback is a live object. A deep
+    copy taken at once is what gets sealed (Phase 9.1), so the statement
+    that executes is the one the person read, whatever touches the original
+    afterwards (plan §4.4 `updated_input=sanitize(input)`)."""
     return copy.deepcopy(tool_input)
 
 
@@ -196,7 +224,7 @@ def mcp_mode(policy: ApprovalPolicy, ref: McpServerRef, tool: str) -> ApprovalMo
     return ref.tool_approvals.get(tool) or ref.approval or policy.mcp_default
 
 
-def classify(
+def classify(  # noqa: PLR0911 - one return per kind of tool
     tool_name: str,
     tool_input: dict[str, Any],
     policy: ApprovalPolicy,
@@ -204,9 +232,19 @@ def classify(
     http: HttpRequestTool | None = None,
     read_only_mcp: frozenset[str] = frozenset(),
     mcp_modes: dict[str, ApprovalMode] | None = None,
-) -> tuple[ApprovalMode, Risk]:
-    if tool_name in _READ_ONLY_CAPS | _NO_ACTION_BUILTINS | _OWN_NOTES:
+    action_tiers: dict[str, str] | None = None,
+) -> tuple[Mode, Risk]:
+    if tool_name in _READ_ONLY_CAPS | _NO_ACTION_BUILTINS | _OWN_NOTES | _OWN_REQUESTS:
         return "auto", "low"
+
+    tier = (action_tiers or {}).get(tool_name)
+    if tier is not None:
+        # A declared action (Phase 9.1): its tier was approved with the
+        # version, and `confirm` only exists for statements pinned to the
+        # asker's own rows (checked when the config was saved).
+        return {"read": ("auto", "low"), "confirm": ("confirm", "medium")}.get(
+            tier, ("require", "high")
+        )  # type: ignore[return-value]
 
     if tool_name == _qual("http_request"):
         # GET and HEAD read. Anything else changes something on another
@@ -386,12 +424,13 @@ def build_can_use_tool(
     read_only_mcp: frozenset[str] = frozenset(),
     mcp_modes: dict[str, ApprovalMode] | None = None,
     permissions: dict[str, str] | None = None,
+    action_tiers: dict[str, str] | None = None,
 ) -> CanUseTool:
-    async def decide(
+    async def decide(  # noqa: PLR0911 - one return per outcome
         tool_name: str, tool_input: dict[str, Any], ctx: ToolPermissionContext
     ) -> tuple[PermissionResultAllow | PermissionResultDeny, str]:
         mode, risk = classify(
-            tool_name, tool_input, policy, databases, http, read_only_mcp, mcp_modes
+            tool_name, tool_input, policy, databases, http, read_only_mcp, mcp_modes, action_tiers
         )
 
         # `auto` skips the human for low-risk calls only (plan §4.4). A
@@ -424,31 +463,32 @@ def build_can_use_tool(
 
         pinned = sanitize(tool_input)
         rationale = describe(tool_name, pinned)
-        decision = await approvals.request(
+        outcome = await approvals.request(
             tool_name,
             pinned,
             risk,
             rationale,
-            # Links the approval row to the exact tool call in the trace.
+            tier="asker" if mode == "confirm" else "approver",
+            # Links the request to the exact tool call in the trace.
             tool_use_id=getattr(ctx, "tool_use_id", None),
         )
-        if decision == "approved":
-            log.info("tool_approved", tool=tool_name, risk=risk)
-            return PermissionResultAllow(updated_input=pinned), "approved"
-
-        log.info("tool_not_approved", tool=tool_name, risk=risk, decision=decision)
-        reason = {
-            "denied": "A human reviewer declined this action.",
-            "expired": "Nobody responded to the approval request in time, so it was declined.",
-            "interrupted": "The user stopped the turn before this was approved.",
-            # An eval run (task 6.1): there is nobody to ask.
-            "unattended": "This is an automated test run, so actions that need a "
-            "person's approval are declined.",
-        }.get(decision, "This action was not approved.")
-        # `interrupt` on a high-risk denial stops the agent rather than letting
-        # it wander toward a different way of doing the same thing.
-        label = {"denied": "declined"}.get(decision, decision)
-        return PermissionResultDeny(message=reason, interrupt=(risk == "high")), label
+        if outcome.decision == "queued":
+            # Not run now, and not refused either: the model is told it is
+            # waiting, says so, and the turn ends (no wait inside a turn).
+            log.info("tool_queued", tool=tool_name, risk=risk)
+            return PermissionResultDeny(message=outcome.message, interrupt=False), "queued"
+        if outcome.decision == "refused":
+            log.info("tool_request_refused", tool=tool_name)
+            return PermissionResultDeny(message=outcome.message), "refused"
+        # An eval run (task 6.1): there is nobody to ask. `interrupt` on a
+        # high-risk one stops the agent rather than letting it wander toward
+        # another way of doing the same thing.
+        return PermissionResultDeny(
+            message=outcome.message
+            or "This is an automated test run, so actions that need a person's approval "
+            "are declined.",
+            interrupt=(risk == "high"),
+        ), "unattended"
 
     async def can_use_tool(
         tool_name: str, tool_input: dict[str, Any], ctx: ToolPermissionContext
@@ -469,8 +509,11 @@ __all__ = [
     "ApprovalRequest",
     "CanUseTool",
     "CredentialCheck",
+    "Mode",
+    "RequestOutcome",
     "Requester",
     "Risk",
+    "Tier",
     "build_can_use_tool",
     "classify",
     "describe",

@@ -143,7 +143,9 @@ async def _conversation(
     cfg["guardrails"] = {**cfg["guardrails"], **guardrails}
     r = await client.put(f"/api/v1/assistants/{a['id']}/draft-config", json=cfg, headers=headers)
     assert r.status_code == 200, r.text
-    r = await client.post(f"/api/v1/assistants/{a['id']}/conversations", json={}, headers=headers)
+    r = await client.post(
+        f"/api/v1/assistants/{a['id']}/conversations", json={"mode": "preview"}, headers=headers
+    )
     return str(r.json()["id"])
 
 

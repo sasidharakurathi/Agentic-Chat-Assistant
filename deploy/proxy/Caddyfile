@@ -1,16 +1,60 @@
 # The one way in (task 6.6): TLS, then routing by path. Started by
 # docker-compose.prod.yml; see docs/EXPLAINER.md §12.6.
 #
-# SITE_ADDRESS is the host name people open. For a real domain whose DNS
-# points here, Caddy gets and renews a certificate by itself (ports 80 and
-# 443 must be reachable from the internet). For `localhost` it signs one
-# with its own local CA, which a browser will warn about until that CA is
-# trusted: fine for trying the stack, not for users.
+# SITE_ADDRESS is the host name people open. How Caddy gets its certificate
+# is TLS_MODE (Phase 8.2, docs/OPERATIONS.md §2):
+#
+#   acmedns, cloudflare  the internal install (plan D15): Caddy proves it
+#                        owns the name through DNS, so the server needs no
+#                        port open to the internet. Needs the proxy image
+#                        with the DNS plugins (deploy/proxy/caddy.Dockerfile).
+#   public               the name's public DNS points here and ports 80 and
+#                        443 are reachable from the internet.
+#   local                Caddy's own CA, for `localhost`: a browser warns
+#                        until that CA is trusted. Trying the stack only.
 #
 # A sample: Traefik, nginx or a cloud load balancer can do the same job.
 # What any of them must do is in the comments below.
 
+{
+	# The adapted config is not written to disk: with a DNS mode it holds
+	# the DNS credentials, which then live only in this container's
+	# environment.
+	persist_config off
+}
+
+(tls_public) {
+	# Caddy's default: the HTTP and TLS-ALPN challenges, on ports 80 and 443.
+}
+
+(tls_local) {
+	tls internal
+}
+
+(tls_cloudflare) {
+	# A token that may edit DNS records of this one zone, nothing else.
+	tls {
+		dns cloudflare {$CLOUDFLARE_API_TOKEN}
+		resolvers 1.1.1.1
+	}
+}
+
+(tls_acmedns) {
+	# _acme-challenge.<host> is a CNAME to the acme-dns account below: these
+	# credentials can change that one TXT record and nothing in the zone.
+	tls {
+		dns acmedns {
+			username {$ACMEDNS_USERNAME}
+			password {$ACMEDNS_PASSWORD}
+			subdomain {$ACMEDNS_SUBDOMAIN}
+			server_url {$ACMEDNS_SERVER_URL}
+		}
+	}
+}
+
 {$SITE_ADDRESS} {
+	import tls_{$TLS_MODE:public}
+
 	# Browsers must come back over HTTPS for a year. (Caddy already redirects
 	# http:// to https://.)
 	header {

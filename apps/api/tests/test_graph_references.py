@@ -19,7 +19,7 @@ import uuid
 from typing import Any
 
 import pytest
-from app.agent.approvals import ApprovalRequest, build_can_use_tool
+from app.agent.approvals import ApprovalRequest, RequestOutcome, build_can_use_tool
 from app.schemas.assistant_config import ApprovalPolicy, DatabaseRef
 from claude_agent_sdk import PermissionResultDeny
 from httpx import AsyncClient
@@ -162,9 +162,9 @@ async def test_a_write_the_credential_cannot_make_is_denied_without_asking() -> 
     is certain to refuse."""
     asked: list[str] = []
 
-    async def request(_t: str, _i: dict, _r: str, why: str, **_k: object) -> str:
+    async def request(_t: str, _i: dict, _r: str, why: str, **_k: object) -> RequestOutcome:
         asked.append(why)
-        return "approved"
+        return RequestOutcome("queued")
 
     async def credential_allows(_connection_id: str, kind: str) -> bool:
         return kind == "read"
@@ -186,9 +186,9 @@ async def test_a_write_the_credential_cannot_make_is_denied_without_asking() -> 
 async def test_a_write_the_credential_can_make_still_asks() -> None:
     asked: list[str] = []
 
-    async def request(_t: str, _i: dict, _r: str, why: str, **_k: object) -> str:
+    async def request(_t: str, _i: dict, _r: str, why: str, **_k: object) -> RequestOutcome:
         asked.append(why)
-        return "denied"
+        return RequestOutcome("refused", "declined")
 
     async def credential_allows(_connection_id: str, _kind: str) -> bool:
         return True

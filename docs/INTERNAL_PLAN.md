@@ -193,6 +193,12 @@ Blocking issues in today's product. Nothing new for employees yet.
   versions are frozen; conversations stay on their version; pause and
   roll back; no way around it through other routes; the builder's draft
   preview is isolated.
+  Decided 2026-10-08: when an approved assistant's documents change, Chat
+  keeps answering from the copy approved (old and new kept side by side);
+  the new copy is visible in the builder's preview and goes live with the
+  next approved version. Builders get a draft preview, visible only to
+  them and admins; the reviewing admin can chat with the submitted
+  version before approving.
 - 7b.2 Private conversations (D5): each person sees their own; admins read
   any, with a reason, audited before the content is returned.
 - 7b.3 Separation of duties: nobody approves their own write or their own
@@ -252,7 +258,9 @@ Ends with the **full pilot**.
   through an allowlist.
 - 9.4 Knowledge groups with revocation rules (D6), the shared knowledge
   library decision, a secret and Indian-ID scan at ingest; share links
-  only now that knowledge is filtered.
+  only now that knowledge is filtered. Library decided 2026-10-13: sources stay per
+  assistant for the pilot, with groups on each; the org library later
+  (EXPLAINER §19, 9.4).
 - 9.5 Hand-off that creates a ticket in the chosen system (or an email to
   the IT owner), with a summary.
 - 9.6 Screenshots in chat (the most common helpdesk input); secrets typed
@@ -262,6 +270,11 @@ Ends with the **full pilot**.
 - 9.8 The IT helpdesk sample, the demo helpdesk database, and evals that
   test what matters (personas, several turns, "approval requested and
   nothing written").
+- 9.9 A second security pass, as task 6.3 did, before the full pilot: each
+  reviewer tries one new wall (the Employee role and audiences, knowledge
+  groups in retrieval and citations, identity given to tools, the
+  action-approval queue, Google sign-in, shared links), and the findings
+  go in the threat model (gap review, `threat-model-refresh`).
 
 ### Phase 10: Insight and the signature loop (about 3 weeks)
 

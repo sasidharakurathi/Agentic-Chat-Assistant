@@ -168,7 +168,7 @@ async def test_a_suite_has_a_size_limit(
     assert ok.status_code == 200 and len(ok.json()["cases"]) == 2
 
 
-async def test_members_read_evals_but_only_editors_change_or_run_them(
+async def test_only_editors_open_change_or_run_evals(
     client: AsyncClient, queued: list[uuid.UUID]
 ) -> None:
     owner = await _register(client, "eval-owner@example.com")
@@ -189,13 +189,14 @@ async def test_members_read_evals_but_only_editors_change_or_run_them(
     sid = await _suite(client, o, aid, [{"input": "hello"}])
     rid = await _start(client, o, sid)
 
-    # A member of the org sees everything and changes nothing.
+    # A member of the org sees the list, and nothing inside (Phase 9.9: a
+    # suite holds people's questions and answers from restricted knowledge).
     assert (await client.get(f"{API}/assistants/{aid}/eval-suites", headers=m)).json()[
         "can_edit"
     ] is False
-    assert (await client.get(f"{API}/eval-suites/{sid}", headers=m)).status_code == 200
-    assert (await client.get(f"{API}/eval-suites/{sid}/runs", headers=m)).status_code == 200
-    assert (await client.get(f"{API}/eval-runs/{rid}", headers=m)).status_code == 200
+    assert (await client.get(f"{API}/eval-suites/{sid}", headers=m)).status_code == 403
+    assert (await client.get(f"{API}/eval-suites/{sid}/runs", headers=m)).status_code == 403
+    assert (await client.get(f"{API}/eval-runs/{rid}", headers=m)).status_code == 403
     denied = [
         await client.post(f"{API}/assistants/{aid}/eval-suites", json={"name": "Mine"}, headers=m),
         await client.patch(f"{API}/eval-suites/{sid}", json={"name": "x"}, headers=m),
@@ -381,7 +382,9 @@ def fake_sql(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
         ran.append(args.get("sql"))
         return {"content": [{"type": "text", "text": "1 row(s) affected"}]}
 
-    def build(_assistant_id: uuid.UUID, _databases: list[Any]) -> list[CapabilityTool]:
+    def build(
+        _assistant_id: uuid.UUID, _databases: list[Any], _asker: Any = None
+    ) -> list[CapabilityTool]:
         return [
             CapabilityTool(
                 name="sql_query",
@@ -489,16 +492,31 @@ async def test_a_spent_budget_stops_the_run_and_says_why(
     aid = await _assistant(client, org_headers)
     sid = await _suite(client, org_headers, aid, [{"input": "one"}, {"input": "two"}])
     org = org_headers["X-Org-Id"]
-    r = await client.put(f"{API}/orgs/{org}/budgets", json={"daily_usd": 1}, headers=org_headers)
+    # Evals spend from the builder budget (Phase 9.7), so that is the one
+    # used up here: by an earlier preview.
+    r = await client.patch(
+        f"{API}/orgs/{org}/settings", json={"builder_monthly_usd": 1}, headers=org_headers
+    )
     assert r.status_code == 200, r.text
+    preview = await client.post(
+        f"{API}/assistants/{aid}/conversations", json={"mode": "preview"}, headers=org_headers
+    )
     async with get_sessionmaker()() as s:
-        s.add(UsageEvent(org_id=uuid.UUID(org), kind=UsageKind.llm, model="m", cost_usd=2))
+        s.add(
+            UsageEvent(
+                org_id=uuid.UUID(org),
+                conversation_id=uuid.UUID(preview.json()["id"]),
+                kind=UsageKind.llm,
+                model="m",
+                cost_usd=2,
+            )
+        )
         await s.commit()
 
     run = await _finished(client, org_headers, await _start(client, org_headers, sid))
 
     assert run["status"] == "failed"
-    assert "budget" in run["error"].lower()
+    assert "builder testing" in run["error"].lower()
     assert len(run["results"]) == 1, "no point asking the second question"
     assert run["results"][0]["passed"] is False and run["results"][0]["error"] == run["error"]
     assert run["metrics"]["errors"] == 1

@@ -7,7 +7,7 @@ import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Lamp } from "@/components/ui/lamp";
 import { SectionHeading } from "@/components/ui/section-heading";
-import type { EvalCaseResult, EvalRunDetail } from "@/lib/api";
+import type { EvalCaseResult, EvalRunDetail, EvalTurn } from "@/lib/api";
 import {
   JUDGE_DIMENSIONS,
   checkText,
@@ -91,6 +91,8 @@ function ResultRow({ result: r }: { result: EvalCaseResult }) {
   const s = r.scores as Scores;
   const why = r.passed ? null : reason(r, s);
   const panel = `eval-result-${r.id}`;
+  // A case with follow-ups (Phase 9.8): every turn, in order.
+  const turns = r.turns ?? [];
   return (
     <li className="border-border border-b">
       <button
@@ -112,6 +114,11 @@ function ResultRow({ result: r }: { result: EvalCaseResult }) {
         </Badge>
         <span className="min-w-0 flex-1">
           <span className="block text-sm font-medium break-words">{r.input}</span>
+          {turns.length > 1 && (
+            <span className="text-small text-muted-foreground block">
+              {turns.length} turns in one conversation
+            </span>
+          )}
           {why && <span className="text-small text-muted-foreground block">{why}</span>}
         </span>
         <span className="num text-small text-muted-foreground shrink-0">
@@ -120,15 +127,19 @@ function ResultRow({ result: r }: { result: EvalCaseResult }) {
       </button>
       {open && (
         <div id={panel} className="flex flex-col gap-4 pb-4 pl-7">
-          <Block title="Answer">
-            {r.output ? (
-              <p className="text-reading max-w-[68ch] break-words whitespace-pre-wrap">
-                {r.output}
-              </p>
-            ) : (
-              <p className="text-muted-foreground text-sm">The assistant gave no answer.</p>
-            )}
-          </Block>
+          {turns.length > 0 ? (
+            <Conversation turns={turns} />
+          ) : (
+            <Block title="Answer">
+              {r.output ? (
+                <p className="text-reading max-w-[68ch] break-words whitespace-pre-wrap">
+                  {r.output}
+                </p>
+              ) : (
+                <p className="text-muted-foreground text-sm">The assistant gave no answer.</p>
+              )}
+            </Block>
+          )}
           {(s.checks?.length ?? 0) > 0 && (
             <Block title="Checks">
               <ul className="flex flex-col gap-1 text-sm">
@@ -156,6 +167,39 @@ function ResultRow({ result: r }: { result: EvalCaseResult }) {
         </div>
       )}
     </li>
+  );
+}
+
+/** Each turn of a multi-turn case (Phase 9.8): what was asked, what came
+ *  back. The checks above the fold graded the last answer. */
+function Conversation({ turns }: { turns: EvalTurn[] }) {
+  return (
+    <Block title="Conversation">
+      <ol className="flex flex-col gap-3">
+        {turns.map((t, i) => (
+          <li key={i} className="flex flex-col gap-1">
+            <p className="text-small text-muted-foreground">
+              Turn {i + 1}
+              {i === turns.length - 1 ? ", graded" : ""}
+            </p>
+            <p className="text-sm font-medium break-words">{t.input}</p>
+            {t.output ? (
+              <p className="text-reading max-w-[68ch] break-words whitespace-pre-wrap">
+                {t.output}
+              </p>
+            ) : (
+              <p className="text-muted-foreground text-sm">The assistant gave no answer.</p>
+            )}
+            {t.error && <p className="text-destructive text-sm">{t.error}</p>}
+            {t.tools.length > 0 && (
+              <p className="num text-small text-muted-foreground">
+                Tools used: {t.tools.join(", ")}
+              </p>
+            )}
+          </li>
+        ))}
+      </ol>
+    </Block>
   );
 }
 

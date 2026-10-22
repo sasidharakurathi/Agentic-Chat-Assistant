@@ -403,6 +403,8 @@ function ConnectionRow({
   const [open, setOpen] = useState(false);
   const [testing, setTesting] = useState(false);
   const [schema, setSchema] = useState<DbSchema | null>(null);
+  // What the last test found that doesn't stop it working (Phase 9.3).
+  const [warnings, setWarnings] = useState<string[]>([]);
   const confirm = useConfirm();
   const perms = row.permissions;
   const panelId = `perms-${row.id}`;
@@ -446,9 +448,20 @@ function ConnectionRow({
           <p className="text-small text-muted-foreground break-words">{describeConnection(row)}</p>
           {row.error && (
             <p className="text-small text-destructive break-words">
-              The last test failed: {row.error.trim().replace(/[.!?]+$/, "")}. Check the host,
-              credentials and network, then test again.
+              The last test failed: {row.error.trim().replace(/[.!?]+$/, "")}.{" "}
+              {/row-level security/i.test(row.error)
+                ? "Change the role, then test again."
+                : "Check the host, credentials and network, then test again."}
             </p>
+          )}
+          {!row.error && warnings.length > 0 && (
+            <Alert tone="warning">
+              <ul className="list-disc pl-5">
+                {warnings.map((w) => (
+                  <li key={w}>{w}</li>
+                ))}
+              </ul>
+            </Alert>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-1">
@@ -469,10 +482,14 @@ function ConnectionRow({
               void (async () => {
                 setTesting(true);
                 try {
-                  await run(() => dbConnections.test(assistantId, row.id), {
-                    what: `Couldn't test ${row.name}.`,
-                    todo: "Check the connection details, then test again.",
-                  });
+                  await run(
+                    async () =>
+                      setWarnings((await dbConnections.test(assistantId, row.id)).warnings ?? []),
+                    {
+                      what: `Couldn't test ${row.name}.`,
+                      todo: "Check the connection details, then test again.",
+                    },
+                  );
                 } finally {
                   setTesting(false);
                 }
@@ -552,6 +569,16 @@ function ConnectionRow({
                 onChange={(v) => setPerm({ ddl: v })}
               />
             </div>
+            {row.engine === "postgres" && (
+              <div className="py-2">
+                <Toggle
+                  label="Answer only for the person asking"
+                  checked={perms.scope_to_asker === true}
+                  hint="Each statement runs with app.asker_email set to the signed-in person's email, for your row-level security policies to read with current_setting('app.asker_email', true). With nobody signed in, it refuses. Test the connection to check the policies hold."
+                  onChange={(v) => setPerm({ scope_to_asker: v })}
+                />
+              </div>
+            )}
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="flex flex-col gap-1.5">

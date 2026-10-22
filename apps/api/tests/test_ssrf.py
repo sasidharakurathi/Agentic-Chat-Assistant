@@ -315,7 +315,14 @@ async def test_missing_and_internal_names_get_the_same_answer() -> None:
         with pytest.raises(SsrfBlocked) as blocked:
             await resolve_public(host, 443, resolve)
         messages.append(str(blocked.value).replace(host, "HOST"))
-    assert messages[0] == messages[1] == "HOST can't be reached: it has no public address"
+    assert (
+        messages[0]
+        == messages[1]
+        == (
+            "HOST can't be reached: it has no public address, and it isn't one of this "
+            "organisation's internal destinations"
+        )
+    )
 
 
 async def test_a_compressed_body_is_never_inflated() -> None:

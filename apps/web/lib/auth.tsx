@@ -19,6 +19,8 @@ import {
   tokenStore,
   type Me,
   type Org,
+  type LoginOut,
+  type TokenPair,
 } from "@/lib/api";
 import { inviteTokenFrom, safeNext } from "@/lib/safe-next";
 import { endsSession, retryDelayMs } from "@/lib/session";
@@ -37,8 +39,15 @@ type AuthState = {
   activeRole: string | null;
   setActiveOrg: (id: string) => void;
   /** `next`: where to land afterwards (e.g. back on an invite link). */
-  login: (email: string, password: string, next?: string | null) => Promise<void>;
+  /** Resolves with a challenge when the account has two-step sign-in
+   *  (Phase 8.4): finish it with `finishTwoFactor`. */
+  login: (email: string, password: string, next?: string | null) => Promise<string | null>;
+  finishTwoFactor: (challenge: string, code: string, next?: string | null) => Promise<void>;
+  /** The signed-in person's two-step sign-in, from /auth/me. */
+  twoFactor: Me["two_factor"] | null;
   register: (email: string, password: string, name: string, next?: string | null) => Promise<void>;
+  /** Signed in another way (Google, Phase 8.3): keep the pair, then on. */
+  adopt: (pair: LoginOut | TokenPair, next?: string | null) => Promise<string | null>;
   /** Sign out, then land on the login page, which returns to `next` after. */
   logout: (next?: string) => void;
   refresh: () => Promise<void>;
@@ -53,6 +62,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [activeOrgId, setActiveOrgId] = useState<string | null>(null);
   const [memberships, setMemberships] = useState<Me["memberships"]>([]);
+  const [twoFactor, setTwoFactor] = useState<Me["two_factor"] | null>(null);
   const [offline, setOffline] = useState(false);
   /** Tries since the server was last reached, for the backoff. */
   const attempts = useRef(0);
@@ -69,9 +79,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const [me, orgList] = await Promise.all([authApi.me(), orgsApi.list()]);
       setUser(me.user);
       setMemberships(me.memberships);
+      setTwoFactor(me.two_factor ?? null);
       setOrgs(orgList);
       const stored = orgStore.get();
-      const valid = orgList.find((o) => o.id === stored)?.id ?? orgList[0]?.id ?? null;
+      // The team's organisation before anyone's personal one (Phase 7b.8).
+      const first = orgList.find((o) => !o.is_personal) ?? orgList[0];
+      const valid = orgList.find((o) => o.id === stored)?.id ?? first?.id ?? null;
       if (valid) orgStore.set(valid);
       setActiveOrgId(valid);
       attempts.current = 0;
@@ -110,6 +123,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [offline, load]);
 
+  // A role changed while the app was open (Phase 8.1): seen the next time
+  // the page comes back into view, at most once a minute. The server still
+  // decides every request; this only keeps the page in step with it.
+  const lastSeen = useRef(0);
+  useEffect(() => {
+    const visible = () => {
+      if (document.visibilityState !== "visible" || !tokenStore.access) return;
+      const now = Date.now();
+      if (now - lastSeen.current < 60_000) return;
+      lastSeen.current = now;
+      void load();
+    };
+    document.addEventListener("visibilitychange", visible);
+    return () => document.removeEventListener("visibilitychange", visible);
+  }, [load]);
+
   useEffect(
     () => () => {
       if (retryTimer.current) clearTimeout(retryTimer.current);
@@ -130,9 +159,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [load, router],
   );
 
+  const adopt = useCallback(
+    async (pair: LoginOut | TokenPair, next?: string | null) => {
+      if ("two_factor_challenge" in pair && pair.two_factor_challenge) {
+        return pair.two_factor_challenge;
+      }
+      if (!pair.access_token || !pair.refresh_token) throw new Error("no tokens");
+      tokenStore.set({
+        access_token: pair.access_token,
+        refresh_token: pair.refresh_token,
+        token_type: pair.token_type ?? "bearer",
+        expires_in: pair.expires_in ?? 900,
+      });
+      await afterAuth(next);
+      return null;
+    },
+    [afterAuth],
+  );
+
   const login = useCallback(
-    async (email: string, password: string, next?: string | null) => {
-      tokenStore.set(await authApi.login(email, password));
+    async (email: string, password: string, next?: string | null) =>
+      adopt(await authApi.login(email, password), next),
+    [adopt],
+  );
+
+  const finishTwoFactor = useCallback(
+    async (challenge: string, code: string, next?: string | null) => {
+      tokenStore.set(await authApi.loginTwoFactor(challenge, code));
       await afterAuth(next);
     },
     [afterAuth],
@@ -172,7 +225,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       activeRole: memberships.find((m) => m.org_id === activeOrgId)?.role ?? null,
       setActiveOrg,
       login,
+      finishTwoFactor,
+      twoFactor,
       register,
+      adopt,
       logout,
       refresh: load,
     }),
@@ -185,7 +241,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       memberships,
       setActiveOrg,
       login,
+      finishTwoFactor,
+      twoFactor,
       register,
+      adopt,
       logout,
       load,
     ],

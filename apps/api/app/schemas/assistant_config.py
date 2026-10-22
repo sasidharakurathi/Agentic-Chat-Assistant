@@ -140,10 +140,104 @@ class RagConfig(Scoped):
 # ── Databases / tools / MCP ──────────────────────────────────
 
 
+#: How a declared action runs (Phase 9.1, plan D7): `read` at once; `confirm`
+#: once the person asking confirms (only for a statement pinned to their own
+#: rows); `approver` once one of the assistant's approvers decides.
+ActionTier = Literal["read", "confirm", "approver"]
+ActionParamType = Literal["string", "integer", "number", "boolean", "date"]
+
+_ACTION_NAME_RE = r"^[a-z][a-z0-9_]{0,39}$"
+
+
+class ActionParam(_Strict):
+    """One value the model fills in. The platform's own values (who is
+    asking) are never parameters: they are the `:asker_*` slots."""
+
+    name: Annotated[str, Field(pattern=_ACTION_NAME_RE)]
+    type: ActionParamType = "string"
+    description: str = Field(default="", max_length=300)
+    required: bool = True
+    #: The longest text accepted (strings only).
+    max_length: int = Field(default=500, ge=1, le=4000)
+    #: When set, the only values accepted.
+    choices: list[Annotated[str, Field(max_length=100)]] = Field(
+        default_factory=list, max_length=50
+    )
+
+    @field_validator("name")
+    @classmethod
+    def _not_a_slot(cls, v: str) -> str:
+        if v.startswith("asker_"):
+            raise ValueError(f"{v!r}: names starting with asker_ are filled by the platform")
+        return v
+
+
+class DeclaredAction(_Strict):
+    """A named SQL statement on a database (Phase 9.1, plan D8): the builder
+    writes it, an admin approves it with the version, and the model only
+    fills its parameters. Checked when saved (`agent.actions.check_template`)."""
+
+    name: Annotated[str, Field(pattern=_ACTION_NAME_RE)]
+    #: What people read on the request card: "Request access to an app".
+    title: str = Field(min_length=1, max_length=80)
+    #: What the model reads: when to use it.
+    description: str = Field(default="", max_length=1000)
+    sql: str = Field(min_length=1, max_length=10_000)
+    params: list[ActionParam] = Field(default_factory=list, max_length=20)
+    tier: ActionTier = "approver"
+
+    @model_validator(mode="after")
+    def _checked(self) -> DeclaredAction:
+        names = [p.name for p in self.params]
+        if len(names) != len(set(names)):
+            raise ValueError(f"action {self.name!r}: two parameters share a name")
+        from app.agent.actions import check_template
+
+        check_template(self)
+        return self
+
+
 class DatabaseRef(Scoped):
     connection_id: str
     nl2sql: bool = True
     expose_write: bool = False
+    #: Named statements on this database (Phase 9.1). A write here needs the
+    #: connection's own write permission, not `expose_write`, which is about
+    #: SQL the model writes itself.
+    actions: list[DeclaredAction] = Field(default_factory=list, max_length=30)
+
+
+HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
+
+
+class HttpAction(_Strict):
+    """A named call to a company system (Phase 9.3): one of the assistant's
+    HTTP connections, a method and a path with `{param}` slots. Like a SQL
+    action, the builder writes it, an admin approves it with the version,
+    and the model only fills its parameters. Checked when saved
+    (`agent.http_actions.check_http_action`)."""
+
+    name: Annotated[str, Field(pattern=_ACTION_NAME_RE)]
+    title: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=1000)
+    connection_id: Annotated[str, Field(pattern=r"^[0-9a-fA-F-]{8,64}$")]
+    method: HttpMethod = "POST"
+    path: str = Field(min_length=1, max_length=500)
+    params: list[ActionParam] = Field(default_factory=list, max_length=20)
+    tier: ActionTier = "approver"
+    #: The fields of a JSON answer the model reads (`id`, `data.status`);
+    #: none means all of it.
+    fields: list[Annotated[str, Field(max_length=100)]] = Field(default_factory=list, max_length=30)
+
+    @model_validator(mode="after")
+    def _checked(self) -> HttpAction:
+        names = [p.name for p in self.params]
+        if len(names) != len(set(names)):
+            raise ValueError(f"action {self.name!r}: two parameters share a name")
+        from app.agent.http_actions import check_http_action
+
+        check_http_action(self)
+        return self
 
 
 class WebSearchTool(Scoped):
@@ -156,6 +250,9 @@ class HttpRequestTool(Scoped):
     enabled: bool = False
     allowed_domains: list[str] = Field(default_factory=list)
     approval: ApprovalMode = "require"
+    #: Declared calls to the assistant's HTTP connections (Phase 9.3). With
+    #: no allowed sites, these are all the model can send.
+    actions: list[HttpAction] = Field(default_factory=list, max_length=30)
 
 
 class ToggleTool(Scoped):
@@ -233,6 +330,45 @@ class RouterConfig(_Strict):
     enabled: bool = False
 
 
+class HandoffConfig(_Strict):
+    """Getting a person (Phase 9.5): from the chat, or by the assistant when
+    it can't help. The hand-off emails `contact_email` a link to the
+    conversation in the app (never its content); with `action` set, it
+    opens a ticket instead through that declared HTTP action, sending the
+    conversation's `title` and `summary` (and the person's `note`) to the
+    parameters of those names it declares. A `confirm` action runs only from
+    the person's own click (their confirmation); the assistant's own
+    hand-off emails instead. An `approver` action can't be chosen
+    (`services.graph_refs`). Kept on the agent node."""
+
+    enabled: bool = False
+    #: Who is told, the IT owner say. Required once it is on.
+    contact_email: str = Field(default="", max_length=254)
+    #: The name of an HTTP action on the HTTP request tool (Phase 9.3) that
+    #: opens the ticket; empty for email only.
+    action: str = Field(default="", pattern=r"^([a-z][a-z0-9_]{0,39})?$")
+
+    @field_validator("contact_email")
+    @classmethod
+    def _an_address(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            return v
+        from pydantic import validate_email
+        from pydantic_core import PydanticCustomError
+
+        try:
+            return validate_email(v)[1]
+        except PydanticCustomError as exc:
+            raise ValueError(f"{v!r} isn't an email address") from exc
+
+    @model_validator(mode="after")
+    def _someone_to_tell(self) -> HandoffConfig:
+        if self.enabled and not self.contact_email:
+            raise ValueError("say who is told about a hand-off: an email address")
+        return self
+
+
 class ApprovalPolicy(_Strict):
     db_write: ApprovalMode = "require"
     db_ddl: ApprovalMode = "require"
@@ -260,6 +396,8 @@ class AssistantConfig(_Strict):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     approval_policy: ApprovalPolicy = Field(default_factory=ApprovalPolicy)
     router: RouterConfig = Field(default_factory=RouterConfig)
+    #: Getting a person (Phase 9.5).
+    handoff: HandoffConfig = Field(default_factory=HandoffConfig)
 
     @model_validator(mode="after")
     def _normalize_refs(self) -> AssistantConfig:
@@ -269,6 +407,12 @@ class AssistantConfig(_Strict):
         mcp_ids = [m.id for m in self.mcp_servers]
         if len(mcp_ids) != len(set(mcp_ids)):
             raise ValueError("duplicate id in mcp_servers[]")
+        # One tool per action, so a name is the assistant's, not the database's.
+        action_names = [a.name for d in self.databases for a in d.actions] + [
+            a.name for a in self.tools.http_request.actions
+        ]
+        if len(action_names) != len(set(action_names)):
+            raise ValueError("two actions share a name")
         # Order of these reference lists is not semantic — canonicalize it so two
         # configs authored in different orders compare equal (and round-trip).
         self.databases.sort(key=lambda d: d.connection_id)
@@ -331,13 +475,20 @@ def config_json_schema() -> dict:
 
 __all__ = [
     "SCHEMA_VERSION",
+    "ActionParam",
+    "ActionParamType",
+    "ActionTier",
     "ApprovalMode",
     "ApprovalPolicy",
     "AssistantConfig",
     "BuiltinToolKey",
     "DatabaseRef",
+    "DeclaredAction",
     "EffortLevel",
     "Guardrails",
+    "HandoffConfig",
+    "HttpAction",
+    "HttpMethod",
     "HttpRequestTool",
     "MemoryConfig",
     "ModelRoles",

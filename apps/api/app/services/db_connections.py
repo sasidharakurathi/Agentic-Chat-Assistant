@@ -192,6 +192,25 @@ async def connection_info(session: AsyncSession, conn: DbConnection) -> Connecti
 # ── CRUD ─────────────────────────────────────────────────────
 
 
+#: How many tables a warning names before "and N more".
+NAMED = 10
+
+
+def _some(names: list[str]) -> str:
+    more = len(names) - NAMED
+    return ", ".join(names[:NAMED]) + (f" and {more} more" if more > 0 else "")
+
+
+def _check_scope(engine: str, scoped: bool) -> None:
+    """Only Postgres can scope a statement to the asker (Phase 9.3)."""
+    if scoped and engine != "postgres":
+        raise BadRequest(
+            "Only a Postgres connection can be scoped to the person asking. For other "
+            "databases, reach per-person rows through read actions with :asker_email.",
+            code="scope_needs_postgres",
+        )
+
+
 async def create(
     session: AsyncSession,
     *,
@@ -202,6 +221,7 @@ async def create(
 ) -> DbConnection:
     if body.engine == "sqlite":
         check_sqlite_path(body.database)
+    _check_scope(body.engine, body.permissions.scope_to_asker)
     secret_ref = None
     if body.password:
         secret_ref = await _store_secret(
@@ -308,10 +328,24 @@ async def update(
 
     if conn.engine == DbEngine.sqlite and data.get("database"):
         check_sqlite_path(data["database"])
+    # Its stored password was for the old server (Phase 9.9): a co-editor
+    # could otherwise point it at their own and receive it.
+    moved = [
+        f
+        for f in ("host", "port", "database", "username")
+        if data.get(f) is not None and data[f] != getattr(conn, f)
+    ]
+    if moved and conn.engine != DbEngine.sqlite and conn.secret_ref is not None and not password:
+        raise BadRequest(
+            "Enter the password again for the new server or database: the stored one was "
+            "for the old one",
+            code="password_required",
+        )
     for field, value in data.items():
         if value is not None:
             setattr(conn, field, value)
     if permissions is not None:
+        _check_scope(conn.engine.value, bool(permissions.get("scope_to_asker")))
         conn.permissions = permissions
     if password:
         old, conn.secret_ref = (
@@ -399,11 +433,34 @@ async def test_connection(session: AsyncSession, conn: DbConnection) -> DbTestRe
         await session.commit()
         return DbTestResult(ok=False, error=conn.error)
 
+    elapsed = int((time.perf_counter() - started) * 1000)
+    warnings: list[str] = []
+    if conn.engine == DbEngine.postgres and Permissions.from_dict(conn.permissions).scope_to_asker:
+        # Scoped to the asker (Phase 9.3): a role that row-level security
+        # doesn't bind fails the check, and what it won't filter is said.
+        from app.datasources.postgres import rls_report
+
+        try:
+            problems, shared = await rls_report(info)
+        except DbError as exc:
+            problems, shared = [strip_secrets(str(exc))[:500]], []
+        if problems:
+            conn.status = DbConnectionStatus.error
+            conn.error = " ".join(problems)[:2000]
+            conn.last_checked_at = datetime.now(UTC)
+            await session.commit()
+            return DbTestResult(ok=False, error=conn.error, elapsed_ms=elapsed)
+        if shared:
+            names = _some(shared)
+            warnings.append(
+                f"Not filtered per person (no row-level security): {names}. Everyone who "
+                "asks sees all of their rows."
+            )
     conn.status = DbConnectionStatus.ok
     conn.error = None
     conn.last_checked_at = datetime.now(UTC)
     await session.commit()
-    return DbTestResult(ok=True, elapsed_ms=int((time.perf_counter() - started) * 1000))
+    return DbTestResult(ok=True, elapsed_ms=elapsed, warnings=warnings)
 
 
 def filter_schema(

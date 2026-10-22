@@ -36,10 +36,68 @@ class BudgetStatusOut(ApiModel):
     resets_at: datetime
 
 
+class BuilderSpendOut(ApiModel):
+    """Builder testing this month (Phase 9.7): previews and eval runs,
+    org-wide. Not part of the budgets above, which are the pilot's."""
+
+    spent_usd: float
+    #: `builder_monthly_usd`, set by the owner; null: no cap.
+    limit_usd: float | None = None
+    #: spent / limit, when there is a limit.
+    ratio: float | None = None
+    state: Literal["ok", "warning", "exceeded"] = "ok"
+    resets_at: datetime
+
+
 class BudgetsOut(ApiModel):
     budgets: list[BudgetStatusOut]
     #: Whether the caller may change these (admins and owners).
     can_edit: bool
+    #: The organisation's page only (Phase 9.7); null elsewhere.
+    builder: BuilderSpendOut | None = None
 
 
-__all__ = ["BudgetLimits", "BudgetStatusOut", "BudgetsOut"]
+class PersonDefaultIn(BudgetLimits):
+    """The cap each person in a role gets (Phase 8.9). `builder` covers
+    builders, admins and the owner."""
+
+    role: Literal["employee", "builder"]
+
+
+class PersonDefaultOut(ApiModel):
+    role: Literal["employee", "builder"]
+    daily_usd: float | None = None
+    monthly_usd: float | None = None
+
+
+class PersonBudgetOut(ApiModel):
+    """One member's spend and the caps that apply to them."""
+
+    user_id: uuid.UUID
+    name: str
+    email: str
+    role: str
+    spent_today_usd: float
+    spent_month_usd: float
+    daily_usd: float | None = None
+    monthly_usd: float | None = None
+    #: Their own override rather than their role's default.
+    own_daily: bool = False
+    own_monthly: bool = False
+
+
+class PeopleBudgetsOut(ApiModel):
+    defaults: list[PersonDefaultOut]
+    people: list[PersonBudgetOut]
+
+
+__all__ = [
+    "BudgetLimits",
+    "BudgetStatusOut",
+    "BudgetsOut",
+    "BuilderSpendOut",
+    "PeopleBudgetsOut",
+    "PersonBudgetOut",
+    "PersonDefaultIn",
+    "PersonDefaultOut",
+]

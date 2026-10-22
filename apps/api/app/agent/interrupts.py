@@ -1,8 +1,8 @@
 """Stopping a running turn from outside its request (task 1.6).
 
 A turn lives inside one SSE request on one worker, so "stop" has to reach
-*that* worker. Same shape as `approval_registry`, for the same reason: an
-in-process map of running turns, plus a Redis pub/sub fan-out so an
+*that* worker. An in-process map of running turns (approvals had the same
+shape until Phase 9.1 stopped turns waiting on them), plus a Redis pub/sub fan-out so an
 interrupt that lands on another worker is re-fired where the turn actually
 is. Redis is disposable here too — without it, interrupts still work for the
 single-worker case.

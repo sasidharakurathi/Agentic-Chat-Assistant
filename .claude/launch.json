@@ -14,6 +14,32 @@
       "port": 3000
     },
     {
+      "name": "api-8010",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": ["-NoProfile", "-Command", "$env:API_PORT='8010'; & ./scripts/dev-api.ps1"],
+      "port": 8010
+    },
+    {
+      "name": "web-api-8010",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "$env:NEXT_PUBLIC_API_URL='http://localhost:8010'; & ./scripts/dev-web.ps1"
+      ],
+      "port": 3000
+    },
+    {
+      "name": "api-real",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "$env:API_PORT='8010'; $env:AGENT_DRIVER='claude'; $env:RAG_OFFLINE='0'; $env:PYTHONPATH=\"$env:TEMP\\claude\\D--My-Projects-Agentic-Chat-Assistant\\64417053-f85e-41a0-afad-1faaaad4a6f8\\scratchpad\\voyage_limiter\"; & ./scripts/dev-api.ps1"
+      ],
+      "port": 8010
+    },
+    {
       "name": "mcp-runner",
       "runtimeExecutable": "powershell",
       "runtimeArgs": ["-NoProfile", "-File", "scripts/dev-mcp-runner.ps1"],

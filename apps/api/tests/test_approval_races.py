@@ -1,10 +1,13 @@
-"""Approvals that tell the truth, and recovery after a dead process (7a.7).
+"""Requests that tell the truth, and recovery after a dead process (7a.7,
+durable since 9.1).
 
 Two bugs the gap review found. A decision arriving just after the turn gave
 up waiting was recorded as "approved" although nothing ran: resolve read the
 row, then wrote it, and expiry only touched rows still pending. And a
 process killed mid-wait left its approval "pending" forever, with nothing to
-close it, and the question it was answering never got a reply.
+close it, and the question it was answering never got a reply. Since Phase
+9.1 nothing waits inside a turn: every move of a request is one conditional
+UPDATE, and the sweep owns expiry.
 """
 
 from __future__ import annotations
@@ -12,48 +15,56 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import pytest
 from app import worker
-from app.agent import approval_registry
 from app.api.errors import BadRequest
 from app.db.session import get_sessionmaker
 from app.models.approval import Approval, ApprovalStatus
 from app.models.audit_log import AuditLog
 from app.models.conversation import Conversation, Message, MessageRole
 from app.services import approvals as svc
-from app.services import chat, recovery, turns
+from app.services import chat, executor, recovery, turns
 from httpx import AsyncClient
 from sqlalchemy import select
+from tests.pending import waiting_request
 
 pytestmark = pytest.mark.anyio
 
 API = "/api/v1"
 
 
+@pytest.fixture(autouse=True)
+def _nothing_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The subject is the decision, not running it: an approval is left
+    `approved`, as if the executor had not picked it up yet."""
+
+    async def dispatch(_approval_id: uuid.UUID) -> None:
+        return None
+
+    monkeypatch.setattr(executor, "dispatch", dispatch)
+
+
 async def _conversation(client: AsyncClient, h: dict[str, str]) -> Conversation:
     aid = (await client.post(f"{API}/assistants", json={"name": "A"}, headers=h)).json()["id"]
-    cid = (await client.post(f"{API}/assistants/{aid}/conversations", json={}, headers=h)).json()[
-        "id"
-    ]
+    cid = (
+        await client.post(
+            f"{API}/assistants/{aid}/conversations", json={"mode": "preview"}, headers=h
+        )
+    ).json()["id"]
     async with get_sessionmaker()() as s:
         conv = await s.get(Conversation, uuid.UUID(cid))
         assert conv is not None
         return conv
 
 
-async def _approval(conv: Conversation, *, expires_in: float = 300) -> uuid.UUID:
+async def _approval(conv: Conversation, *, expires_in: float | None = None) -> uuid.UUID:
     async with get_sessionmaker()() as s:
-        row = await svc.create(
+        row = await waiting_request(
             s,
             conversation_id=conv.id,
-            org_id=conv.org_id,
-            tool_name="mcp__caps__sql_query",
             tool_input={"sql": "UPDATE tickets SET status = 'closed'"},
-            risk="high",
-            rationale="writes",
-            timeout_s=expires_in,
+            expires_in=expires_in,
         )
         return row.id
 
@@ -70,17 +81,25 @@ async def _decide(approval_id: uuid.UUID, decision: str, user_id: uuid.UUID | No
     async with get_sessionmaker()() as s:
         row = await svc.get(s, approval_id)
         try:
-            await svc.resolve(s, row, decision=decision, user_id=user_id)
+            await svc.resolve(
+                s,
+                row,
+                decision=decision,
+                user_id=user_id,
+                input_sha256=row.input_sha256,
+                note="Decided in a test.",
+            )
         except BadRequest as exc:
             return exc.code
         return "ok"
 
 
-async def _audit(approval_id: uuid.UUID) -> list[AuditLog]:
+async def _audit(approval_id: uuid.UUID, action: str | None = None) -> list[AuditLog]:
     async with get_sessionmaker()() as s:
-        return list(
-            (await s.scalars(select(AuditLog).where(AuditLog.target_id == str(approval_id)))).all()
-        )
+        rows = (
+            await s.scalars(select(AuditLog).where(AuditLog.target_id == str(approval_id)))
+        ).all()
+        return [r for r in rows if action is None or r.action == action]
 
 
 # ── deciding ─────────────────────────────────────────────────
@@ -97,8 +116,10 @@ async def test_two_opposite_decisions_at_once_record_exactly_one(
     assert sorted(results) == ["approval_not_pending", "ok"]
     winner = "approved" if results[0] == "ok" else "denied"
     assert await _status(aid) == ApprovalStatus(winner)
-    (entry,) = await _audit(aid)
-    assert entry.action == f"approval.{winner}" and entry.actor_user_id == conv.created_by
+    (entry,) = await _audit(aid, f"approval.{winner}")
+    assert entry.actor_user_id == conv.created_by
+    loser = "denied" if winner == "approved" else "approved"
+    assert await _audit(aid, f"approval.{loser}") == []
 
 
 async def test_a_decision_after_the_expiry_is_refused(
@@ -108,23 +129,37 @@ async def test_a_decision_after_the_expiry_is_refused(
     aid = await _approval(conv, expires_in=-1)
     assert await _decide(aid, "approved", conv.created_by) == "approval_expired"
     assert await _status(aid) is ApprovalStatus.pending, "nothing was recorded"
-    assert await _audit(aid) == []
+    assert await _audit(aid, "approval.approved") == []
+
+
+async def test_a_decision_must_name_what_it_was_shown(
+    client: AsyncClient, org_headers: dict[str, str]
+) -> None:
+    """Phase 9.1: the request's hash comes back with the decision, so an
+    approval never covers something the decider didn't read."""
+    conv = await _conversation(client, org_headers)
+    aid = await _approval(conv)
     r = await client.post(
-        f"{API}/approvals/{aid}:resolve", json={"decision": "approved"}, headers=org_headers
+        f"{API}/approvals/{aid}:resolve",
+        json={"decision": "approved", "input_sha256": "0" * 64},
+        headers=org_headers,
     )
-    assert (r.status_code, r.json()["error"]["code"]) == (400, "approval_expired")
+    assert (r.status_code, r.json()["error"]["code"]) == (400, "input_changed")
+    assert await _status(aid) is ApprovalStatus.pending
 
 
-async def test_closing_never_overwrites_a_decision(
+async def test_the_sweep_never_overwrites_a_decision(
     client: AsyncClient, org_headers: dict[str, str]
 ) -> None:
     conv = await _conversation(client, org_headers)
     aid = await _approval(conv)
     assert await _decide(aid, "approved", conv.created_by) == "ok"
-    assert await svc.close(aid) is ApprovalStatus.approved
+    later = datetime.now(UTC) + timedelta(days=30)
+    await svc.sweep(later)
     assert await _status(aid) is ApprovalStatus.approved
     other = await _approval(conv)
-    assert await svc.close(other) is ApprovalStatus.expired
+    await svc.sweep(later)
+    assert await _status(other) is ApprovalStatus.expired
     assert await _decide(other, "approved", conv.created_by) == "approval_not_pending"
 
 
@@ -140,112 +175,16 @@ async def test_an_expired_row_is_not_offered(
     assert str(stale) not in str(pending)
 
 
-# ── the waiting turn follows what was recorded ───────────────
-
-
-async def _raise(conv: Conversation, monkeypatch: pytest.MonkeyPatch, outcome: Any) -> str:
-    """Run the turn's approval step with the wait replaced by `outcome`, an
-    async function given the approval id that returns what the wait would."""
-
-    async def wait(approval_id: Any, _future: Any, **_kw: Any) -> Any:
-        try:
-            return await outcome(uuid.UUID(str(approval_id)))
-        finally:
-            # As the real wait does: its slot never outlives it.
-            approval_registry.forget(approval_id)
-
-    monkeypatch.setattr(approval_registry, "wait", wait)
-    return await chat._raise_approval(
-        conv, lambda _e: None, "mcp__caps__sql_query", {"sql": "UPDATE t SET x = 1"}, "high", "w"
-    )
-
-
-async def _only_approval(conv: Conversation) -> uuid.UUID:
-    async with get_sessionmaker()() as s:
-        (row,) = (
-            await s.scalars(select(Approval).where(Approval.conversation_id == conv.id))
-        ).all()
-        return row.id
-
-
-async def test_an_approval_that_lands_as_the_wait_times_out_runs(
-    client: AsyncClient, org_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The person said yes before the expiry; the wake-up lost the race with
-    the timeout. The action runs, and the row says approved: both true."""
-    conv = await _conversation(client, org_headers)
-
-    async def approved_then_timed_out(aid: uuid.UUID) -> str:
-        assert await _decide(aid, "approved", conv.created_by) == "ok"
-        return "expired"
-
-    assert await _raise(conv, monkeypatch, approved_then_timed_out) == "approved"
-    assert await _status(await _only_approval(conv)) is ApprovalStatus.approved
-
-
-async def test_a_denial_that_lands_as_the_wait_times_out_is_a_denial(
-    client: AsyncClient, org_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    conv = await _conversation(client, org_headers)
-
-    async def denied_then_timed_out(aid: uuid.UUID) -> str:
-        assert await _decide(aid, "denied", conv.created_by) == "ok"
-        return "expired"
-
-    assert await _raise(conv, monkeypatch, denied_then_timed_out) == "denied"
-    assert await _status(await _only_approval(conv)) is ApprovalStatus.denied
-
-
-async def test_stop_at_the_moment_of_approval_records_that_nothing_ran(
-    client: AsyncClient, org_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    conv = await _conversation(client, org_headers)
-
-    async def approved_then_stopped(aid: uuid.UUID) -> str:
-        assert await _decide(aid, "approved", conv.created_by) == "ok"
-        return "interrupted"
-
-    assert await _raise(conv, monkeypatch, approved_then_stopped) == "interrupted"
-    assert await _status(await _only_approval(conv)) is ApprovalStatus.cancelled
-
-
-async def test_a_turn_that_vanishes_after_an_approval_records_that_nothing_ran(
-    client: AsyncClient, org_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    conv = await _conversation(client, org_headers)
-
-    async def approved_then_gone(aid: uuid.UUID) -> str:
-        assert await _decide(aid, "approved", conv.created_by) == "ok"
-        raise asyncio.CancelledError
-
-    with pytest.raises(asyncio.CancelledError):
-        await _raise(conv, monkeypatch, approved_then_gone)
-    assert await _status(await _only_approval(conv)) is ApprovalStatus.cancelled
-
-
-async def test_an_unanswered_wait_is_closed_as_expired(
-    client: AsyncClient, org_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    conv = await _conversation(client, org_headers)
-
-    async def nobody(_aid: uuid.UUID) -> str:
-        return "expired"
-
-    assert await _raise(conv, monkeypatch, nobody) == "expired"
-    assert await _status(await _only_approval(conv)) is ApprovalStatus.expired
-
-
 # ── after a dead process ─────────────────────────────────────
 
 
-async def test_the_sweep_closes_approvals_a_dead_process_left_pending(
+async def test_the_sweep_expires_what_nobody_decided_and_says_so(
     client: AsyncClient, org_headers: dict[str, str]
 ) -> None:
     conv = await _conversation(client, org_headers)
-    orphan = await _approval(conv, expires_in=-(svc.ORPHAN_GRACE_S + 5))
-    just_expired = await _approval(conv, expires_in=-1)  # its turn closes it itself
+    gone = await _approval(conv, expires_in=-1)
     live = await _approval(conv)
-    decided = await _approval(conv, expires_in=-(svc.ORPHAN_GRACE_S + 5))
+    decided = await _approval(conv, expires_in=-1)
     async with get_sessionmaker()() as s:
         row = await s.get(Approval, decided)
         assert row is not None
@@ -253,13 +192,57 @@ async def test_the_sweep_closes_approvals_a_dead_process_left_pending(
         await s.commit()
 
     assert await svc.sweep_orphaned() == 1
-    assert await _status(orphan) is ApprovalStatus.expired
-    assert await _status(just_expired) is ApprovalStatus.pending
+    assert await _status(gone) is ApprovalStatus.expired
     assert await _status(live) is ApprovalStatus.pending
     assert await _status(decided) is ApprovalStatus.denied
-    (entry,) = await _audit(orphan)
-    assert entry.action == "approval.expired" and entry.actor_user_id is None
-    assert (entry.meta or {}).get("reason") == "orphaned"
+    (entry,) = await _audit(gone, "approval.expired")
+    assert entry.actor_user_id is None
+    async with get_sessionmaker()() as s:
+        row = await s.get(Approval, gone)
+        assert row is not None and row.sealed_ciphertext is None, "the sealed input is wiped"
+    notices = [m.content for m in await _replies(conv)]
+    assert any("wasn't decided in time" in n for n in notices), "the asker is told"
+
+
+async def test_a_request_left_running_by_a_dead_process_fails_and_never_reruns(
+    client: AsyncClient, org_headers: dict[str, str]
+) -> None:
+    conv = await _conversation(client, org_headers)
+    aid = await _approval(conv)
+    async with get_sessionmaker()() as s:
+        row = await s.get(Approval, aid)
+        assert row is not None
+        row.status = ApprovalStatus.executing
+        row.executed_at = datetime.now(UTC) - svc.STUCK_AFTER - timedelta(seconds=5)
+        await s.commit()
+    counts = await svc.sweep()
+    assert counts["stuck"] == 1
+    assert await _status(aid) is ApprovalStatus.failed
+    async with get_sessionmaker()() as s:
+        row = await s.get(Approval, aid)
+        assert row is not None and "may or may not have happened" in (row.result or "")
+
+
+async def test_an_approved_request_nobody_picked_up_is_handed_over_again(
+    client: AsyncClient, org_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conv = await _conversation(client, org_headers)
+    aid = await _approval(conv)
+    assert await _decide(aid, "approved", conv.created_by) == "ok"
+    handed: list[uuid.UUID] = []
+
+    async def dispatch(approval_id: uuid.UUID) -> None:
+        handed.append(approval_id)
+
+    monkeypatch.setattr(executor, "dispatch", dispatch)
+    assert (await svc.sweep())["handed_over"] == 0, "too soon: the executor may be on it"
+    async with get_sessionmaker()() as s:
+        row = await s.get(Approval, aid)
+        assert row is not None
+        row.decided_at = datetime.now(UTC) - svc.UNCLAIMED_AFTER - timedelta(seconds=5)
+        await s.commit()
+    assert (await svc.sweep())["handed_over"] == 1
+    assert handed == [aid]
 
 
 async def _question(conv: Conversation, *, age_s: float) -> uuid.UUID:

@@ -19,8 +19,9 @@ from app.rag.retrieve import retrieve
 from app.rag.vectorstore import ChunkRecord, PgVectorStore
 from app.schemas.assistant_config import RagRetrieval
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from tests.infra import unavailable
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.local_models]
 
 POSTGRES_URL = os.environ.get(
     "INTEGRATION_DATABASE_URL", "postgresql+asyncpg://app:app@localhost:45432/app"
@@ -41,7 +42,7 @@ async def pg() -> AsyncIterator[AsyncSession]:
             pass
     except Exception as exc:  # pragma: no cover - environment-dependent
         await engine.dispose()
-        pytest.skip(f"Postgres not reachable at {POSTGRES_URL}: {exc}")
+        unavailable("postgres", f"Postgres not reachable at {POSTGRES_URL}: {exc}")
 
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     async with sessionmaker() as session:

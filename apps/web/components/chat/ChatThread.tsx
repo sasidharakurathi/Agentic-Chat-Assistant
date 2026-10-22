@@ -11,9 +11,19 @@ import {
   type ReactNode,
 } from "react";
 
-import { ApprovalCard, type PendingApproval } from "@/components/chat/ApprovalCard";
+import { AnswerFeedback, SolvedPrompt, type Rated } from "@/components/chat/AnswerFeedback";
+import { ApprovalCard } from "@/components/chat/ApprovalCard";
+import {
+  AttachButton,
+  MAX_IMAGES,
+  MessageImages,
+  ScreenshotTray,
+  useScreenshots,
+  type PendingShot,
+} from "@/components/chat/Attachments";
 import { asSentence, failureText } from "@/components/chat/error-text";
 import { GuardrailNotes } from "@/components/chat/GuardrailNotes";
+import { NOTICE_REQUIRED_EVENT } from "@/components/privacy/NoticeGate";
 import { Markdown } from "@/components/chat/Markdown";
 import { RunDetails } from "@/components/chat/RunDetails";
 import { SourcesPanel } from "@/components/chat/SourcesPanel";
@@ -23,12 +33,15 @@ import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/dialog";
 import { fieldClasses } from "@/components/ui/input";
+import { Lamp } from "@/components/ui/lamp";
 import { useToast } from "@/components/ui/toast";
-import { splitBlocks } from "@/lib/message-blocks";
+import { imageIds, splitBlocks } from "@/lib/message-blocks";
+import { looksLikeSecret } from "@/lib/typed-secrets";
 import {
   ApiError,
   approvals as approvalsApi,
   conversations,
+  type Approval,
   streamMessage,
   watchTurn,
   type ChatEvent,
@@ -38,8 +51,9 @@ import {
   memories as memoriesApi,
   type MemoryFile,
   type GuardrailFinding,
+  type TurnOutcome,
 } from "@/lib/api";
-import { titleWithPending } from "@/lib/approvals";
+import { isOpen, pollDelayMs, titleWithPending } from "@/lib/approvals";
 import { formatCount, formatUsd } from "@/lib/format";
 import {
   SLASH_COMMANDS,
@@ -50,6 +64,17 @@ import {
   type SlashCommandName,
 } from "@/lib/slash-commands";
 import { appendSubagentText } from "@/lib/tool-tree";
+import {
+  RECONNECT_DELAYS_MS,
+  giveBack,
+  keptAlready,
+  limitBack,
+  pause,
+  retryAfterOf,
+  unreachable,
+} from "@/lib/turn-resume";
+import { useAuth } from "@/lib/auth";
+import { isEmployee } from "@/lib/roles";
 import { cn } from "@/lib/utils";
 
 type Live = {
@@ -79,7 +104,22 @@ export function ChatThread({
   onTitle,
   onRunning,
   readOnly = false,
+  readOnlyNote,
+  starters = [],
+  newerVersion = false,
+  headerTrailing,
+  feedback: feedbackOn = true,
 }: {
+  /** Thumbs and "Did this solve it?" (Phase 8.8): Chat's, not a preview's. */
+  feedback?: boolean;
+  /** A control after the title, e.g. the assistant's card (Phase 8.7). */
+  headerTrailing?: ReactNode;
+  /** A newer version answers in Chat than the one this conversation is on
+   *  (Phase 8.6): said, with a way to start a new conversation. */
+  newerVersion?: boolean;
+  /** The assistant's conversation starters (Phase 8.5): offered while the
+   *  conversation is empty. */
+  starters?: string[];
   conversationId: string;
   assistantId: string;
   /** For the composer's label and placeholder, "Message Shop Helper". */
@@ -98,22 +138,51 @@ export function ChatThread({
   /** Started by someone else: it can be read, not replied in, stopped or
    *  renamed (Phase 7a.4). */
   readOnly?: boolean;
+  /** Why there is no composer, when it is not someone else's conversation:
+   *  the assistant is paused, or nothing is approved yet (Phase 7b.1). */
+  readOnlyNote?: string;
 }) {
+  // An employee's view (Phase 8.1): requests wait for an admin, and run
+  // details are the Studio's.
+  const auth = useAuth();
+  const employee = isEmployee(auth.activeRole);
+  const me = auth.user?.id;
+  // What a conversation cost is the Studio's too (Phase 8.6).
+  const commands = employee ? SLASH_COMMANDS.filter((c) => c.name !== "cost") : SLASH_COMMANDS;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [live, setLive] = useState<Live | null>(null);
   const [pendingUser, setPendingUser] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** The typed failure behind `error`, when the turn reported one. */
-  const [failure, setFailure] = useState<{ code: string; retryable: boolean } | null>(null);
+  const [failure, setFailure] = useState<Failure | null>(null);
+  /** The connection dropped mid-answer and is being picked up (Phase 8.6). */
+  const [reconnecting, setReconnecting] = useState(false);
+  /** It couldn't be picked up: the answer carries on on the server, and
+   *  reloading the conversation shows it. */
+  const [lost, setLost] = useState(false);
+  /** What was last sent, for Try again: the failed message itself, not the
+   *  last one the server kept (Phase 8.6). */
+  const lastAttempt = useRef<string | null>(null);
+  /** Your thumbs on each answer, and "solved" (Phase 8.8). */
+  const [rated, setRated] = useState<Record<string, Rated>>({});
+  const [solved, setSolved] = useState<boolean | null>(null);
   /** Budget warnings from the last turn. */
   const [budgetNotes, setBudgetNotes] = useState<string[]>([]);
   const [input, setInput] = useState("");
-  // Approvals are kept outside `live` on purpose: a pending one must survive
-  // the stream ending (a turn can finish denied-by-timeout) and must also be
-  // restorable after a reload, which `live` never is.
-  const [pending, setPending] = useState<PendingApproval[]>([]);
+  // Requests are kept outside `live` on purpose (Phase 9.1): they outlive the
+  // answer that raised them by hours, and must be there after a reload,
+  // which `live` never is. Only the open ones show as cards; how one ended
+  // is posted into the thread.
+  const [requests, setRequests] = useState<Approval[]>([]);
+  const openIds = useRef<Set<string>>(new Set());
   const toast = useToast();
+  // Screenshots (Phase 9.6): uploaded as they are picked or pasted, sent
+  // with the next message. `pendingShots`: the sent ones' previews, shown
+  // in your bubble until the saved message replaces it.
+  const shotProblem = useCallback((message: string) => toast(message, "error"), [toast]);
+  const screenshots = useScreenshots(conversationId, shotProblem);
+  const [pendingShots, setPendingShots] = useState<string[]>([]);
   const [stopping, setStopping] = useState(false);
   /** Said once in the composer's status line when a turn ends well, so a
    *  screen reader hears that the answer is there. */
@@ -144,6 +213,15 @@ export function ChatThread({
   const loadMessages = useCallback(async (): Promise<string | null> => {
     const c = await conversations.get(conversationId);
     setMessages(c.messages);
+    setRated(
+      Object.fromEntries(
+        Object.entries(c.feedback ?? {}).map(([k, v]) => [
+          k,
+          { rating: v.rating ?? null, comment: v.comment ?? "" },
+        ]),
+      ),
+    );
+    setSolved(c.solved ?? null);
     setOlder(c.messages_next_cursor);
     // The server's figure: every turn's model spend plus retrieval (embedding
     // and rerank), which the live usage events below never include.
@@ -169,33 +247,39 @@ export function ChatThread({
     }
   }, [conversationId, older]);
 
-  // The approval_required SSE event only reaches whoever was watching the
-  // stream. Re-fetching on mount is what makes a reload (or a second tab)
-  // still able to answer a decision that is genuinely still waiting.
-  const loadPending = useCallback(async () => {
+  // The approval_required event only reaches whoever was watching the
+  // stream; a reload or another tab reads them back from the server. When
+  // one has ended since the last look, its outcome is in the thread now.
+  const loadRequests = useCallback(async () => {
     try {
-      const rows = await approvalsApi.listPending(conversationId);
-      setPending(
-        rows.map((r) => ({
-          approval_id: r.id,
-          tool: r.tool_name,
-          input: r.input,
-          risk: r.risk,
-          rationale: r.rationale ?? "",
-          expires_at: r.expires_at,
-        })),
-      );
+      const rows = (await approvalsApi.listAll(conversationId)).filter((r) => isOpen(r.status));
+      const ids = new Set(rows.map((r) => r.id));
+      const ended = [...openIds.current].some((id) => !ids.has(id));
+      openIds.current = ids;
+      setRequests(rows);
+      if (ended) void loadMessages();
     } catch {
       /* a failed poll must not break the thread */
     }
-  }, [conversationId]);
+  }, [conversationId, loadMessages]);
+
+  // Looked at again while any is open: soon while one runs, now and then
+  // while one waits (an approver may decide hours later).
+  useEffect(() => {
+    const delay = pollDelayMs(requests.map((r) => r.status));
+    if (delay === null) return;
+    const timer = setTimeout(() => void loadRequests(), delay);
+    return () => clearTimeout(timer);
+  }, [requests, loadRequests]);
 
   useEffect(() => {
     setLive(null);
     setPendingUser(null);
+    setPendingShots([]);
     setError(null);
     setFailure(null);
-    setPending([]);
+    setRequests([]);
+    openIds.current = new Set();
     setSpend(null);
     let gone = false;
     void loadMessages().then((turnId) => {
@@ -203,20 +287,23 @@ export function ChatThread({
       // another tab): watch it from its start.
       if (turnId && !gone) void watchRef.current(turnId);
     });
-    void loadPending();
+    void loadRequests();
     // Switching conversation or unmounting: stop watching. The turn is not
     // stopped by that (QOS-01); it is watched again on coming back.
     return () => {
       gone = true;
       abortRef.current?.abort();
     };
-  }, [loadMessages, loadPending]);
+  }, [loadMessages, loadRequests]);
 
-  // While approvals wait, the tab says so: the assistant is stuck on a
-  // person, who may be looking at another tab.
+  // While a request waits for the person reading, the tab says so: they
+  // may be looking at another tab.
+  const waitingOnMe = requests.filter(
+    (r) => r.status === "pending" && r.tier === "asker" && r.requested_by === me,
+  ).length;
   useEffect(() => {
-    document.title = titleWithPending(document.title, pending.length);
-  }, [pending.length]);
+    document.title = titleWithPending(document.title, waitingOnMe);
+  }, [waitingOnMe]);
   useEffect(() => () => void (document.title = titleWithPending(document.title, 0)), []);
 
   const stop = useCallback(async () => {
@@ -244,24 +331,53 @@ export function ChatThread({
       return;
     }
     if (nearBottom.current) el.scrollTo({ top: el.scrollHeight });
-  }, [messages, live, pending]);
+  }, [messages, live, requests]);
+
+  // Answer text arrives a few characters at a time: it is added once per
+  // frame, not once per event, so a long answer doesn't re-render the
+  // thread hundreds of times a second (Phase 8.6).
+  const textQueue = useRef("");
+  const textFrame = useRef<number | null>(null);
+  const flushText = useCallback(() => {
+    if (textFrame.current !== null) cancelAnimationFrame(textFrame.current);
+    textFrame.current = null;
+    const more = textQueue.current;
+    if (!more) return;
+    textQueue.current = "";
+    setLive((prev) => (prev ? { ...prev, text: prev.text + more } : prev));
+  }, []);
+  const queueText = useCallback(
+    (more: string) => {
+      textQueue.current += more;
+      textFrame.current ??= requestAnimationFrame(flushText);
+    },
+    [flushText],
+  );
 
   /** Watch a turn's events into the live answer, from sending a message
    *  or from opening a conversation that is answering. `watching`: the turn
-   *  was started elsewhere, so its events are a replay, and an approval it
-   *  asked for may already be decided: the card comes from the server, not
-   *  from the event. */
+   *  was started elsewhere, so its events are a replay. A request it stored
+   *  is always read back from the server (Phase 9.1), never built from the
+   *  event, so a replay can't show one that was already decided.
+   *
+   *  Phase 8.6: a connection that drops partway is picked up where it left
+   *  off (the turn carries on on the server), and `attempt`, the message
+   *  being sent, goes back into the box if the server never kept it;
+   *  `restore` puts its screenshots back too (Phase 9.6). */
   const follow = useCallback(
     async (
-      run: (onEvent: (e: ChatEvent) => void, signal: AbortSignal) => Promise<void>,
-      watching: boolean,
+      start: (onEvent: (e: ChatEvent) => void, signal: AbortSignal) => Promise<TurnOutcome>,
+      { attempt, restore }: { watching: boolean; attempt?: string; restore?: () => void },
     ) => {
       setFinished(null);
       setError(null);
       setFailure(null);
+      setLost(false);
+      setReconnecting(false);
       setBudgetNotes([]);
       nearBottom.current = true;
       startedAt.current.clear();
+      textQueue.current = "";
       setLive({ text: "", tools: [], citations: [], guardrails: [] });
       setSending(true);
       onRunning?.(true);
@@ -269,103 +385,173 @@ export function ChatThread({
       abortRef.current?.abort();
       abortRef.current = controller;
       let failed = false;
-      try {
-        await run((e) => {
-          if (e.type === "tool_call") startedAt.current.set(e.id, performance.now());
-          const began = e.type === "tool_result" ? startedAt.current.get(e.id) : undefined;
-          const took = began !== undefined ? Math.round(performance.now() - began) : null;
-          setLive((prev) => {
-            if (!prev) return prev;
-            switch (e.type) {
-              case "token":
-                // A subagent's notes go on its delegation step, not into the
-                // answer.
-                return e.parent_id
-                  ? { ...prev, tools: appendSubagentText(prev.tools, e.parent_id, e.text) }
-                  : { ...prev, text: prev.text + e.text };
-              case "tool_call":
-                return {
-                  ...prev,
-                  tools: [
-                    ...prev.tools,
-                    { id: e.id, name: e.name, input: e.input, parent_id: e.parent_id },
-                  ],
-                };
-              case "tool_result":
-                return {
-                  ...prev,
-                  tools: prev.tools.map((t) =>
-                    t.id === e.id
-                      ? {
-                          ...t,
-                          status: e.status,
-                          output: e.output,
-                          permission: e.permission,
-                          duration_ms: took,
-                        }
-                      : t,
-                  ),
-                };
-              case "approval_required":
-                if (watching) {
-                  void loadPending();
-                  return prev;
-                }
-                setPending((p) => [
-                  ...p.filter((x) => x.approval_id !== e.approval_id),
-                  {
-                    approval_id: e.approval_id,
-                    tool: e.tool,
-                    input: e.input,
-                    risk: e.risk,
-                    rationale: e.rationale,
-                    expires_at: e.expires_at,
-                  },
-                ]);
-                return prev;
-              case "guardrail":
-                return { ...prev, guardrails: [...prev.guardrails, e] };
-              case "citation":
-                // Arrives at finalize, after the full answer — a [n] marker only
-                // means something once every search in the turn has been seen.
-                return { ...prev, citations: [...prev.citations, e as Citation] };
-              default:
-                return prev;
-            }
+      // Ours to give back until the server says it kept it. A message that
+      // is only a screenshot is an attempt too: its text is "".
+      let kept = attempt === undefined;
+      // Sending while an answer is still being written: watch that one.
+      let attachAfter = false;
+      const onEvent = (e: ChatEvent) => {
+        if (e.type === "accepted") kept = true;
+        if (e.type === "token" && !e.parent_id) {
+          queueText(e.text);
+          return;
+        }
+        if (e.type === "tool_call") startedAt.current.set(e.id, performance.now());
+        const began = e.type === "tool_result" ? startedAt.current.get(e.id) : undefined;
+        const took = began !== undefined ? Math.round(performance.now() - began) : null;
+        setLive((prev) => {
+          if (!prev) return prev;
+          switch (e.type) {
+            case "token":
+              // A subagent's notes go on its delegation step, not into the
+              // answer.
+              return e.parent_id
+                ? { ...prev, tools: appendSubagentText(prev.tools, e.parent_id, e.text) }
+                : { ...prev, text: prev.text + e.text };
+            case "tool_call":
+              return {
+                ...prev,
+                tools: [
+                  ...prev.tools,
+                  { id: e.id, name: e.name, input: e.input, parent_id: e.parent_id },
+                ],
+              };
+            case "tool_result":
+              return {
+                ...prev,
+                tools: prev.tools.map((t) =>
+                  t.id === e.id
+                    ? {
+                        ...t,
+                        status: e.status,
+                        output: e.output,
+                        permission: e.permission,
+                        duration_ms: took,
+                      }
+                    : t,
+                ),
+              };
+            case "approval_required":
+              // Stored by the server (Phase 9.1): read it back with
+              // everything its card needs, its editable values included.
+              void loadRequests();
+              return prev;
+            case "guardrail":
+              return { ...prev, guardrails: [...prev.guardrails, e] };
+            case "citation":
+              // Arrives at finalize, after the full answer — a [n] marker only
+              // means something once every search in the turn has been seen.
+              return { ...prev, citations: [...prev.citations, e as Citation] };
+            default:
+              return prev;
+          }
+        });
+        if (e.type === "error") {
+          failed = true;
+          // A used-up limit says when it is back, in the reader's own time
+          // (the builder budget too, Phase 9.7).
+          const back = limitBack(e.code, e.resets_at);
+          setError([asSentence(e.message), back].filter(Boolean).join(" "));
+          setFailure({
+            code: e.code,
+            retryable: Boolean(e.retryable),
+            retryAfter: e.retry_after_s ?? null,
           });
-          if (e.type === "error") {
-            failed = true;
-            setError(asSentence(e.message));
-            setFailure({ code: e.code, retryable: Boolean(e.retryable) });
-          }
-          if (e.type === "title") onTitle?.(e.title);
-          if (e.type === "budget") setBudgetNotes((n) => [...n, e.message]);
-          // Spend as it is incurred, so a long turn is visibly costing money;
-          // replaced by the server's total once the turn is saved.
-          if (e.type === "usage") {
-            setSpend((s) =>
-              s
-                ? {
-                    cost: s.cost + e.cost_usd,
-                    tokensIn: s.tokensIn + e.tokens_in,
-                    tokensOut: s.tokensOut + e.tokens_out,
-                  }
-                : s,
+        }
+        if (e.type === "title") onTitle?.(e.title);
+        if (e.type === "budget") setBudgetNotes((n) => [...n, e.message]);
+        // Spend as it is incurred, so a long turn is visibly costing money;
+        // replaced by the server's total once the turn is saved.
+        if (e.type === "usage") {
+          setSpend((s) =>
+            s
+              ? {
+                  cost: s.cost + e.cost_usd,
+                  tokensIn: s.tokensIn + e.tokens_in,
+                  tokensOut: s.tokensOut + e.tokens_out,
+                }
+              : s,
+          );
+        }
+      };
+      try {
+        let outcome: TurnOutcome | null = null;
+        try {
+          outcome = await start(onEvent, controller.signal);
+        } catch (err) {
+          // No answer at all: whether the message got there is found out
+          // below. A refusal is an answer, shown as it is.
+          if (!unreachable(err) || controller.signal.aborted) throw err;
+        }
+        // Dropped partway, or never answered: find the turn and watch it
+        // again from the last event seen.
+        for (const wait of RECONNECT_DELAYS_MS) {
+          if (outcome?.ended || controller.signal.aborted) break;
+          setReconnecting(true);
+          await pause(wait, controller.signal);
+          if (controller.signal.aborted) break;
+          try {
+            const now = await conversations.get(conversationId);
+            const turnId = outcome?.turnId ?? now.turn_id ?? null;
+            if (!turnId) {
+              // Nothing running: it finished meanwhile, or never started.
+              kept ||= keptAlready(now.messages, attempt);
+              outcome = { turnId: null, ended: true, lastId: null };
+              break;
+            }
+            outcome = await watchTurn(
+              conversationId,
+              turnId,
+              onEvent,
+              controller.signal,
+              outcome?.lastId ?? null,
             );
+          } catch (err) {
+            if (err instanceof ApiError && err.code === "turn_not_found") {
+              // Finished long enough ago that only the saved answer is left.
+              outcome = { turnId: null, ended: true, lastId: null };
+              break;
+            }
+            if (!unreachable(err)) throw err;
           }
-        }, controller.signal);
-        await loadMessages();
+        }
+        setReconnecting(false);
+        flushText();
+        if (controller.signal.aborted) {
+          // Left: nothing to settle.
+        } else if (!outcome?.ended) {
+          failed = true;
+          setLost(true);
+          setError(
+            kept
+              ? "Lost the connection while the answer was being written. It carries on on the server: reload the conversation to see it."
+              : "Couldn't reach the server, so your message may not have been sent. It's back in the box: send it again once you're connected.",
+          );
+        } else {
+          await loadMessages();
+        }
       } catch (err) {
         // Our own abort (leaving the conversation) is not an error to show.
         if (!controller.signal.aborted) {
           failed = true;
+          attachAfter = err instanceof ApiError && err.code === "turn_in_progress";
+          // The notice changed while this was open (Phase 8.7): show it.
+          if (err instanceof ApiError && err.code === "notice_required") {
+            window.dispatchEvent(new Event(NOTICE_REQUIRED_EVENT));
+          }
           setError(
             err instanceof ApiError
-              ? `${asSentence(err.message)} Try sending it again.`
+              ? asSentence(err.message)
               : "The answer stopped partway. Check your connection, then try again.",
+          );
+          setFailure(
+            err instanceof ApiError
+              ? { code: err.code, retryable: err.status === 429, retryAfter: retryAfterOf(err) }
+              : null,
           );
         }
       } finally {
+        flushText();
         // Only the stream still being watched settles the thread: one let
         // go of (another conversation opened, or this one watched again)
         // must not clear what replaced it.
@@ -373,41 +559,57 @@ export function ChatThread({
           abortRef.current = null;
           setLive(null);
           setPendingUser(null);
+          setPendingShots([]);
           setSending(false);
           setStopping(false);
           // Let go of on purpose (this conversation was left): the turn is
           // still running on the server, so the list keeps its lamp lit.
           if (!controller.signal.aborted) {
+            // Never kept: the text goes back in the box, nothing lost.
+            if (failed && !kept && attempt) setInput((box) => giveBack(box, attempt));
+            // And its screenshots, which weren't sent either.
+            if (failed && !kept) restore?.();
+            setReconnecting(false);
             onRunning?.(false);
-            // A turn that ends (finished, stopped, failed) settles any
-            // approval it raised: stopped ones are expired by the server.
-            // Re-read what is really still pending, or a stale card sits
-            // there answering "already expired" next to the new turn's card.
-            void loadPending();
+            // What the turn asked for is stored: read back where each
+            // request stands.
+            void loadRequests();
             // An error announces itself (role="alert"); a good ending doesn't.
             if (!failed) setFinished("Answer ready");
+            if (attachAfter) {
+              void loadMessages().then((turnId) => {
+                if (turnId) void watchRef.current(turnId);
+              });
+            }
           }
         }
       }
     },
-    [loadMessages, loadPending, onTitle, onRunning],
+    [conversationId, loadMessages, loadRequests, onTitle, onRunning, queueText, flushText],
   );
 
+  const restoreShots = screenshots.restore;
   const sendText = useCallback(
-    async (text: string) => {
-      if (!text || sending) return;
+    async (text: string, shots: PendingShot[] = []) => {
+      if ((!text && shots.length === 0) || sending) return;
+      lastAttempt.current = text || null;
       setPendingUser(text);
-      await follow(
-        (onEvent, signal) => streamMessage(conversationId, text, onEvent, signal),
-        false,
-      );
+      setPendingShots(shots.map((s) => s.preview));
+      const ids = shots.flatMap((s) => (s.id ? [s.id] : []));
+      await follow((onEvent, signal) => streamMessage(conversationId, text, onEvent, signal, ids), {
+        watching: false,
+        attempt: text,
+        restore: shots.length ? () => restoreShots(shots) : undefined,
+      });
     },
-    [conversationId, sending, follow],
+    [conversationId, sending, follow, restoreShots],
   );
 
   const watch = useCallback(
     (turnId: string) =>
-      follow((onEvent, signal) => watchTurn(conversationId, turnId, onEvent, signal), true),
+      follow((onEvent, signal) => watchTurn(conversationId, turnId, onEvent, signal), {
+        watching: true,
+      }),
     [conversationId, follow],
   );
   // The mount effect runs before `watch` exists in its closure: it reads
@@ -419,7 +621,9 @@ export function ChatThread({
   const [menuIndex, setMenuIndex] = useState(0);
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
-  const suggestions = menuDismissed ? [] : suggestCommands(input);
+  const suggestions = menuDismissed
+    ? []
+    : suggestCommands(input).filter((c) => commands.includes(c));
 
   const confirm = useConfirm();
   /** `/memory`: the memory tool's notes about you, with a way to forget them. */
@@ -538,21 +742,38 @@ export function ChatThread({
     ],
   );
 
+  const { take: takeShots, ready: shotsReady, uploading: shotsUploading } = screenshots;
   const submit = useCallback(() => {
     const parsed = parseInput(input);
     if (parsed.kind === "message") {
-      if (!parsed.text) return;
+      if (!parsed.text && shotsReady === 0) return;
+      // Kept in the box while an answer is being written: Stop first.
+      if (sending) return;
+      if (shotsUploading) {
+        toast("Wait for the screenshots to finish uploading, then send.");
+        return;
+      }
       setInput("");
-      void sendText(parsed.text);
+      void sendText(parsed.text, takeShots());
       return;
     }
-    if (parsed.kind === "unknown") {
+    if (parsed.kind === "unknown" || !commands.some((c) => c.name === parsed.name)) {
       toast(`Unknown command /${parsed.name}. Type /help to see them all.`);
       return;
     }
     setInput("");
     runCommand(parsed.name, parsed.arg);
-  }, [input, sendText, runCommand, toast]);
+  }, [
+    input,
+    sendText,
+    runCommand,
+    toast,
+    commands,
+    sending,
+    shotsReady,
+    shotsUploading,
+    takeShots,
+  ]);
 
   const pick = (cmd: SlashCommand) => {
     if (cmd.needsArg) {
@@ -582,9 +803,17 @@ export function ChatThread({
     el.style.height = `${Math.min(el.scrollHeight, 192)}px`;
   }, [input]);
 
+  const canRate = feedbackOn && !readOnly;
+  const secretHint = looksLikeSecret(input);
+  const lastAnswer = [...messages].reverse().find((m) => m.role === "assistant")?.id;
   const turns = messages.map((m) =>
     m.role === "user" ? (
-      <UserTurn key={m.id} text={m.content} />
+      <UserTurn
+        key={m.id}
+        text={m.content}
+        conversationId={conversationId}
+        imageIds={imageIds(m.blocks)}
+      />
     ) : m.role === "assistant" ? (
       <AssistantTurn
         key={m.id}
@@ -592,7 +821,37 @@ export function ChatThread({
         text={m.content}
         blocks={m.blocks}
         assistantId={assistantId}
-        run={{ conversationId, messageId: m.id }}
+        // Run details are the Studio's (Phase 8.1): not for an employee.
+        run={employee ? undefined : { conversationId, messageId: m.id }}
+        footer={
+          canRate ? (
+            <div className="flex flex-col gap-3">
+              <AnswerFeedback
+                value={rated[m.id]}
+                onChange={async (next) => {
+                  const saved = await conversations.rate(
+                    conversationId,
+                    m.id,
+                    next.rating,
+                    next.comment,
+                  );
+                  setRated((r) => ({
+                    ...r,
+                    [m.id]: { rating: saved.rating ?? null, comment: saved.comment ?? "" },
+                  }));
+                }}
+              />
+              {m.id === lastAnswer && !sending && (
+                <SolvedPrompt
+                  value={solved}
+                  onChange={async (yes) => {
+                    setSolved((await conversations.solve(conversationId, yes)).solved);
+                  }}
+                />
+              )}
+            </div>
+          ) : undefined
+        }
       />
     ) : (
       // A system or tool message: shown exactly as stored, never as Markdown.
@@ -609,7 +868,8 @@ export function ChatThread({
         <h1 className="text-h3 min-w-0 flex-1 truncate font-semibold" title={title}>
           {title}
         </h1>
-        {spend && (
+        {headerTrailing}
+        {spend && !employee && (
           <dl
             className="text-small flex shrink-0 items-baseline gap-4"
             aria-label="Conversation spend"
@@ -651,8 +911,22 @@ export function ChatThread({
               </Button>
             </div>
           )}
+          {messages.length === 0 && !live && !readOnly && starters.length > 0 && (
+            <div className="flex flex-col gap-2">
+              <p className="text-small text-muted-foreground">Try asking</p>
+              <div className="flex flex-wrap gap-2">
+                {starters.map((s) => (
+                  <Button key={s} variant="outline" size="sm" onClick={() => void sendText(s)}>
+                    {s}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          )}
           {turns}
-          {pendingUser && <UserTurn text={pendingUser} />}
+          {pendingUser !== null && (
+            <UserTurn text={pendingUser} conversationId={conversationId} previews={pendingShots} />
+          )}
           {live && (
             <AssistantTurn
               name={who}
@@ -664,14 +938,16 @@ export function ChatThread({
               assistantId={assistantId}
             />
           )}
-          {pending.map((a) => (
+          {requests.map((r) => (
             <ApprovalCard
-              key={a.approval_id}
-              approval={a}
-              onDecided={() => setPending((p) => p.filter((x) => x.approval_id !== a.approval_id))}
+              key={`${r.id}:${r.status}:${r.input_sha256 ?? ""}`}
+              request={r}
+              mine={r.requested_by === me}
+              employee={employee}
+              onChanged={() => void loadRequests()}
               onGone={(reason) => {
-                setPending((p) => p.filter((x) => x.approval_id !== a.approval_id));
-                toast(`This approval is already closed. ${asSentence(reason)}`);
+                toast(`This request has moved on. ${asSentence(reason)}`);
+                void loadRequests();
               }}
             />
           ))}
@@ -688,12 +964,42 @@ export function ChatThread({
               onRetry={
                 failure?.retryable && !sending
                   ? () => {
-                      const last = [...messages].reverse().find((m) => m.role === "user");
-                      if (last) void sendText(last.content);
+                      // The message that failed (Phase 8.6), which may be
+                      // back in the box; else the last one kept.
+                      const text =
+                        lastAttempt.current ??
+                        [...messages].reverse().find((m) => m.role === "user")?.content;
+                      if (!text) return;
+                      setInput((box) => (box === text ? "" : box));
+                      void sendText(text);
+                    }
+                  : undefined
+              }
+              onReload={
+                lost && !sending
+                  ? () => {
+                      setError(null);
+                      setLost(false);
+                      void loadMessages().then((turnId) => {
+                        if (turnId) void watchRef.current(turnId);
+                      });
                     }
                   : undefined
               }
             />
+          )}
+          {newerVersion && !readOnly && onNewChat && (
+            <Alert tone="neutral" role="status" className="max-w-[68ch]">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                <p className="min-w-0 flex-1">
+                  This assistant has been updated. Start a new conversation to use the latest
+                  version.
+                </p>
+                <Button size="sm" variant="outline" onClick={onNewChat}>
+                  Start a new conversation
+                </Button>
+              </div>
+            </Alert>
           )}
         </div>
       </div>
@@ -702,7 +1008,7 @@ export function ChatThread({
         <div className="border-border bg-background shrink-0 border-t px-4 py-3 md:px-6">
           <div className="mx-auto flex w-full max-w-[72ch] flex-wrap items-center justify-between gap-x-4 gap-y-1">
             <p className="text-small text-muted-foreground">
-              Only the person who started this conversation can reply in it.
+              {readOnlyNote ?? "Only the person who started this conversation can reply in it."}
             </p>
             <p role="status">{sending ? <RunningBadge label="Answering…" /> : null}</p>
           </div>
@@ -770,7 +1076,7 @@ export function ChatThread({
                   </Button>
                 </div>
                 <dl className="grid gap-x-4 gap-y-1.5 sm:grid-cols-[auto_1fr]">
-                  {SLASH_COMMANDS.map((c) => (
+                  {commands.map((c) => (
                     <Fragment key={c.name}>
                       <dt className="text-code font-mono">
                         /{c.name}
@@ -789,7 +1095,12 @@ export function ChatThread({
             <label htmlFor={composerId} className="sr-only">
               Message {who}
             </label>
+            <ScreenshotTray shots={screenshots.shots} onRemove={screenshots.remove} />
             <div className="flex items-end gap-2">
+              <AttachButton
+                onFiles={screenshots.add}
+                disabled={screenshots.shots.length >= MAX_IMAGES}
+              />
               <textarea
                 ref={textareaRef}
                 id={composerId}
@@ -808,6 +1119,7 @@ export function ChatThread({
                   "block max-h-48 min-h-11 resize-none px-3 py-[11px] leading-[20px]",
                 )}
                 value={input}
+                onPaste={screenshots.onPaste}
                 onChange={(e) => {
                   setInput(e.target.value);
                   setMenuIndex(0);
@@ -861,10 +1173,19 @@ export function ChatThread({
                   size="lg"
                   className="px-5"
                   onClick={() => submit()}
-                  disabled={!input.trim()}
+                  disabled={(!input.trim() && shotsReady === 0) || shotsUploading}
                 >
                   Send
                 </Button>
+              )}
+            </div>
+            {/* Phase 9.6: a warning, not a block. The server hides it anyway. */}
+            <div aria-live="polite">
+              {secretHint && (
+                <p className="text-small text-muted-foreground mt-2 flex items-center gap-2">
+                  <Lamp tone="warning" />
+                  This looks like a password or key. It will be hidden before it&apos;s sent.
+                </p>
               )}
             </div>
             <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
@@ -872,13 +1193,16 @@ export function ChatThread({
                 with its text is often not read out. */}
               <p role="status">
                 {sending ? (
-                  <RunningBadge label={stopping ? "Stopping…" : "Answering…"} />
+                  <RunningBadge
+                    label={stopping ? "Stopping…" : reconnecting ? "Reconnecting…" : "Answering…"}
+                  />
                 ) : finished ? (
                   <span className="sr-only">{finished}</span>
                 ) : null}
               </p>
               <p id={hintId} className="text-small text-muted-foreground">
-                Enter sends. Shift+Enter adds a line. Type / for commands.
+                Enter sends. Shift+Enter adds a line. Type / for commands. Paste a screenshot to
+                attach it.
               </p>
             </div>
           </div>
@@ -889,14 +1213,29 @@ export function ChatThread({
 }
 
 /** Your own message, exactly as typed (never rendered as Markdown), on a
- *  muted plate at the right. */
-function UserTurn({ text }: { text: string }) {
+ *  muted plate at the right, with any screenshots sent with it above. */
+function UserTurn({
+  text,
+  conversationId,
+  imageIds: ids,
+  previews,
+}: {
+  text: string;
+  conversationId: string;
+  /** Saved screenshots, by attachment id (Phase 9.6). */
+  imageIds?: string[];
+  /** Screenshots just sent, as local previews. */
+  previews?: string[];
+}) {
   return (
-    <article className="flex flex-col items-end">
+    <article className="flex flex-col items-end gap-2">
       <h2 className="sr-only">You</h2>
-      <div className="bg-muted text-foreground max-w-[85%] rounded-lg px-4 py-2.5 break-words whitespace-pre-wrap">
-        {text}
-      </div>
+      <MessageImages conversationId={conversationId} ids={ids} previews={previews} />
+      {text && (
+        <div className="bg-muted text-foreground max-w-[85%] rounded-lg px-4 py-2.5 break-words whitespace-pre-wrap">
+          {text}
+        </div>
+      )}
     </article>
   );
 }
@@ -913,7 +1252,10 @@ function AssistantTurn({
   assistantId,
   run,
   working = false,
+  footer,
 }: {
+  /** Under a saved answer: its thumbs (Phase 8.8). */
+  footer?: ReactNode;
   name: string;
   text: string;
   /** A live turn's calls; saved ones come from `blocks`. */
@@ -955,30 +1297,51 @@ function AssistantTurn({
         />
       )}
       {run && <RunDetails conversationId={run.conversationId} messageId={run.messageId} />}
+      {footer}
     </article>
   );
 }
 
+/** A failed turn's code, whether sending again may work, and how long to
+ *  wait first (Phase 8.6). */
+type Failure = { code: string; retryable: boolean; retryAfter?: number | null };
+
 /** How a turn that didn't finish normally is shown: a refusal is the model
  *  declining, not an error, and a failure that may pass on its own offers
- *  to send the message again. */
+ *  to send the message again, once it is worth it (a countdown when the
+ *  server says how long). A lost connection offers to reload instead:
+ *  sending again would ask twice. */
 function TurnError({
   message,
   failure,
   onRetry,
+  onReload,
 }: {
   message: string;
-  failure: { code: string; retryable: boolean } | null;
+  failure: Failure | null;
   onRetry?: () => void;
+  onReload?: () => void;
 }) {
   const refused = failure?.code === "refused";
+  const [wait, setWait] = useState(failure?.retryAfter ?? 0);
+  useEffect(() => setWait(failure?.retryAfter ?? 0), [failure]);
+  useEffect(() => {
+    if (wait <= 0) return;
+    const t = setTimeout(() => setWait((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [wait]);
   return (
     <Alert tone={refused ? "neutral" : "destructive"} className="max-w-[68ch]">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <p className="min-w-0 flex-1">{message}</p>
+        {onReload && (
+          <Button size="sm" variant="outline" onClick={onReload}>
+            Reload conversation
+          </Button>
+        )}
         {onRetry && (
-          <Button size="sm" variant="outline" onClick={onRetry}>
-            Try again
+          <Button size="sm" variant="outline" onClick={onRetry} disabled={wait > 0}>
+            {wait > 0 ? `Try again in ${wait}s` : "Try again"}
           </Button>
         )}
       </div>

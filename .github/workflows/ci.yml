@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Nightly, for the retrieval tier: it downloads the local models, so it
+  # stays off pull requests (Phase 7b.9).
+  schedule:
+    - cron: "30 21 * * *"
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -65,6 +70,113 @@ jobs:
           pip install pip-audit
           pip-audit --progress-spinner off
 
+  # The integration tier (Phase 7b.9): until now it ran only in
+  # scripts/check.ps1 at the end of a phase, so the Postgres-only SQL
+  # (pgvector, full-text, the audit trigger) and the Redis paths (approvals
+  # across processes, turns, rate limits) went untested on every pull
+  # request. The datastores are the repo's own compose services, with the
+  # same ports and credentials as development. REQUIRE_INTEGRATION turns a
+  # test that can't reach one into a failure, not a quiet skip.
+  api-integration:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    env:
+      APP_ENV: test
+      JWT_SECRET: ci-secret-value-that-is-definitely-long-enough
+      INTEGRATION_DATABASE_URL: postgresql+asyncpg://app:app@localhost:45432/app
+      REDIS_URL: redis://localhost:46379/0
+      REQUIRE_INTEGRATION: postgres,redis,mysql,mongodb
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the datastores
+        working-directory: .
+        # MinIO comes up through its bucket job: `run` waits on the
+        # one-shot owner fix and the health check, where `up --wait` would
+        # count the finished one-shot as a failure.
+        run: |
+          docker compose --profile datastores up -d --wait postgres redis mysql mongo
+          docker compose run --rm minio-init
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install -c constraints.txt -e ".[dev,observability]" --extra-index-url https://download.pytorch.org/whl/cpu
+
+      # The Postgres side of the models-vs-migrations check: only here do
+      # the pgvector HNSW and GIN indexes exist.
+      - name: Migrate Postgres, and check the models agree
+        env:
+          DATABASE_URL: postgresql+asyncpg://app:app@localhost:45432/app
+        run: |
+          python -m alembic upgrade head
+          python -m alembic check
+
+      - name: Pytest (integration)
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///./ci-integration.db
+        run: pytest -q -m "integration and not local_models"
+
+      - name: Datastore logs
+        if: failure()
+        working-directory: .
+        run: docker compose --profile datastores logs --tail 80 postgres redis minio mysql mongo
+
+  # Retrieval with the real local embedder and reranker: permission-filtered
+  # search lives in this SQL, and a stand-in model can't show it ranks the
+  # right chunk. Nightly and on main, with the models cached between runs.
+  api-retrieval:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    env:
+      APP_ENV: test
+      JWT_SECRET: ci-secret-value-that-is-definitely-long-enough
+      INTEGRATION_DATABASE_URL: postgresql+asyncpg://app:app@localhost:45432/app
+      REDIS_URL: redis://localhost:46379/0
+      REQUIRE_INTEGRATION: postgres,models
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the datastores
+        working-directory: .
+        run: |
+          docker compose up -d --wait postgres redis
+          docker compose run --rm minio-init
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install -c constraints.txt -e ".[dev,observability]" --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Cache the local models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-${{ hashFiles('apps/api/app/rag/embedders/local_bge.py', 'apps/api/app/rag/rerankers/local.py') }}
+
+      - name: Migrate Postgres
+        env:
+          DATABASE_URL: postgresql+asyncpg://app:app@localhost:45432/app
+        run: python -m alembic upgrade head
+
+      - name: Pytest (retrieval, local models)
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///./ci-retrieval.db
+        run: pytest -q -m local_models
+
   web:
     runs-on: ubuntu-latest
     steps:
@@ -105,6 +217,53 @@ jobs:
 
       - name: npm audit (high)
         run: npm audit --audit-level=high
+
+  # The employee flows in a real browser (Phase 8.11): the checks that only
+  # show in a page. Playwright starts its own API (SQLite, the fake driver)
+  # and web app, and seeds them; nothing here spends.
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install the API
+        working-directory: apps/api
+        run: |
+          python -m venv ../../.venv
+          ../../.venv/bin/python -m pip install -U pip
+          ../../.venv/bin/pip install -c constraints.txt -e ".[dev]" --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: apps/web
+
+      - name: Browser tests
+        run: npm run e2e -w web
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          E2E_REDIS_URL: redis://127.0.0.1:6379/15
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report
+          retention-days: 7
 
   # The images were never built by anything, so a broken Dockerfile could sit
   # undetected until someone tried to deploy. Build all three, then prove each
@@ -148,6 +307,35 @@ jobs:
           push: false
           cache-from: type=gha,scope=mcp-runner
           cache-to: type=gha,mode=max,scope=mcp-runner
+
+      # The proxy for an internal install (Phase 8.2): Caddy with the DNS
+      # plugins. Built here so a plugin that stops building is seen before
+      # an operator's monthly rebuild.
+      - name: Build the proxy image
+        uses: docker/build-push-action@v6
+        with:
+          context: deploy/proxy
+          file: deploy/proxy/caddy.Dockerfile
+          tags: assistant-studio-proxy:ci
+          load: true
+          push: false
+          cache-from: type=gha,scope=proxy
+          cache-to: type=gha,mode=max,scope=proxy
+
+      # Each way of getting a certificate must at least parse: a typo in a
+      # snippet only one TLS_MODE uses would otherwise wait for that install.
+      - name: The Caddyfile parses in every TLS mode
+        run: |
+          for mode in public local cloudflare acmedns; do
+            docker run --rm \
+              -e SITE_ADDRESS=assistant.example.com -e S3_BUCKET=assistant-uploads \
+              -e TLS_MODE=$mode -e CLOUDFLARE_API_TOKEN=ci-token \
+              -e ACMEDNS_USERNAME=ci -e ACMEDNS_PASSWORD=ci -e ACMEDNS_SUBDOMAIN=ci \
+              -e ACMEDNS_SERVER_URL=https://auth.acme-dns.io \
+              -v "$PWD/deploy/proxy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+              assistant-studio-proxy:ci \
+              caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || exit 1
+          done
 
       # Run it the way docker-compose.yml does (internal-only network,
       # read-only, no capabilities, no privilege escalation) and prove, from

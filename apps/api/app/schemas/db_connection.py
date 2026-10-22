@@ -74,6 +74,9 @@ class DbPermissions(ApiModel):
     deny_tables: list[str] = Field(default_factory=list)
     row_limit: int = Field(default=500, ge=1, le=10_000)
     statement_timeout_ms: int = Field(default=10_000, ge=100, le=120_000)
+    #: Phase 9.3 (Postgres only): each statement runs with the asker's email
+    #: set as `app.asker_email`, for the database's row-level security.
+    scope_to_asker: bool = False
 
     @model_validator(mode="after")
     def _ddl_implies_write(self) -> DbPermissions:
@@ -168,6 +171,9 @@ class DbTestResult(ApiModel):
     ok: bool
     error: str | None = None
     elapsed_ms: int = 0
+    #: For a connection scoped to the asker (Phase 9.3): what row-level
+    #: security won't filter, in words.
+    warnings: list[str] = Field(default_factory=list)
 
 
 class DbColumnOut(ApiModel):

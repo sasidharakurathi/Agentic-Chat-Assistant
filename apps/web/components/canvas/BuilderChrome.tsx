@@ -13,6 +13,7 @@ import { Loading } from "@/components/ui/loading";
 import { BackLink } from "@/components/ui/page-header";
 import { SectionHeading } from "@/components/ui/section-heading";
 import { Tabs, tabPanelProps, type TabOption } from "@/components/ui/tabs";
+import { ASSISTANT_STATUS_WORD, type AssistantStatus } from "@/lib/assistant-lifecycle";
 import { cn } from "@/lib/utils";
 
 /** The builder's layout pieces (docs/DESIGN.md section 7). They live here,
@@ -34,7 +35,11 @@ export function BuilderLoading() {
   );
 }
 
-const STATUS_WORD: Record<string, string> = { published: "Published", draft: "Draft" };
+const STATUS_TONE: Record<AssistantStatus, "success" | "warning" | "muted"> = {
+  published: "success",
+  archived: "warning",
+  draft: "muted",
+};
 
 /** Two rows plus tabs: the back link; the name, its status, the save state
  *  (announced), the problem count, Chat and Publish; then the tab strip,
@@ -59,7 +64,7 @@ export function BuilderHeader<T extends string>({
   tabOptions,
 }: {
   name: string;
-  status: string;
+  status: AssistantStatus;
   /** "Saving…", "Saved", "Not saved" or nothing yet. */
   saveText: string;
   saveFailed: boolean;
@@ -109,9 +114,7 @@ export function BuilderHeader<T extends string>({
           <h1 className="font-condensed text-h1 min-w-0 truncate font-semibold" title={name}>
             {name}
           </h1>
-          <Badge variant={status === "published" ? "success" : "muted"}>
-            {STATUS_WORD[status] ?? status}
-          </Badge>
+          <Badge variant={STATUS_TONE[status]}>{ASSISTANT_STATUS_WORD[status]}</Badge>
           <span
             role="status"
             aria-live="polite"
@@ -136,10 +139,12 @@ export function BuilderHeader<T extends string>({
               {problemSummary(errors, warnings)}
             </Button>
           )}
+          {/* The builder's test chat on the draft (Phase 7b.1): Chat itself
+              answers only from the approved version. */}
           <Link href={chatHref} className={buttonVariants({ variant: "outline", size: "sm" })}>
-            Chat
+            Preview
           </Link>
-          {/* Blocked, Publish stays focusable so it can say why. */}
+          {/* Blocked, Submit stays focusable so it can say why. */}
           <span className="group relative inline-flex">
             <Button
               type="button"
@@ -150,7 +155,7 @@ export function BuilderHeader<T extends string>({
               aria-describedby={blocked ? `${problemsId}-publish` : undefined}
               className={cn(blocked && "hover:bg-primary cursor-not-allowed opacity-50")}
             >
-              Publish
+              Submit for review
             </Button>
             {blocked && (
               <span
@@ -248,6 +253,8 @@ export function CanvasStage({
   trace,
   problems,
   drawer,
+  trafficToggle,
+  trafficSummary,
 }: {
   tabsId: string;
   canvas: ReactNode;
@@ -259,6 +266,10 @@ export function CanvasStage({
   trace: ReactNode;
   problems: ReactNode;
   drawer: ReactNode;
+  /** The Traffic switch, beside Tidy up, and what it adds up to while on
+   *  (Phase 10.2). */
+  trafficToggle?: ReactNode;
+  trafficSummary?: ReactNode;
 }) {
   return (
     <div
@@ -290,16 +301,20 @@ export function CanvasStage({
             640px it starts under the Add capability button, and steps aside
             while the palette is open, which needs the width. */}
         <div className="pointer-events-none absolute top-3 right-3 bottom-3 z-10 flex w-[min(20rem,calc(100%-1.5rem))] flex-col items-end gap-2 max-sm:top-14 max-sm:bottom-32 max-sm:group-has-[[data-palette-open]]/stage:hidden">
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="shadow-float pointer-events-auto shrink-0"
-            title="Arrange every node into columns by type, with the main line on one row"
-            onClick={onTidy}
-          >
-            Tidy up
-          </Button>
+          <div className="flex shrink-0 gap-2">
+            {trafficToggle}
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="shadow-float pointer-events-auto shrink-0"
+              title="Arrange every node into columns by type, with the main line on one row"
+              onClick={onTidy}
+            >
+              Tidy up
+            </Button>
+          </div>
+          {trafficSummary}
           {traceError && (
             <Alert className="shadow-float pointer-events-auto w-full shrink-0">
               <p>{traceError}</p>

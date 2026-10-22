@@ -23,13 +23,19 @@ from app.api.errors import BadRequest, Forbidden, NotFound, Unauthorized
 from app.config import settings
 from app.db.session import get_session
 from app.db.tenancy import bind_org
-from app.models.assistant import Assistant
+from app.models.assistant import Assistant, AssistantStatus
 from app.models.conversation import Conversation
 from app.models.enums import MemberRole
 from app.models.membership import Membership
 from app.models.user import User
-from app.security.access import member_of
+from app.security.access import (
+    can_edit_assistant,
+    can_manage_editors,
+    member_of,
+    strong_session,
+)
 from app.security.tokens import TokenError, decode_access_token
+from app.services import conversation_reads
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -77,8 +83,18 @@ async def get_current_user(
     user = await session.get(User, claims.user_id)
     if user is None or not user.is_active:
         raise Unauthorized("User not found or inactive", code="invalid_token")
+    # Issued before the password last changed (Phase 7b.6): that change ended
+    # every session, this token's included.
+    if (
+        user.password_changed_at is not None
+        and claims.issued_at is not None
+        and claims.issued_at < user.password_changed_at
+    ):
+        raise Unauthorized("Your password changed: sign in again", code="session_ended")
     # For the access log line (Phase 7a.8): who made the request.
     request.state.user_id = str(user.id)
+    # Whether admin powers are open in this request (Phase 8.4).
+    strong_session.set(claims.strong)
     await ratelimit.enforce("user", str(user.id), settings.rate_limit_user)
     return user
 
@@ -100,7 +116,13 @@ def per_ip_limit(bucket: str, setting: str) -> Any:
     """The same, per client IP: for routes used before anyone is signed in."""
 
     async def _limit(request: Request) -> None:
-        await ratelimit.enforce(bucket, ratelimit.client_ip(request), getattr(settings, setting))
+        ip = ratelimit.client_ip(request)
+        spec = getattr(settings, setting)
+        if bucket == "auth":
+            # An office or VPN range gets a higher ceiling (Phase 8.4);
+            # per-person limits still hold behind it.
+            spec = ratelimit.per_address(ip, spec, settings.rate_limit_auth_internal)
+        await ratelimit.enforce(bucket, ip, spec)
 
     return Depends(_limit)
 
@@ -148,6 +170,24 @@ async def active_membership(
 ActiveMembership = Annotated[Membership, Depends(active_membership)]
 
 
+async def chat_membership(
+    session: SessionDep,
+    user: CurrentUser,
+    x_org_id: Annotated[uuid.UUID | None, Header()] = None,
+) -> Membership:
+    """The active org for a Chat route: employees too (Phase 8.1)."""
+    if x_org_id is None:
+        raise BadRequest("Missing X-Org-Id header", code="org_required")
+    membership = await member_of(
+        session, x_org_id, user.id, missing="Organization not found", chat=True
+    )
+    bind_org(session, x_org_id)
+    return membership
+
+
+ChatMembership = Annotated[Membership, Depends(chat_membership)]
+
+
 # ── Assistant context (loads the assistant + the caller's membership) ─
 
 
@@ -155,13 +195,37 @@ ActiveMembership = Annotated[Membership, Depends(active_membership)]
 class AssistantContext:
     assistant: Assistant
     membership: Membership
+    #: Admin, creator or co-editor (`access.can_edit_assistant`), worked out
+    #: when the context is loaded.
+    can_edit: bool = False
 
-    @property
-    def can_edit(self) -> bool:
-        return self.membership.role.satisfies(MemberRole.admin) or (
-            self.assistant.created_by is not None
-            and self.assistant.created_by == self.membership.user_id
-        )
+
+async def _assistant_context(
+    session: AsyncSession, user: User, assistant_id: uuid.UUID, *, chat: bool
+) -> AssistantContext:
+    assistant = await session.get(Assistant, assistant_id)
+    if assistant is None:
+        raise NotFound("Assistant not found")
+    # Not found for outsiders: don't leak cross-tenant existence.
+    membership = await member_of(
+        session, assistant.org_id, user.id, missing="Assistant not found", chat=chat
+    )
+    if membership.role is MemberRole.employee and assistant.status is not AssistantStatus.published:
+        # An employee sees only what answers in Chat: a draft or a paused
+        # assistant is not there for them (Phase 8.1).
+        raise NotFound("Assistant not found")
+    if chat:
+        from app.services import listing
+
+        if not await listing.can_see(session, assistant, membership):
+            # Not in its audience (Phase 8.5): not there for them either.
+            raise NotFound("Assistant not found")
+    bind_org(session, assistant.org_id)
+    return AssistantContext(
+        assistant=assistant,
+        membership=membership,
+        can_edit=await can_edit_assistant(session, assistant, membership),
+    )
 
 
 async def get_assistant_context(
@@ -169,16 +233,23 @@ async def get_assistant_context(
     user: CurrentUser,
     assistant_id: Annotated[uuid.UUID, Path()],
 ) -> AssistantContext:
-    assistant = await session.get(Assistant, assistant_id)
-    if assistant is None:
-        raise NotFound("Assistant not found")
-    # Not found for outsiders: don't leak cross-tenant existence.
-    membership = await member_of(session, assistant.org_id, user.id, missing="Assistant not found")
-    bind_org(session, assistant.org_id)
-    return AssistantContext(assistant=assistant, membership=membership)
+    return await _assistant_context(session, user, assistant_id, chat=False)
 
 
 AssistantCtx = Annotated[AssistantContext, Depends(get_assistant_context)]
+
+
+async def get_chat_assistant_context(
+    session: SessionDep,
+    user: CurrentUser,
+    assistant_id: Annotated[uuid.UUID, Path()],
+) -> AssistantContext:
+    """An assistant for a Chat route: employees too, and only one that
+    answers in Chat (Phase 8.1)."""
+    return await _assistant_context(session, user, assistant_id, chat=True)
+
+
+ChatAssistantCtx = Annotated[AssistantContext, Depends(get_chat_assistant_context)]
 
 
 async def require_assistant_editor(ctx: AssistantCtx) -> AssistantContext:
@@ -193,6 +264,31 @@ async def require_assistant_editor(ctx: AssistantCtx) -> AssistantContext:
 EditableAssistantCtx = Annotated[AssistantContext, Depends(require_assistant_editor)]
 
 
+async def require_assistant_admin(ctx: AssistantCtx) -> AssistantContext:
+    """Reviewing versions, rolling back, pausing (Phase 7b.1): admins and the
+    owner. Being the assistant's creator is not enough: that is the person
+    whose work is being reviewed."""
+    if not ctx.membership.role.satisfies(MemberRole.admin):
+        raise Forbidden("Requires admin role or higher", code="insufficient_role")
+    return ctx
+
+
+AdminAssistantCtx = Annotated[AssistantContext, Depends(require_assistant_admin)]
+
+
+async def require_assistant_owner(ctx: AssistantCtx) -> AssistantContext:
+    """Naming co-editors (Phase 7b.4): the creator or an admin."""
+    if not can_manage_editors(ctx.assistant, ctx.membership):
+        raise Forbidden(
+            "Only the assistant's creator or an admin can choose who edits it",
+            code="not_assistant_owner",
+        )
+    return ctx
+
+
+OwnerAssistantCtx = Annotated[AssistantContext, Depends(require_assistant_owner)]
+
+
 # ── Conversation context ─────────────────────────────────────
 
 
@@ -201,6 +297,30 @@ class ConversationContext:
     conversation: Conversation
     assistant: Assistant
     membership: Membership
+    #: The same rule as `AssistantContext.can_edit`: a preview may only go
+    #: on answering someone who may still preview (Phase 7b.1).
+    can_edit_assistant: bool = False
+
+
+async def _conversation_context(
+    session: AsyncSession, user: User, conversation_id: uuid.UUID, *, chat: bool
+) -> ConversationContext:
+    conv = await session.get(Conversation, conversation_id)
+    if conv is None:
+        raise NotFound("Conversation not found")
+    membership = await member_of(
+        session, conv.org_id, user.id, missing="Conversation not found", chat=chat
+    )
+    assistant = await session.get(Assistant, conv.assistant_id)
+    if assistant is None:
+        raise NotFound("Conversation not found")
+    bind_org(session, conv.org_id)
+    return ConversationContext(
+        conversation=conv,
+        assistant=assistant,
+        membership=membership,
+        can_edit_assistant=await can_edit_assistant(session, assistant, membership),
+    )
 
 
 async def get_conversation_context(
@@ -208,23 +328,109 @@ async def get_conversation_context(
     user: CurrentUser,
     conversation_id: Annotated[uuid.UUID, Path()],
 ) -> ConversationContext:
-    conv = await session.get(Conversation, conversation_id)
-    if conv is None:
-        raise NotFound("Conversation not found")
-    membership = await member_of(session, conv.org_id, user.id, missing="Conversation not found")
-    assistant = await session.get(Assistant, conv.assistant_id)
-    if assistant is None:
-        raise NotFound("Conversation not found")
-    bind_org(session, conv.org_id)
-    return ConversationContext(conversation=conv, assistant=assistant, membership=membership)
+    return await _conversation_context(session, user, conversation_id, chat=False)
 
 
 ConversationCtx = Annotated[ConversationContext, Depends(get_conversation_context)]
 
 
+async def get_chat_conversation_context(
+    session: SessionDep,
+    user: CurrentUser,
+    conversation_id: Annotated[uuid.UUID, Path()],
+) -> ConversationContext:
+    """A conversation for a Chat route: employees too (Phase 8.1)."""
+    return await _conversation_context(session, user, conversation_id, chat=True)
+
+
+ChatConversationCtx = Annotated[ConversationContext, Depends(get_chat_conversation_context)]
+
+
+async def require_conversation_reader(
+    ctx: ConversationCtx,
+    user: CurrentUser,
+    session: SessionDep,
+    ip: ClientIP,
+    x_read_reason: Annotated[
+        str | None,
+        Header(
+            alias=conversation_reads.HEADER,
+            description="Why an admin is opening someone else's conversation (URL-encoded).",
+        ),
+    ] = None,
+) -> ConversationContext:
+    """Reading a conversation's content (Phase 7b.2, plan D5): the person
+    who started it; or an admin or the owner, who says why, and whose read
+    is recorded and committed before anything is returned. Nobody else: a
+    conversation is private between employees.
+
+    Every route that returns a conversation's messages, runs, approvals or
+    live answer depends on this; `tests/test_conversation_privacy.py` walks
+    the routes to hold that."""
+    return await _admit_reader(ctx, user, session, ip, x_read_reason)
+
+
+async def _admit_reader(
+    ctx: ConversationContext,
+    user: User,
+    session: AsyncSession,
+    ip: str | None,
+    x_read_reason: str | None,
+) -> ConversationContext:
+    conv = ctx.conversation
+    if conv.created_by is not None and conv.created_by == user.id:
+        return ctx
+    if not ctx.membership.role.satisfies(MemberRole.admin):
+        raise Forbidden(
+            "Only the person who started this conversation can open it",
+            code="not_conversation_owner",
+        )
+    reason = conversation_reads.parse_reason(x_read_reason)
+    if not reason:
+        raise Forbidden(
+            "Say why you are opening someone else's conversation: an admin's read is "
+            "recorded with its reason",
+            code="read_reason_required",
+        )
+    await conversation_reads.record(
+        session, conversation=conv, reader=user, membership=ctx.membership, reason=reason, ip=ip
+    )
+    return ctx
+
+
+ReadableConversationCtx = Annotated[ConversationContext, Depends(require_conversation_reader)]
+
+
+async def require_chat_conversation_reader(
+    ctx: ChatConversationCtx,
+    user: CurrentUser,
+    session: SessionDep,
+    ip: ClientIP,
+    x_read_reason: Annotated[
+        str | None,
+        Header(
+            alias=conversation_reads.HEADER,
+            description="Why an admin is opening someone else's conversation (URL-encoded).",
+        ),
+    ] = None,
+) -> ConversationContext:
+    """`require_conversation_reader` for a Chat route: employees read their
+    own conversations (Phase 8.1); the rule is the same one."""
+    return await _admit_reader(ctx, user, session, ip, x_read_reason)
+
+
+ChatReadableConversationCtx = Annotated[
+    ConversationContext, Depends(require_chat_conversation_reader)
+]
+
+
 async def require_conversation_starter(
     ctx: ConversationCtx, user: CurrentUser
 ) -> ConversationContext:
+    return _admit_starter(ctx, user)
+
+
+def _admit_starter(ctx: ConversationContext, user: User) -> ConversationContext:
     """Posting into a conversation, stopping its answer, renaming or
     archiving it: only the person who started it.
 
@@ -247,10 +453,28 @@ async def require_conversation_starter(
 ConversationStarterCtx = Annotated[ConversationContext, Depends(require_conversation_starter)]
 
 
+async def require_chat_conversation_starter(
+    ctx: ChatConversationCtx, user: CurrentUser
+) -> ConversationContext:
+    """`require_conversation_starter` for a Chat route (Phase 8.1)."""
+    return _admit_starter(ctx, user)
+
+
+ChatConversationStarterCtx = Annotated[
+    ConversationContext, Depends(require_chat_conversation_starter)
+]
+
+
 __all__ = [
     "ActiveMembership",
+    "AdminAssistantCtx",
     "AssistantContext",
     "AssistantCtx",
+    "ChatAssistantCtx",
+    "ChatConversationCtx",
+    "ChatConversationStarterCtx",
+    "ChatMembership",
+    "ChatReadableConversationCtx",
     "ClientIP",
     "ConversationContext",
     "ConversationCtx",
@@ -258,8 +482,10 @@ __all__ = [
     "CurrentUser",
     "EditableAssistantCtx",
     "OrgMembership",
+    "OwnerAssistantCtx",
     "PageParams",
     "PageQuery",
+    "ReadableConversationCtx",
     "SessionDep",
     "active_membership",
     "client_ip",
@@ -270,6 +496,7 @@ __all__ = [
     "per_ip_limit",
     "per_user_limit",
     "require_assistant_editor",
+    "require_conversation_reader",
     "require_conversation_starter",
     "require_role",
 ]

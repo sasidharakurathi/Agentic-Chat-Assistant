@@ -4,6 +4,7 @@
  */
 
 import { createAuthedFetch, createRefresher } from "@/lib/session";
+import { readReasonHeaders } from "@/lib/read-reasons";
 import type { Schemas } from "@assistant-studio/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -83,7 +84,9 @@ export const orgStore = {
   },
 };
 
-type Opts = { method?: string; body?: unknown; auth?: boolean; org?: boolean };
+/** `orgId`: ask in this organisation rather than the active one (a link
+ *  that names a record in another, Phase 8.6). */
+type Opts = { method?: string; body?: unknown; auth?: boolean; org?: boolean; orgId?: string };
 
 /** One page of a list endpoint. Every list is paginated by an opaque
  *  cursor: pass `next_cursor` back to get the next page; `null` = done. */
@@ -132,10 +135,13 @@ const authedFetch = createAuthedFetch({
 
 async function request<T>(path: string, opts: Opts = {}): Promise<T> {
   const build = (token: string | null): RequestInit => {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...readReasonHeaders(path),
+    };
     if (opts.auth !== false && token) headers.Authorization = `Bearer ${token}`;
     if (opts.org !== false) {
-      const org = orgStore.get();
+      const org = opts.orgId ?? orgStore.get();
       if (org) headers["X-Org-Id"] = org;
     }
     return {
@@ -169,8 +175,39 @@ async function request<T>(path: string, opts: Opts = {}): Promise<T> {
 type S = Schemas;
 
 export type TokenPair = S["TokenPair"];
+export type LoginOut = S["LoginOut"];
+export type TwoFactorStatus = S["TwoFactorStatus"];
+
+/** Two-step sign-in, for the signed-in person (Phase 8.4). */
+export const twoFactor = {
+  status: () => request<TwoFactorStatus>("/api/v1/auth/two-factor", { org: false }),
+  setup: () =>
+    request<S["TwoFactorSetupOut"]>("/api/v1/auth/two-factor/setup", {
+      method: "POST",
+      org: false,
+    }),
+  confirm: (code: string) =>
+    request<S["TwoFactorConfirmed"]>("/api/v1/auth/two-factor/confirm", {
+      body: { code },
+      org: false,
+    }),
+  verify: (code: string) =>
+    request<TokenPair>("/api/v1/auth/two-factor/verify", { body: { code }, org: false }),
+  recoveryCodes: (code: string) =>
+    request<S["RecoveryCodesOut"]>("/api/v1/auth/two-factor/recovery-codes", {
+      body: { code },
+      org: false,
+    }),
+  disable: (code: string) =>
+    request<{ message: string }>("/api/v1/auth/two-factor/disable", {
+      body: { code },
+      org: false,
+    }),
+};
 export type Me = S["MeResponse"];
 export type Org = S["OrgOut"];
+// Phase 9.7: the builder budget (hand-written until the types are regenerated).
+export type OrgSettings = S["OrgSettingsOut"] & { builder_monthly_usd?: number | null };
 
 export type GraphNode = {
   id: string;
@@ -208,20 +245,130 @@ export type VersionDiff = S["VersionDiff"];
 export type EvalSuite = S["EvalSuiteOut"];
 export type EvalSuiteDetail = S["EvalSuiteDetail"];
 export type EvalSuiteConfig = S["EvalSuiteConfig-Output"];
-export type EvalCase = S["EvalCaseOut"];
-export type EvalExpected = S["EvalExpected-Output"];
+// Phase 9.8: `follow_ups` (hand-written until the types are regenerated).
+export type EvalCase = S["EvalCaseOut"] & { follow_ups?: string[] };
+// Phase 10.4: `expects_approval` (hand-written until the types are regenerated).
+export type EvalExpected = S["EvalExpected-Output"] & { expects_approval?: boolean };
 export type EvalLabels = S["EvalLabels-Output"];
 /** A case as it is sent: every expectation is optional. */
 export type EvalCaseDraft = {
   input: string;
+  /** Sent after `input` in the same conversation (Phase 9.8). */
+  follow_ups?: string[];
   expected?: Partial<EvalExpected>;
   labels?: Partial<EvalLabels>;
 };
 export type EvalRun = S["EvalRunSummary"];
 export type EvalRunDetail = S["EvalRunDetail"];
-export type EvalCaseResult = S["EvalCaseResultOut"];
+/** One turn of a multi-turn case's result (Phase 9.8, hand-written). */
+export type EvalTurn = {
+  input: string;
+  output: string;
+  tools: string[];
+  error: string | null;
+  cost_usd: number;
+  duration_ms: number;
+  run_id: string | null;
+  trace_id: string | null;
+};
+export type EvalCaseResult = S["EvalCaseResultOut"] & { turns?: EvalTurn[] };
+
+// Approve on evidence (Phase 10.4). Hand-written until the types are
+// regenerated; mirrors app/schemas/approval_evidence.py.
+export type SuiteScore = {
+  suite_id: string;
+  suite_name: string;
+  run_id: string | null;
+  ran_on: "version" | "draft" | null;
+  finished_at: string | null;
+  cases: number;
+  passed: number;
+  failed: number;
+  errors: number;
+  pass_rate: number | null;
+  previous_pass_rate: number | null;
+  regressions: string[];
+};
+export type VersionEvidence = {
+  version_number: number;
+  compared_with: number | null;
+  scorecard: SuiteScore[];
+  safety: {
+    checked_calls: number;
+    writes_without_approval: number;
+    approval_requests: number;
+    approval_cases: number;
+    approval_cases_passed: number;
+    ok: boolean;
+    flagged: { tool: string; run_id: string; conversation_id: string }[];
+  };
+  cost: {
+    conversations_measured: number;
+    avg_cost_usd: number | null;
+    per_month: number;
+    mid_usd: number | null;
+    low_usd: number | null;
+    high_usd: number | null;
+    note: string;
+  };
+  notes: string[];
+};
 
 export type Conversation = S["ConversationSummary"];
+
+// ── Chat (Phase 8.1) ─────────────────────────────────────────
+//
+// What Chat shows, for every role the Employee role included: an assistant
+// as a card, your conversations, and (for admins) the requests waiting.
+
+export type ChatAssistant = S["ChatAssistantOut"];
+export type Listing = S["Listing"];
+export type Group = S["GroupOut"];
+export type GroupMember = S["GroupMemberOut"];
+export type ChatConversation = S["ChatConversationOut"];
+export type Notice = S["NoticeOut"];
+export type NoticeAdmin = S["NoticeAdminOut"];
+export type NoticeRevision = S["NoticeRevisionOut"];
+export type ConversationRead = S["AccessReadOut"];
+export type AssistantAbout = S["AssistantAboutOut"];
+export type FeedbackSummary = S["FeedbackSummaryOut"];
+export type LegalHoldItem = S["HoldOut"];
+export type Erasure = S["ErasureOut"];
+
+export const chat = {
+  /** The assistants that answer in Chat for you (Phase 8.5): Official
+   *  first; `q` searches, `category` narrows. */
+  assistants: (filters: { q?: string; category?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (filters.q) qs.set("q", filters.q);
+    if (filters.category) qs.set("category", filters.category);
+    const tail = qs.toString();
+    return request<ChatAssistant[]>(`/api/v1/chat/assistants${tail ? `?${tail}` : ""}`);
+  },
+  assistant: (id: string) => request<ChatAssistant>(`/api/v1/chat/assistants/${id}`),
+  /** Your own conversations, with every assistant, newest first. Phase
+   *  8.8: `q` finds words in a title or the conversation; `removed` lists
+   *  the ones taken out of your history, to put back. */
+  conversations: (cursor?: string | null, filters: { q?: string; removed?: boolean } = {}) => {
+    let url = paged("/api/v1/chat/conversations", cursor);
+    const add = (part: string) => (url = `${url}${url.includes("?") ? "&" : "?"}${part}`);
+    if (filters.q?.trim()) add(`q=${encodeURIComponent(filters.q.trim())}`);
+    if (filters.removed) add("removed=true");
+    return request<Page<ChatConversation>>(url);
+  },
+  /** The organisation's steps for when the app can't reach the server
+   *  (Phase 8.6), kept for the offline page. */
+  help: () => request<S["ChatHelpOut"]>("/api/v1/chat/help"),
+  /** How Chat uses your data (Phase 8.7), and whether you accepted it. */
+  notice: () => request<Notice>("/api/v1/chat/notice"),
+  acceptNotice: (version: number) =>
+    request<Notice>("/api/v1/chat/notice:accept", { body: { version } }),
+  /** Each time an admin opened one of your conversations, and why. */
+  access: (cursor?: string | null) =>
+    request<Page<ConversationRead>>(paged("/api/v1/chat/access", cursor)),
+  /** An assistant's card: what its approved version uses and sends out. */
+  about: (id: string) => request<AssistantAbout>(`/api/v1/chat/assistants/${id}/about`),
+};
 /** Where a cited chunk sits inside its source document. */
 export type CitationLoc = {
   page?: number | null;
@@ -255,7 +402,8 @@ export type Citation = {
 /** What a guardrail did during a turn (task 5.3): live as an event, and
  *  saved with the answer as a block. */
 export type GuardrailFinding = {
-  check: "injection" | "exfiltration" | "pii" | "schema" | "budget";
+  /** "secret": a password or key you typed was hidden (Phase 9.6). */
+  check: "injection" | "exfiltration" | "pii" | "schema" | "budget" | "secret";
   where: "user_message" | "tool_input" | "tool_result";
   detail: string;
   tool?: string | null;
@@ -277,7 +425,9 @@ export type MessageBlock =
       output?: string;
     })
   | ({ type: "citation" } & Citation)
-  | ({ type: "guardrail" } & GuardrailFinding);
+  | ({ type: "guardrail" } & GuardrailFinding)
+  /** A screenshot sent with your message (Phase 9.6). */
+  | { type: "image"; attachment_id: string };
 
 /** `blocks` is untyped in the schema (a JSON list); the UI knows its shape. */
 export type ChatMessage = Omit<S["MessageOut"], "blocks"> & { blocks: MessageBlock[] };
@@ -300,13 +450,81 @@ export const auth = {
       auth: false,
       org: false,
     }),
+  /** Tokens, or (two-step sign-in, Phase 8.4) a challenge to finish. */
   login: (email: string, password: string) =>
-    request<TokenPair>("/api/v1/auth/login", {
+    request<LoginOut>("/api/v1/auth/login", {
       body: { email, password },
       auth: false,
       org: false,
     }),
   me: () => request<Me>("/api/v1/auth/me", { org: false }),
+  /** A code to sign in on another device (Phase 8.6): five minutes, once. */
+  deviceCode: () =>
+    request<S["DeviceCodeOut"]>("/api/v1/auth/device-code", { method: "POST", org: false }),
+  /** Sign in with a code from a signed-in device: tokens, or a challenge
+   *  when the account has two-step sign-in. */
+  redeemDeviceCode: (code: string) =>
+    request<LoginOut>("/api/v1/auth/device-code/redeem", {
+      body: { code },
+      auth: false,
+      org: false,
+    }),
+  /** A sign-in's second step (Phase 8.4). */
+  loginTwoFactor: (challenge: string, code: string) =>
+    request<TokenPair>("/api/v1/auth/login/two-factor", {
+      body: { challenge, code },
+      auth: false,
+      org: false,
+    }),
+  /** The ways to sign in on this server (Phase 8.3). */
+  providers: () =>
+    request<S["ProvidersOut"]>("/api/v1/auth/providers", { auth: false, org: false }),
+  /** Back from Google: the one-minute code, for this browser's tokens. */
+  googleExchange: (code: string) =>
+    request<LoginOut>("/api/v1/auth/google/exchange", {
+      body: { code },
+      auth: false,
+      org: false,
+    }),
+  /** Connecting Google, signed in: a ticket for the trip to Google. */
+  googleLinkTicket: () =>
+    request<S["LinkTicketOut"]>("/api/v1/auth/google/link-ticket", {
+      method: "POST",
+      org: false,
+    }),
+  googleDisconnect: () =>
+    request<{ message: string }>("/api/v1/auth/google", { method: "DELETE", org: false }),
+  /** Getting back in (Phase 7b.6). The same answer whether or not an
+   *  account has the address. */
+  requestReset: (email: string) =>
+    request<{ message: string }>("/api/v1/auth/password-reset", {
+      body: { email },
+      auth: false,
+      org: false,
+    }),
+  confirmReset: (token: string, newPassword: string) =>
+    request<{ message: string }>("/api/v1/auth/password-reset/confirm", {
+      body: { token, new_password: newPassword },
+      auth: false,
+      org: false,
+    }),
+  /** Every other session ends; this one gets a fresh pair. */
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<TokenPair>("/api/v1/auth/password", {
+      body: { current_password: currentPassword, new_password: newPassword },
+      org: false,
+    }),
+  sendVerification: () =>
+    request<{ message: string }>("/api/v1/auth/verify-email/send", {
+      method: "POST",
+      org: false,
+    }),
+  verifyEmail: (token: string) =>
+    request<{ message: string }>("/api/v1/auth/verify-email", {
+      body: { token },
+      auth: false,
+      org: false,
+    }),
   logout: (refresh_token: string) =>
     request<{ message: string }>("/api/v1/auth/logout", {
       body: { refresh_token },
@@ -338,13 +556,148 @@ export const invites = {
       role: Member["role"];
       expires_at: string;
       accept_url: string;
+      /** Also emailed to them (Phase 7b.5). */
+      emailed?: boolean;
     }>(`/api/v1/orgs/${orgId}/invites`, { body: { email, role }, org: false }),
 };
+
+export type AuditEntry = S["AuditEntryOut"];
+export type AuditIntegrity = S["AuditIntegrityOut"];
+
+/** What the audit page narrows to (Phase 7b.7): `action` is a prefix of the
+ *  action's name, `actor` a user id, `since` an ISO time. */
+export type AuditFilters = { action?: string; actor?: string; since?: string };
+
+function auditQuery(f: AuditFilters, cursor?: string | null): string {
+  const q = new URLSearchParams();
+  if (f.action) q.set("action", f.action);
+  if (f.actor) q.set("actor", f.actor);
+  if (f.since) q.set("since", f.since);
+  if (cursor) q.set("cursor", cursor);
+  const qs = q.toString();
+  return qs ? `?${qs}` : "";
+}
 
 export const orgs = {
   list: () => collectAll((c) => request<Page<Org>>(paged("/api/v1/orgs", c, 200), { org: false })),
   members: (orgId: string, cursor?: string | null) =>
     request<Page<Member>>(paged(`/api/v1/orgs/${orgId}/members`, cursor), { org: false }),
+  /** What removing someone would hand on, close or revoke (Phase 7b.4). */
+  leaving: (orgId: string, userId: string) =>
+    request<S["LeavingOut"]>(`/api/v1/orgs/${orgId}/members/${userId}/leaving`, { org: false }),
+  deactivate: (orgId: string, userId: string, transferTo?: string | null) =>
+    request<Member>(`/api/v1/orgs/${orgId}/members/${userId}:deactivate`, {
+      body: { transfer_to: transferTo ?? null },
+      org: false,
+    }),
+  reactivate: (orgId: string, userId: string) =>
+    request<Member>(`/api/v1/orgs/${orgId}/members/${userId}:reactivate`, {
+      method: "POST",
+      org: false,
+    }),
+  /** The audit log, newest first (Phase 7b.7): `action` is a prefix. */
+  audit: (orgId: string, filters: AuditFilters, cursor?: string | null) =>
+    request<Page<AuditEntry>>(`/api/v1/orgs/${orgId}/audit-log${auditQuery(filters, cursor)}`, {
+      org: false,
+    }),
+  /** The owner's integrity check of the hash chain. */
+  auditIntegrity: (orgId: string) =>
+    request<S["AuditIntegrityOut"]>(`/api/v1/orgs/${orgId}/audit-log/integrity`, { org: false }),
+  /** The owner's CSV export, as a file to save. */
+  auditCsv: async (orgId: string, filters: AuditFilters): Promise<Blob> => {
+    const url = `${API_URL}/api/v1/orgs/${orgId}/audit-log.csv${auditQuery(filters)}`;
+    const res = await authedFetch(url, (token) => ({
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      cache: "no-store",
+    }));
+    if (!res.ok) {
+      const text = await res.text();
+      throw new ApiError(res.status, (text ? JSON.parse(text) : null) as ApiErrorBody);
+    }
+    return res.blob();
+  },
+  /** Invites nobody has used or withdrawn. */
+  invites: (orgId: string) =>
+    request<S["InviteOut"][]>(`/api/v1/orgs/${orgId}/invites`, { org: false }),
+  /** The organisation's name and switches (Phase 7b.8): admins read, the owner sets. */
+  settings: (orgId: string) =>
+    request<OrgSettings>(`/api/v1/orgs/${orgId}/settings`, { org: false }),
+  /** The privacy notice (Phase 8.7): admins read it, the owner edits it. */
+  notice: (orgId: string) => request<NoticeAdmin>(`/api/v1/orgs/${orgId}/notice`, { org: false }),
+  saveNotice: (orgId: string, body: string, askAgain: boolean) =>
+    request<NoticeAdmin>(`/api/v1/orgs/${orgId}/notice`, {
+      method: "PUT",
+      body: { body, ask_again: askAgain },
+      org: false,
+    }),
+  /** How long conversations are kept (Phase 8.10): admins set it. */
+  setRetention: (orgId: string, days: number) =>
+    request<{ days: number; below_floor: boolean }>(`/api/v1/orgs/${orgId}/retention`, {
+      method: "PUT",
+      body: { days },
+      org: false,
+    }),
+  /** Erase one person's data for good: the owner's, email typed to confirm. */
+  erasePerson: (orgId: string, userId: string, confirmEmail: string) =>
+    request<S["ErasedOut"]>(`/api/v1/orgs/${orgId}/members/${userId}:erase`, {
+      body: { confirm_email: confirmEmail },
+      org: false,
+    }),
+  holds: (orgId: string) => request<LegalHoldItem[]>(`/api/v1/orgs/${orgId}/holds`, { org: false }),
+  createHold: (
+    orgId: string,
+    body: { user_id: string | null; conversation_id: string | null; reason: string },
+  ) => request<LegalHoldItem>(`/api/v1/orgs/${orgId}/holds`, { body, org: false }),
+  releaseHold: (orgId: string, holdId: string) =>
+    request<LegalHoldItem>(`/api/v1/orgs/${orgId}/holds:release`, {
+      body: { hold_id: holdId },
+      org: false,
+    }),
+  erasures: (orgId: string) => request<Erasure[]>(`/api/v1/orgs/${orgId}/erasures`, { org: false }),
+  noticeRevisions: (orgId: string) =>
+    request<NoticeRevision[]>(`/api/v1/orgs/${orgId}/notice/revisions`, { org: false }),
+  updateSettings: (
+    orgId: string,
+    body: S["OrgSettingsUpdate"] & { builder_monthly_usd?: number | null },
+  ) =>
+    request<OrgSettings>(`/api/v1/orgs/${orgId}/settings`, {
+      method: "PATCH",
+      body,
+      org: false,
+    }),
+  /** Groups (Phase 8.5): names for anyone choosing an audience; the rest
+   *  is admins'. */
+  groups: (orgId: string) => request<Group[]>(`/api/v1/orgs/${orgId}/groups`, { org: false }),
+  createGroup: (orgId: string, name: string, description = "") =>
+    request<Group>(`/api/v1/orgs/${orgId}/groups`, { body: { name, description }, org: false }),
+  deleteGroup: (orgId: string, groupId: string) =>
+    request<{ message: string }>(`/api/v1/orgs/${orgId}/groups/${groupId}`, {
+      method: "DELETE",
+      org: false,
+    }),
+  groupMembers: (orgId: string, groupId: string) =>
+    request<GroupMember[]>(`/api/v1/orgs/${orgId}/groups/${groupId}/members`, { org: false }),
+  addGroupMember: (orgId: string, groupId: string, userId: string) =>
+    request<GroupMember[]>(`/api/v1/orgs/${orgId}/groups/${groupId}/members`, {
+      body: { user_id: userId },
+      org: false,
+    }),
+  removeGroupMember: (orgId: string, groupId: string, userId: string) =>
+    request<GroupMember[]>(`/api/v1/orgs/${orgId}/groups/${groupId}/members/${userId}`, {
+      method: "DELETE",
+      org: false,
+    }),
+  /** How this server sends email: read-only, from its environment (7b.5). */
+  mailStatus: (orgId: string) =>
+    request<S["MailStatusOut"]>(`/api/v1/orgs/${orgId}/mail`, { org: false }),
+  /** A test message to the admin asking, and nobody else. */
+  mailTest: (orgId: string) =>
+    request<S["MailTestOut"]>(`/api/v1/orgs/${orgId}/mail:test`, { method: "POST", org: false }),
+  revokeInvite: (orgId: string, inviteId: string) =>
+    request<{ message: string }>(`/api/v1/orgs/${orgId}/invites/${inviteId}`, {
+      method: "DELETE",
+      org: false,
+    }),
 };
 
 /** The canvas's wiring rules, served from the validator's own constants so
@@ -383,7 +736,18 @@ export const assistants = {
       body: { sample_id: sampleId, name: name ?? null },
     }),
   get: (id: string) => request<AssistantDetail>(`/api/v1/assistants/${id}`),
-  patch: (id: string, body: Partial<Pick<Assistant, "name" | "description" | "status">>) =>
+  /** The draft listing (Phase 8.5): reaches Chat with the next approved version. */
+  listing: (id: string) => request<Listing>(`/api/v1/assistants/${id}/listing`),
+  /** What people said about its answers (Phase 8.8): never who asked. */
+  feedback: (id: string) => request<FeedbackSummary>(`/api/v1/assistants/${id}/feedback`),
+  saveListing: (id: string, listing: Listing) =>
+    request<Listing>(`/api/v1/assistants/${id}/listing`, { method: "PUT", body: listing }),
+  /** An admin's Official mark (Phase 8.5). */
+  setOfficial: (id: string, official: boolean) =>
+    request<Assistant>(`/api/v1/assistants/${id}:official`, { body: { official } }),
+  /** Name and description only: the status changes through review and
+   *  pausing, never an edit (Phase 7b.1). */
+  patch: (id: string, body: Partial<Pick<Assistant, "name" | "description">>) =>
     request<AssistantDetail>(`/api/v1/assistants/${id}`, { method: "PATCH", body }),
   /** Deletes the assistant and everything it owns. Usage history is kept. */
   remove: (id: string) =>
@@ -398,18 +762,63 @@ export const assistants = {
       `/api/v1/assistants/${id}/draft-config`,
       { method: "PUT", body: config },
     ),
-  publish: (id: string, note = "") =>
+  /** Freeze the draft as a new version and put it up for review. It answers
+   *  in Chat once an admin approves it (Phase 7b.1). */
+  submit: (id: string, note = "") =>
     request<AssistantVersion & { graph: Graph; config: AssistantConfig }>(
       `/api/v1/assistants/${id}/versions`,
       { body: { note } },
     ),
+  approve: (id: string, number: number, note = "") =>
+    request<AssistantVersion>(`/api/v1/assistants/${id}/versions/${number}/approve`, {
+      body: { note },
+    }),
+  /** `note` is required: it is what the builder reads. */
+  reject: (id: string, number: number, note: string) =>
+    request<AssistantVersion>(`/api/v1/assistants/${id}/versions/${number}/reject`, {
+      body: { note },
+    }),
+  withdraw: (id: string, number: number) =>
+    request<AssistantVersion>(`/api/v1/assistants/${id}/versions/${number}/withdraw`, {
+      method: "POST",
+    }),
+  /** Roll back to an earlier approved version. */
+  makeLive: (id: string, number: number) =>
+    request<AssistantVersion>(`/api/v1/assistants/${id}/versions/${number}/make-live`, {
+      method: "POST",
+    }),
+  /** Pause: nothing answers, previews included, until an admin reopens it. */
+  archive: (id: string, reason: string) =>
+    request<AssistantDetail>(`/api/v1/assistants/${id}/archive`, { body: { reason } }),
+  unarchive: (id: string) =>
+    request<AssistantDetail>(`/api/v1/assistants/${id}/unarchive`, { method: "POST" }),
   versions: (id: string, cursor?: string | null) =>
     request<Page<AssistantVersion>>(paged(`/api/v1/assistants/${id}/versions`, cursor)),
   /** One published version, with its graph and config. */
   version: (id: string, number: number) =>
-    request<AssistantVersion & { graph: Graph; config: AssistantConfig }>(
-      `/api/v1/assistants/${id}/versions/${number}`,
+    request<
+      AssistantVersion & {
+        graph: Graph;
+        config: AssistantConfig;
+        manifest?: S["VersionDetail"]["manifest"];
+      }
+    >(`/api/v1/assistants/${id}/versions/${number}`),
+  /** What has changed since a version was submitted (Phase 7b.1). */
+  drift: (id: string, number: number) =>
+    request<S["VersionDrift"]>(`/api/v1/assistants/${id}/versions/${number}/drift`),
+  /** What to approve on (Phase 10.4): scorecard, safety, cost forecast. */
+  evidence: (id: string, number: number, perMonth = 500) =>
+    request<VersionEvidence>(
+      `/api/v1/assistants/${id}/versions/${number}/evidence?per_month=${perMonth}`,
     ),
+  /** Co-editors besides its creator (Phase 7b.4). */
+  editors: (id: string) => request<S["EditorOut"][]>(`/api/v1/assistants/${id}/editors`),
+  addEditor: (id: string, userId: string) =>
+    request<S["EditorOut"][]>(`/api/v1/assistants/${id}/editors`, { body: { user_id: userId } }),
+  removeEditor: (id: string, userId: string) =>
+    request<{ message: string }>(`/api/v1/assistants/${id}/editors/${userId}`, {
+      method: "DELETE",
+    }),
   /** Config + graph differences between two published versions. */
   diff: (id: string, a: number, b: number) =>
     request<VersionDiff>(`/api/v1/assistants/${id}/versions/diff?a=${a}&b=${b}`),
@@ -447,23 +856,39 @@ export const evals = {
     request<EvalRun>(`/api/v1/eval-runs/${runId}:cancel`, { method: "POST" }),
 };
 
+/** Chat (`live`) or the Studio's test chat (`preview`; Phase 7b.1). A
+ *  preview runs the draft, or `version` when one is given. */
+export type ChatMode = { preview: boolean; version?: number };
+
 export const conversations = {
-  list: (assistantId: string, cursor?: string | null) =>
-    request<Page<Conversation>>(paged(`/api/v1/assistants/${assistantId}/conversations`, cursor)),
-  create: (assistantId: string, title?: string) =>
-    request<Conversation>(`/api/v1/assistants/${assistantId}/conversations`, { body: { title } }),
+  /** Your own conversations; `everyone` (admins) lists everyone's, with
+   *  other people's titles left out (Phase 7b.2). */
+  list: (assistantId: string, cursor?: string | null, mode?: ChatMode, everyone = false) => {
+    let url = paged(`/api/v1/assistants/${assistantId}/conversations`, cursor);
+    const add = (q: string) => (url = `${url}${url.includes("?") ? "&" : "?"}${q}`);
+    if (mode?.preview) add("mode=preview");
+    if (everyone) add("everyone=true");
+    return request<Page<Conversation>>(url);
+  },
+  create: (assistantId: string, title?: string, mode?: ChatMode) =>
+    request<Conversation>(`/api/v1/assistants/${assistantId}/conversations`, {
+      body: mode?.preview ? { title, mode: "preview", version: mode.version ?? null } : { title },
+    }),
   /** The conversation plus its most recent messages (not the whole history:
    *  `messages_next_cursor` pages further back via `olderMessages`). */
   /** The conversation plus its most recent messages, and the turn running
    *  in it (`turn_id`), if any. */
-  get: (id: string) =>
+  get: (id: string, orgId?: string) =>
     request<
       Conversation & {
         messages: ChatMessage[];
         messages_next_cursor: string | null;
         turn_id?: string | null;
+        /** Phase 8.8: its starter's thumbs, by answer, and "solved". */
+        feedback?: Record<string, { rating?: "up" | "down" | null; comment?: string }>;
+        solved?: boolean | null;
       }
-    >(`/api/v1/conversations/${id}`),
+    >(`/api/v1/conversations/${id}`, { orgId }),
   /** Runs (one per answered turn), newest first; `messageId` narrows to the
    *  run that produced one message. */
   runs: (id: string, messageId?: string) =>
@@ -477,7 +902,24 @@ export const conversations = {
     request<Page<ChatMessage>>(paged(`/api/v1/conversations/${id}/messages`, cursor)),
   rename: (id: string, title: string) =>
     request<Conversation>(`/api/v1/conversations/${id}`, { method: "PATCH", body: { title } }),
-  /** Archive: leaves the list and becomes read-only. A direct link still reads it. */
+  /** Put back a conversation removed from your history (Phase 8.8). */
+  restore: (id: string) =>
+    request<Conversation>(`/api/v1/conversations/${id}:restore`, { method: "POST" }),
+  /** Your thumbs on one answer, with an optional comment; null takes it back. */
+  rate: (id: string, messageId: string, rating: "up" | "down" | null, comment = "") =>
+    request<{ rating?: "up" | "down" | null; comment?: string }>(
+      `/api/v1/conversations/${id}/messages/${messageId}/feedback`,
+      { method: "PUT", body: { rating, comment } },
+    ),
+  /** "Did this solve it?", once per conversation. */
+  solve: (id: string, solved: boolean) =>
+    request<{ solved: boolean }>(`/api/v1/conversations/${id}/outcome`, {
+      method: "PUT",
+      body: { solved },
+    }),
+  /** Remove from your history (Phase 8.8 wording; the API's DELETE): out of
+   *  your lists and search, kept for the company, admins can still open it,
+   *  and `restore` puts it back. */
   archive: (id: string) =>
     request<{ message: string }>(`/api/v1/conversations/${id}`, { method: "DELETE" }),
   /** Ask the running turn to stop. Its stream then ends with a normal
@@ -500,6 +942,49 @@ export const runs = {
 export type DataSourceStatus = S["DataSourceStatus"];
 
 export type DataSource = S["DataSourceSummary"];
+/** Read-only conversation links (Phase 9.4). */
+export type ShareCreated = S["ShareCreated"];
+export type Share = S["ShareOut"];
+export type SharedConversation = Omit<S["SharedConversationOut"], "messages"> & {
+  messages: ChatMessage[];
+};
+
+export const shares = {
+  create: (conversationId: string) =>
+    request<ShareCreated>(`/api/v1/conversations/${conversationId}/shares`, { method: "POST" }),
+  list: (conversationId: string) =>
+    request<Share[]>(`/api/v1/conversations/${conversationId}/shares`),
+  revoke: (conversationId: string, shareId: string) =>
+    request<Share>(`/api/v1/conversations/${conversationId}/shares/${shareId}`, {
+      method: "DELETE",
+    }),
+  open: (token: string) =>
+    request<SharedConversation>(`/api/v1/shared/${encodeURIComponent(token)}`, { org: false }),
+};
+
+/** Hand-offs to a person (Phase 9.5). Hand-written until the shared types
+ *  are regenerated. */
+export type Handoff = {
+  id: string;
+  conversation_id: string;
+  status: "sent" | "failed";
+  channel: "email" | "action";
+  ticket_ref: string | null;
+  summary: string;
+  created_at: string;
+};
+export type HandoffList = {
+  available: boolean;
+  contact_email: string;
+  opens_ticket: boolean;
+  items: Handoff[];
+};
+export const handoffs = {
+  list: (conversationId: string) =>
+    request<HandoffList>(`/api/v1/conversations/${conversationId}/handoffs`),
+  create: (conversationId: string, note: string) =>
+    request<Handoff>(`/api/v1/conversations/${conversationId}/handoff`, { body: { note } }),
+};
 
 export type ContentUrl = S["ContentUrl"];
 
@@ -507,6 +992,21 @@ export type ApprovalRisk = S["ApprovalRisk"];
 export type ApprovalStatus = S["ApprovalStatus"];
 
 export type Approval = S["ApprovalOut"];
+/** A request in someone's queue, with who asked and where (Phase 9.1). */
+export type DecidableApproval = S["DecidableApprovalOut"];
+export type ActionField = S["ActionFieldOut"];
+export type ApprovalSummary = S["ApprovalSummaryOut"];
+export type Approvers = S["ApproversOut"];
+export type Delegation = S["DelegationOut"];
+export type ActionCheck = S["ActionCheckOut"];
+/** A named SQL statement on a database node (Phase 9.1). */
+export type DeclaredAction = S["DeclaredAction-Input"];
+export type ActionParam = S["ActionParam-Input"];
+/** A declared call to a company system (Phase 9.3). */
+export type HttpAction = S["HttpAction-Input"];
+export type HttpConnection = S["HttpConnectionOut"];
+/** An internal destination, as an owner writes it (Phase 9.3). */
+export type InternalDestination = S["DestinationOut"];
 
 export type DbEngine = S["DbEngine"];
 
@@ -584,7 +1084,15 @@ export const assist = {
 };
 
 export type BudgetStatus = S["BudgetStatusOut"];
-export type Budgets = S["BudgetsOut"];
+/** Builder testing this month (Phase 9.7): previews and eval runs. */
+export type BuilderSpend = {
+  spent_usd: number;
+  limit_usd: number | null;
+  ratio: number | null;
+  state: "ok" | "warning" | "exceeded";
+  resets_at: string;
+};
+export type Budgets = S["BudgetsOut"] & { builder?: BuilderSpend | null };
 export type BudgetLimits = { daily_usd: number | null; monthly_usd: number | null };
 export type UsageGroupBy = "assistant" | "model" | "conversation";
 export type UsageRow = S["UsageRollupRow"];
@@ -598,6 +1106,38 @@ export const budgets = {
   assistant: (assistantId: string) => request<Budgets>(`/api/v1/assistants/${assistantId}/budget`),
   setAssistant: (assistantId: string, limits: BudgetLimits) =>
     request<Budgets>(`/api/v1/assistants/${assistantId}/budget`, { method: "PUT", body: limits }),
+  /** Per-person limits and everyone's spend (Phase 8.9): admins only. */
+  people: (orgId: string) =>
+    request<PeopleBudgets>(`/api/v1/orgs/${orgId}/budgets/people`, { org: false }),
+  setPersonDefault: (orgId: string, role: "employee" | "builder", limits: BudgetLimits) =>
+    request<PeopleBudgets>(`/api/v1/orgs/${orgId}/budgets/people`, {
+      method: "PUT",
+      body: { role, ...limits },
+      org: false,
+    }),
+  /** One person's own limit; both null: back to their role's. */
+  setPersonOverride: (orgId: string, userId: string, limits: BudgetLimits) =>
+    request<PeopleBudgets>(`/api/v1/orgs/${orgId}/members/${userId}/budget`, {
+      method: "PUT",
+      body: limits,
+      org: false,
+    }),
+};
+
+export type PeopleBudgets = S["PeopleBudgetsOut"];
+export type AdminAlertItem = S["AlertOut"];
+
+/** What stopped Chat for everyone (Phase 8.9), for the admins. */
+export const alerts = {
+  list: (orgId: string, openOnly: boolean) =>
+    request<AdminAlertItem[]>(`/api/v1/orgs/${orgId}/alerts${openOnly ? "?open=true" : ""}`, {
+      org: false,
+    }),
+  resolve: (orgId: string, kind: string, subject: string) =>
+    request<{ resolved: number }>(`/api/v1/orgs/${orgId}/alerts:resolve`, {
+      body: { kind, subject },
+      org: false,
+    }),
 };
 
 export const usage = {
@@ -613,6 +1153,91 @@ export const usage = {
       `/api/v1/orgs/${orgId}/usage?${params}`,
     );
   },
+};
+
+// ── Analytics (Phase 10.1) and traffic on the canvas (Phase 10.2) ──
+// Hand-written until the generated types catch up (the lead reconciles).
+
+export type AnalyticsFigures = {
+  conversations: number;
+  people: number;
+  resolved: number;
+  not_resolved: number;
+  no_verdict: number;
+  with_errors: number;
+  spend_usd: number;
+  resolution_rate: number | null;
+  cost_per_resolved_usd: number | null;
+};
+export type AnalyticsDay = {
+  date: string;
+  conversations: number;
+  resolved: number;
+  spend_usd: number;
+};
+export type AssistantAnalytics = {
+  assistant_id: string;
+  days: number;
+  start: string;
+  end: string;
+  current: AnalyticsFigures;
+  previous: AnalyticsFigures;
+  series: AnalyticsDay[];
+};
+export type OrgAnalyticsRow = {
+  assistant_id: string;
+  name: string;
+  status: string;
+  current: AnalyticsFigures;
+  previous: AnalyticsFigures;
+};
+export type OrgAnalytics = {
+  days: number;
+  start: string;
+  end: string;
+  assistants: OrgAnalyticsRow[];
+  total: AnalyticsFigures;
+  previous_total: AnalyticsFigures;
+};
+export type NodeTraffic = { calls: number; errors: number; approvals: number };
+export type AssistantTraffic = {
+  assistant_id: string;
+  hours: number;
+  since: string;
+  nodes: Record<string, NodeTraffic>;
+  total: {
+    turns: number;
+    turn_errors: number;
+    calls: number;
+    errors: number;
+    approvals: number;
+    unplaced: number;
+  };
+};
+
+export const analytics = {
+  /** How its live conversations went, against the period before. */
+  assistant: (assistantId: string, days = 30) =>
+    request<AssistantAnalytics>(`/api/v1/assistants/${assistantId}/analytics?days=${days}`),
+  /** The managers' report: every assistant (admins only). */
+  org: (orgId: string, days = 30) =>
+    request<OrgAnalytics>(`/api/v1/orgs/${orgId}/analytics?days=${days}`, { org: false }),
+  /** The managers' report as a CSV file to save (the download is recorded). */
+  orgCsv: async (orgId: string, days = 30): Promise<Blob> => {
+    const url = `${API_URL}/api/v1/orgs/${orgId}/analytics.csv?days=${days}`;
+    const res = await authedFetch(url, (token) => ({
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      cache: "no-store",
+    }));
+    if (!res.ok) {
+      const text = await res.text();
+      throw new ApiError(res.status, (text ? JSON.parse(text) : null) as ApiErrorBody);
+    }
+    return res.blob();
+  },
+  /** Live calls, errors and approvals per canvas station, in the last hours. */
+  traffic: (assistantId: string, hours = 24) =>
+    request<AssistantTraffic>(`/api/v1/assistants/${assistantId}/traffic?hours=${hours}`),
 };
 
 export type PipelineSuggestion = Omit<S["PipelineSuggestion"], "config" | "graph"> & {
@@ -660,13 +1285,145 @@ export const approvals = {
     collectAll((c) =>
       request<Page<Approval>>(paged(`/api/v1/conversations/${conversationId}/approvals`, c, 200)),
     ),
-  resolve: (approvalId: string, decision: "approved" | "denied") =>
-    request<Approval>(`/api/v1/approvals/${approvalId}:resolve`, { body: { decision } }),
+  /** Every request in a conversation, in any state (Phase 9.1): each card
+   *  says where its request stands. */
+  listAll: (conversationId: string) =>
+    collectAll((c) =>
+      request<Page<Approval>>(
+        `${paged(`/api/v1/conversations/${conversationId}/approvals`, c, 200)}&all=true`,
+      ),
+    ),
+  /** Decide a request, naming the hash of what was shown: refused if it
+   *  changed since. The asker may send their own values for an action. */
+  resolve: (
+    approvalId: string,
+    body: {
+      decision: "approved" | "denied";
+      input_sha256: string | null | undefined;
+      note?: string;
+      params?: Record<string, unknown>;
+    },
+  ) => request<Approval>(`/api/v1/approvals/${approvalId}:resolve`, { body }),
+  /** The asker takes back a request still waiting. */
+  withdraw: (approvalId: string) =>
+    request<Approval>(`/api/v1/approvals/${approvalId}:withdraw`, { method: "POST" }),
+  /** What waits for me to decide: all of it for an admin, an assistant's
+   *  for its approvers and their stand-ins. */
+  decidable: () => request<DecidableApproval[]>("/api/v1/approvals/decidable"),
+  /** How many wait for me to decide, and how many of mine are open (9.2). */
+  summary: () => request<ApprovalSummary>("/api/v1/approvals/summary"),
+  /** My requests, newest first (Phase 9.2). */
+  mine: (cursor?: string | null) =>
+    request<Page<DecidableApproval>>(paged("/api/v1/approvals/mine", cursor)),
+  /** The requests I decided, newest first. */
+  decided: (cursor?: string | null) =>
+    request<Page<DecidableApproval>>(paged("/api/v1/approvals/decided", cursor)),
+  /** Every request in the organisation (admins), by state and assistant. */
+  inOrg: (
+    orgId: string,
+    filters: { status?: string; assistant_id?: string },
+    cursor?: string | null,
+  ) => {
+    const q = new URLSearchParams();
+    if (filters.status) q.set("status", filters.status);
+    if (filters.assistant_id) q.set("assistant_id", filters.assistant_id);
+    const base = paged(`/api/v1/orgs/${orgId}/approvals`, cursor);
+    const extra = q.toString();
+    return request<Page<DecidableApproval>>(
+      extra ? `${base}${base.includes("?") ? "&" : "?"}${extra}` : base,
+      { org: false },
+    );
+  },
+  /** One request, where an email links. */
+  one: (approvalId: string) => request<DecidableApproval>(`/api/v1/approvals/${approvalId}`),
+  approvers: (assistantId: string) =>
+    request<Approvers>(`/api/v1/assistants/${assistantId}/approvers`),
+  setApprovers: (assistantId: string, body: { group_ids: string[]; user_ids: string[] }) =>
+    request<Approvers>(`/api/v1/assistants/${assistantId}/approvers`, { method: "PUT", body }),
+  delegations: () => request<Delegation[]>("/api/v1/approvals/delegations"),
+  addDelegation: (body: { email: string; until: string }) =>
+    request<Delegation[]>("/api/v1/approvals/delegations", { body }),
+  endDelegation: (id: string) =>
+    request<void>(`/api/v1/approvals/delegations/${id}`, { method: "DELETE" }),
+  /** Check an action before it goes on the canvas. */
+  checkAction: (assistantId: string, connectionId: string, action: unknown) =>
+    request<ActionCheck>(`/api/v1/assistants/${assistantId}/actions:check`, {
+      body: { connection_id: connectionId, action },
+    }),
+  /** The same for an HTTP action, whose connection is in the action. */
+  checkHttpAction: (assistantId: string, action: HttpAction) =>
+    request<ActionCheck>(`/api/v1/assistants/${assistantId}/actions:check`, {
+      body: { connection_id: action.connection_id, action, kind: "http" },
+    }),
+};
+
+/** HTTP connections (Phase 9.3): a company system an assistant calls. The
+ *  header values are write-only: what comes back is their names. */
+export const httpConnections = {
+  list: (assistantId: string) =>
+    request<HttpConnection[]>(`/api/v1/assistants/${assistantId}/http-connections`),
+  create: (assistantId: string, body: S["HttpConnectionCreate"]) =>
+    request<HttpConnection>(`/api/v1/assistants/${assistantId}/http-connections`, { body }),
+  update: (assistantId: string, id: string, body: S["HttpConnectionUpdate"]) =>
+    request<HttpConnection>(`/api/v1/assistants/${assistantId}/http-connections/${id}`, {
+      method: "PATCH",
+      body,
+    }),
+  remove: (assistantId: string, id: string) =>
+    request<{ message: string }>(`/api/v1/assistants/${assistantId}/http-connections/${id}`, {
+      method: "DELETE",
+    }),
 };
 
 /** Multipart upload. Deliberately not routed through `request`, which pins
  *  `Content-Type: application/json` — for FormData the browser has to set the
  *  header itself so it can include the multipart boundary. */
+/** A screenshot uploaded into a conversation, not yet (or already) sent
+ *  with a message (Phase 9.6). */
+export type Attachment = {
+  id: string;
+  conversation_id: string;
+  message_id: string | null;
+  content_type: string;
+  bytes: number;
+  created_at: string;
+};
+
+/** Screenshots in chat (Phase 9.6). The upload is multipart, so it goes
+ *  round `request` like `uploadFile` below. */
+export const attachments = {
+  upload: async (conversationId: string, file: Blob, name = "screenshot.png") => {
+    const form = new FormData();
+    form.append("file", file, name);
+    const res = await authedFetch(
+      `${API_URL}/api/v1/conversations/${conversationId}/attachments`,
+      (token) => {
+        const headers: Record<string, string> = {};
+        if (token) headers.Authorization = `Bearer ${token}`;
+        return { method: "POST", headers, body: form };
+      },
+    );
+    const text = await res.text();
+    const data = text ? JSON.parse(text) : null;
+    if (!res.ok) throw new ApiError(res.status, data as ApiErrorBody);
+    return data as Attachment;
+  },
+  /** The image itself, read through the API with the signed-in token (not
+   *  from object storage directly, which would need the bucket to allow
+   *  this site's origin). The caller makes a `blob:` address of it. */
+  content: async (conversationId: string, attachmentId: string): Promise<Blob> => {
+    const url = `${API_URL}/api/v1/conversations/${conversationId}/attachments/${attachmentId}/content`;
+    const res = await authedFetch(url, (token) => ({
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    }));
+    if (!res.ok) {
+      const text = await res.text();
+      throw new ApiError(res.status, (text ? JSON.parse(text) : null) as ApiErrorBody);
+    }
+    return res.blob();
+  },
+};
+
 async function uploadFile(assistantId: string, file: File): Promise<DataSource> {
   const form = new FormData();
   form.append("file", file, file.name);
@@ -708,6 +1465,22 @@ export const dataSources = {
     request<{ message: string }>(`/api/v1/assistants/${assistantId}/data-sources/${dataSourceId}`, {
       method: "DELETE",
     }),
+  /** Who may read it (Phase 9.4): everyone, or these groups. */
+  setAccess: (
+    assistantId: string,
+    dataSourceId: string,
+    access: { everyone: boolean; group_ids: string[] },
+  ) =>
+    request<DataSource>(`/api/v1/assistants/${assistantId}/data-sources/${dataSourceId}/access`, {
+      method: "PUT",
+      body: access,
+    }),
+  /** Index a source the scan held back, for everyone (recorded). */
+  confirmEveryone: (assistantId: string, dataSourceId: string) =>
+    request<DataSource>(
+      `/api/v1/assistants/${assistantId}/data-sources/${dataSourceId}:confirm-everyone`,
+      { method: "POST" },
+    ),
   /** Resolve a citation to something openable. For files this mints a
    *  short-lived presigned URL — a link click carries no Authorization
    *  header, so an authenticated route can't serve the file to a new tab. */
@@ -753,8 +1526,20 @@ export type ChatEvent =
     }
   | { type: "usage"; tokens_in: number; tokens_out: number; cost_usd: number }
   /** `retryable`: sending the message again may work (task 5.4). A
-   *  `refused` error is the model declining, not a failure. */
-  | { type: "error"; code: string; message: string; retryable?: boolean }
+   *  `refused` error is the model declining, not a failure. Phase 8.6:
+   *  `retry_after_s`, how long to wait (`busy`); `resets_at`, when a used-up
+   *  budget starts again, to say in the reader's own time. */
+  | {
+      type: "error";
+      code: string;
+      message: string;
+      retryable?: boolean;
+      retry_after_s?: number | null;
+      resets_at?: string | null;
+    }
+  /** Your message is saved (Phase 8.6): a failure after this doesn't give
+   *  the text back, since sending it again would ask twice. */
+  | { type: "accepted"; message_id: string }
   | ({ type: "guardrail" } & GuardrailFinding)
   /** The conversation's new title, on its first turn (task 5.2). */
   | { type: "title"; title: string }
@@ -781,8 +1566,25 @@ export function parseSseFrame(frame: string): { id: string | null; event: ChatEv
   return data === null ? null : { id, event: JSON.parse(data) as ChatEvent };
 }
 
-/** Read a turn's events off a response until it ends. */
-async function readTurn(res: Response, onEvent: (e: ChatEvent) => void): Promise<void> {
+/** How watching a turn ended (Phase 8.6). `ended`: the turn said so (it
+ *  finished, or failed), so it is over. Otherwise the connection dropped
+ *  partway: watch `turnId` again from `lastId` and nothing is missed or
+ *  repeated. */
+export type TurnOutcome = { turnId: string | null; ended: boolean; lastId: string | null };
+
+/** Longest a stream may say nothing before it is taken for dropped. The
+ *  server sends a keep-alive every 5 s while a turn is quiet, so silence
+ *  this long is a connection a phone or a VPN let go of without saying. */
+export const STREAM_SILENCE_MS = 20_000;
+
+/** Read a turn's events off a response until it ends, or the connection
+ *  drops (which is not an error here: the caller watches again). */
+async function readTurn(
+  res: Response,
+  onEvent: (e: ChatEvent) => void,
+  after: string | null = null,
+  signal?: AbortSignal,
+): Promise<TurnOutcome> {
   if (!res.ok || !res.body) {
     const body = await res.text();
     throw new ApiError(
@@ -790,20 +1592,50 @@ async function readTurn(res: Response, onEvent: (e: ChatEvent) => void): Promise
       body ? JSON.parse(body) : { error: { code: "stream_failed", message: "stream failed" } },
     );
   }
+  const outcome: TurnOutcome = {
+    turnId: res.headers.get("x-turn-id"),
+    ended: false,
+    lastId: after,
+  };
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const frames = buf.split("\n\n");
-    buf = frames.pop() ?? "";
-    for (const frame of frames) {
-      const parsed = parseSseFrame(frame);
-      if (parsed) onEvent(parsed.event);
+  let silence: ReturnType<typeof setTimeout> | undefined;
+  const listen = () => {
+    clearTimeout(silence);
+    silence = setTimeout(() => void reader.cancel().catch(() => {}), STREAM_SILENCE_MS);
+  };
+  listen();
+  try {
+    for (;;) {
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (err) {
+        // Leaving the conversation is the caller's to see; anything else
+        // is the connection going.
+        if (signal?.aborted) throw err;
+        break;
+      }
+      if (chunk.done) break;
+      listen();
+      buf += decoder.decode(chunk.value, { stream: true });
+      const frames = buf.split("\n\n");
+      buf = frames.pop() ?? "";
+      for (const frame of frames) {
+        const parsed = parseSseFrame(frame);
+        if (!parsed) continue;
+        // "lost" is the server's own word for a turn whose process
+        // stopped, not a place to watch again from.
+        if (parsed.id && parsed.id !== "lost") outcome.lastId = parsed.id;
+        if (parsed.event.type === "done" || parsed.event.type === "error") outcome.ended = true;
+        onEvent(parsed.event);
+      }
     }
+  } finally {
+    clearTimeout(silence);
   }
+  return outcome;
 }
 
 /** Send a message: starts a turn on the server and watches it. Leaving
@@ -813,7 +1645,9 @@ export async function streamMessage(
   text: string,
   onEvent: (e: ChatEvent) => void,
   signal?: AbortSignal,
-): Promise<void> {
+  /** Screenshots uploaded into the conversation (Phase 9.6). */
+  attachmentIds: string[] = [],
+): Promise<TurnOutcome> {
   const res = await authedFetch(
     `${API_URL}/api/v1/conversations/${conversationId}/messages`,
     (token) => ({
@@ -822,28 +1656,102 @@ export async function streamMessage(
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(
+        attachmentIds.length ? { text, attachment_ids: attachmentIds } : { text },
+      ),
       signal,
     }),
   );
-  await readTurn(res, onEvent);
+  return readTurn(res, onEvent, null, signal);
 }
 
 /** Watch a turn already running (or just finished) in a conversation, from
- *  its first event: what a page does when it opens a conversation that is
- *  answering (QOS-01). */
+ *  its first event, or from after `after`: what a page does when it opens a
+ *  conversation that is answering (QOS-01), or when its connection dropped
+ *  (Phase 8.6). */
 export async function watchTurn(
   conversationId: string,
   turnId: string,
   onEvent: (e: ChatEvent) => void,
   signal?: AbortSignal,
-): Promise<void> {
+  after: string | null = null,
+): Promise<TurnOutcome> {
+  const since = after ? `?after=${encodeURIComponent(after)}` : "";
   const res = await authedFetch(
-    `${API_URL}/api/v1/conversations/${conversationId}/turns/${encodeURIComponent(turnId)}/events`,
+    `${API_URL}/api/v1/conversations/${conversationId}/turns/${encodeURIComponent(turnId)}/events${since}`,
     (token) => ({
-      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) } as Record<string, string>,
+      headers: {
+        ...readReasonHeaders(`/api/v1/conversations/${conversationId}`),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      } as Record<string, string>,
       signal,
     }),
   );
-  await readTurn(res, onEvent);
+  return { ...(await readTurn(res, onEvent, after, signal)), turnId };
+}
+
+// ── Needs review (Phase 10.3) and conversation export (Phase 10.5) ──
+//
+// Hand-written until the shared types are generated again.
+
+export type ReviewState = "open" | "turned_into_case" | "dismissed";
+export type ReviewReason = "thumbs_down" | "not_solved" | "failed" | "declined";
+
+/** An answer that needed review, with its question: never who asked. */
+export type ReviewItem = {
+  /** The answer's id: what the actions name. */
+  id: string;
+  state: ReviewState;
+  reasons: ReviewReason[];
+  comment: string;
+  question: string;
+  answer: string;
+  version_number?: number | null;
+  created_at: string;
+  eval_case_id?: string | null;
+  suite_id?: string | null;
+  dismissed_reason?: string | null;
+  decided_at?: string | null;
+  fixed_version_number?: number | null;
+  asker_told: boolean;
+  /** Admins only: to open with a recorded reason. */
+  conversation_id?: string | null;
+};
+
+export const reviewQueue = {
+  list: (assistantId: string, state: ReviewState = "open") =>
+    request<ReviewItem[]>(`/api/v1/assistants/${assistantId}/review-queue?state=${state}`),
+  toCase: (
+    assistantId: string,
+    itemId: string,
+    body: { suite_id: string; input?: string | null; expected?: Partial<EvalExpected> },
+  ) =>
+    request<ReviewItem>(`/api/v1/assistants/${assistantId}/review-queue/${itemId}:to-case`, {
+      body,
+    }),
+  dismiss: (assistantId: string, itemId: string, reason: string) =>
+    request<ReviewItem>(`/api/v1/assistants/${assistantId}/review-queue/${itemId}:dismiss`, {
+      body: { reason },
+    }),
+};
+
+/** A conversation as a file to save, with the name the server gave it. */
+export async function exportConversation(
+  conversationId: string,
+  format: "md" | "json" = "md",
+): Promise<{ blob: Blob; filename: string }> {
+  const path = `/api/v1/conversations/${conversationId}/export?format=${format}`;
+  const res = await authedFetch(`${API_URL}${path}`, (token) => {
+    const headers: Record<string, string> = { ...readReasonHeaders(path) };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const org = orgStore.get();
+    if (org) headers["X-Org-Id"] = org;
+    return { headers, cache: "no-store" };
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new ApiError(res.status, (text ? JSON.parse(text) : null) as ApiErrorBody);
+  }
+  const named = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "");
+  return { blob: await res.blob(), filename: named?.[1] ?? `conversation.${format}` };
 }

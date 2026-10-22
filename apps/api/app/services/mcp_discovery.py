@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -43,7 +43,7 @@ from app.models.integration import McpServer, McpServerStatus, McpTransport
 from app.schemas.mcp_server import McpCheckResult
 from app.security.pinned_transport import pinned_client
 from app.security.redact import strip_secrets
-from app.security.ssrf import SsrfBlocked
+from app.security.ssrf import InternalDestination, SsrfBlocked
 from app.services import mcp_runner
 from app.services.mcp_servers import open_env, open_headers
 
@@ -71,21 +71,30 @@ def _timeout(server: McpServer) -> float:
     return STDIO_TIMEOUT_S if server.transport == McpTransport.stdio else REMOTE_TIMEOUT_S
 
 
-def _remote_client(
-    headers: dict[str, str] | None = None,
-    timeout: httpx2.Timeout | None = None,
-    auth: httpx2.Auth | None = None,
-) -> httpx2.AsyncClient:
-    """Matches the SDK's client-factory signature, so `sse_client` builds its
-    client this way too instead of its own redirect-following default."""
-    local = settings.mcp_allow_insecure_urls
-    return pinned_client(
-        headers=headers,
-        timeout=timeout,
-        auth=auth,
-        allow_insecure=local,
-        allow_private=local,
-    )
+def _remote_factory(internal: Sequence[InternalDestination] = ()) -> Any:
+    """A client factory with the SDK's signature, so `sse_client` builds its
+    client this way too instead of its own redirect-following default.
+    `internal`: the organisation's internal destinations (Phase 9.3)."""
+
+    def make(
+        headers: dict[str, str] | None = None,
+        timeout: httpx2.Timeout | None = None,
+        auth: httpx2.Auth | None = None,
+    ) -> httpx2.AsyncClient:
+        local = settings.mcp_allow_insecure_urls
+        return pinned_client(
+            headers=headers,
+            timeout=timeout,
+            auth=auth,
+            allow_insecure=local,
+            allow_private=local,
+            internal=internal,
+        )
+
+    return make
+
+
+_remote_client = _remote_factory()
 
 
 async def load_secrets(server_id: Any) -> tuple[dict[str, str], dict[str, str]]:
@@ -140,16 +149,19 @@ async def connect_with(
         return
 
     url = server.url or ""
+    from app.services import destinations
+
+    factory = _remote_factory(await destinations.for_org(getattr(server, "org_id", None)))
     if server.transport == McpTransport.sse:
         async with (
-            sse_client(url, headers=headers, httpx_client_factory=_remote_client) as (read, write),
+            sse_client(url, headers=headers, httpx_client_factory=factory) as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
             yield session
         return
     async with (
-        streamable_http_client(url, http_client=_remote_client(headers)) as (read, write),
+        streamable_http_client(url, http_client=factory(headers)) as (read, write),
         ClientSession(read, write) as session,
     ):
         await session.initialize()

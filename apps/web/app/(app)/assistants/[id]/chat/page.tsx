@@ -1,25 +1,73 @@
 "use client";
 
 import { MessagesSquare, Plus, X } from "lucide-react";
-import { use, useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import {
+  use,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
+import { AssistantAbout } from "@/components/chat/AssistantAbout";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { canAct } from "@/components/chat/conversation-access";
 import { ConversationList } from "@/components/chat/ConversationList";
+import { ExportButton } from "@/components/chat/ExportButton";
+import { HandoffButton } from "@/components/chat/HandoffButton";
+import { ShareButton } from "@/components/chat/ShareButton";
 import { failureText } from "@/components/chat/error-text";
 import { LoadFailed, loadFailure, type LoadFailure } from "@/components/load-state";
 import { Alert } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { useConfirm, usePrompt } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Loading } from "@/components/ui/loading";
 import { BackLink } from "@/components/ui/page-header";
-import { assistants, conversations, type Conversation } from "@/lib/api";
+import {
+  chat,
+  conversations,
+  type ChatAssistant,
+  type ChatMode,
+  type Conversation,
+} from "@/lib/api";
+import {
+  canEditAssistant,
+  chatUnavailable,
+  isAdminRole,
+  previewHref,
+} from "@/lib/assistant-lifecycle";
 import { useAuth } from "@/lib/auth";
+import { hasReadReason, setReadReason } from "@/lib/read-reasons";
+import { isEmployee } from "@/lib/roles";
+import { cn } from "@/lib/utils";
 
 export default function ChatPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const { user } = useAuth();
+  const { user, activeRole } = useAuth();
+  // Admins may list everyone's conversations (Phase 7b.2); the rest see
+  // only their own, which is all the server returns them.
+  const admin = isAdminRole(activeRole);
+  const employee = isEmployee(activeRole);
+  const [everyone, setEveryone] = useState(false);
+  // `?preview=1` is the Studio's test chat on the draft; `&version=N` on one
+  // version, for the admin reviewing it (Phase 7b.1). Without it, this is
+  // Chat: it answers only from the approved version.
+  const search = useSearchParams();
+  const previewing = search.get("preview") === "1";
+  const pinned = Number(search.get("version")) || undefined;
+  const mode = useMemo<ChatMode>(
+    () => ({ preview: previewing, version: pinned }),
+    [previewing, pinned],
+  );
+  // The card, not the Studio's record (Phase 8.1): the same for everyone,
+  // employees included, and the server says who may edit.
+  const [assistant, setAssistant] = useState<ChatAssistant | null>(null);
   const [name, setName] = useState("");
   const [rows, setRows] = useState<Conversation[]>([]);
   const [active, setActive] = useState<string | null>(null);
@@ -34,22 +82,52 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const listTrigger = useCallback(() => document.getElementById(listTriggerId), [listTriggerId]);
 
   const [failure, setFailure] = useState<LoadFailure | null>(null);
+  /** The assistant is gone for you (withdrawn, or you left its audience)
+   *  but a conversation of yours is named: it stays readable (Phase 8.6). */
+  const [orphan, setOrphan] = useState<Conversation | null>(null);
 
   const load = useCallback(async () => {
     let a, page;
     try {
-      [a, page] = await Promise.all([assistants.get(id), conversations.list(id)]);
+      [a, page] = await Promise.all([
+        chat.assistant(id),
+        conversations.list(id, null, mode, everyone),
+      ]);
     } catch (err) {
-      setFailure(loadFailure(err));
+      const why = loadFailure(err);
+      const named = search.get("conversation");
+      if (why.notFound && named) {
+        try {
+          setOrphan(await conversations.get(named));
+          setLoading(false);
+          return;
+        } catch {
+          // Not readable either: the plain not-found below.
+        }
+      }
+      setFailure(why);
       setLoading(false);
       return;
     }
+    setAssistant(a);
     setName(a.name);
     setRows(page.items);
     setMore(page.next_cursor);
-    setActive((cur) => cur ?? page.items[0]?.id ?? null);
+    // A conversation named in the address (from Chat's list, or an admin's
+    // queue, which asked for the reason already); else your own most
+    // recent one: someone else's needs a reason first.
+    const named = search.get("conversation");
+    setActive(
+      (cur) =>
+        cur ??
+        (named && (page.items.some((c) => c.id === named) || hasReadReason(named))
+          ? named
+          : null) ??
+        page.items.find((c) => c.created_by === user?.id)?.id ??
+        null,
+    );
     setLoading(false);
-  }, [id]);
+  }, [id, mode, everyone, user?.id, search]);
 
   const [error, setError] = useState<string | null>(null);
 
@@ -57,7 +135,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     if (!more) return;
     setLoadingMore(true);
     try {
-      const page = await conversations.list(id, more);
+      const page = await conversations.list(id, more, mode, everyone);
       setRows((r) => {
         const seen = new Set(r.map((c) => c.id));
         return [...r, ...page.items.filter((c) => !seen.has(c.id))];
@@ -68,7 +146,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
     } finally {
       setLoadingMore(false);
     }
-  }, [id, more]);
+  }, [id, more, mode, everyone]);
 
   useEffect(() => {
     void load();
@@ -77,14 +155,14 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   const newChat = useCallback(async () => {
     setError(null);
     try {
-      const c = await conversations.create(id);
+      const c = await conversations.create(id, undefined, mode);
       setRows((r) => [c, ...r]);
       setActive(c.id);
       setListOpen(false);
     } catch (err) {
       setError(failureText("Couldn't start a new conversation.", err));
     }
-  }, [id]);
+  }, [id, mode]);
 
   const confirm = useConfirm();
   const askTitle = usePrompt();
@@ -115,11 +193,12 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
 
   const archive = useCallback(
     async (c: Conversation) => {
+      // Phase 8.8: said as it is. Erasing comes with the retention rules.
       const sure = await confirm({
-        title: `Archive "${c.title}"?`,
-        description: "It leaves this list and can't be continued.",
-        confirmLabel: "Archive",
-        destructive: true,
+        title: `Remove "${c.title}" from your history?`,
+        description:
+          "It leaves your lists and search. Your company keeps it, and admins can still open it (each time recorded). You can put it back from Removed in Chat.",
+        confirmLabel: "Remove",
       });
       if (!sure) return;
       setError(null);
@@ -129,15 +208,72 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
         setRows(next);
         if (active === c.id) setActive(next[0]?.id ?? null);
       } catch (err) {
-        setError(failureText("Couldn't archive the conversation.", err));
+        setError(failureText("Couldn't remove the conversation.", err));
       }
     },
     [rows, active, confirm],
   );
 
-  const current = rows.find((r) => r.id === active);
+  /** Someone else's conversation opens only once the admin says why: each
+   *  read of it is recorded with that reason (Phase 7b.2). */
+  const open = useCallback(
+    async (cid: string) => {
+      const c = rows.find((r) => r.id === cid);
+      if (c && c.created_by !== user?.id && !hasReadReason(cid)) {
+        const reason = (
+          await askTitle({
+            title: "Open someone else's conversation?",
+            description:
+              "Conversations are private. Admins can open any, and each opening is recorded in the audit log with your reason.",
+            label: "Reason",
+            placeholder: "e.g. Ticket 4411: wrong refund amount",
+            confirmLabel: "Open",
+          })
+        )?.trim();
+        if (!reason) return;
+        setReadReason(cid, reason);
+      }
+      setActive(cid);
+      setListOpen(false);
+    },
+    [rows, user?.id, askTitle],
+  );
 
-  if (failure) return <LoadFailed failure={failure} what="assistant" />;
+  const current = rows.find((r) => r.id === active);
+  const editor = canEditAssistant(assistant, user?.id, activeRole);
+  // Chat refuses while nothing is approved or an admin has paused it; a
+  // preview runs regardless, unless it is paused.
+  const unavailable = assistant
+    ? previewing
+      ? assistant.status === "archived"
+        ? chatUnavailable(assistant)
+        : null
+      : chatUnavailable(assistant)
+    : null;
+
+  const toChat = { href: "/chat", label: "Back to Chat" };
+  const fullHeight = employee ? "h-[calc(100dvh-52px)]" : "h-[calc(100dvh-52px)] md:h-dvh";
+  if (failure) {
+    return <LoadFailed failure={failure} what="assistant" back={employee ? toChat : undefined} />;
+  }
+  if (orphan) {
+    return (
+      <div className={cn(fullHeight, "min-h-0")}>
+        <ChatThread
+          conversationId={orphan.id}
+          assistantId={id}
+          title={orphan.title}
+          readOnly
+          readOnlyNote="This assistant isn't available to you any more. You can still read this conversation; to ask something new, pick another assistant in Chat."
+          headerLeading={
+            <Link href="/chat" className={buttonVariants({ variant: "ghost", size: "sm" })}>
+              Chat
+            </Link>
+          }
+        />
+      </div>
+    );
+  }
   if (loading) {
     return (
       <div className="px-4 py-6 md:px-8">
@@ -157,10 +293,19 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       more={Boolean(more)}
       loadingMore={loadingMore}
       error={error}
-      onSelect={(cid) => {
-        setActive(cid);
-        setListOpen(false);
-      }}
+      onSelect={(cid) => void open(cid)}
+      scope={
+        admin && !previewing
+          ? {
+              everyone,
+              onChange: (v) => {
+                setEveryone(v);
+                setActive(null);
+                setLoading(true);
+              },
+            }
+          : undefined
+      }
       onNewChat={() => void newChat()}
       onRename={(c) => void rename(c)}
       onArchive={(c) => void archive(c)}
@@ -169,8 +314,9 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
   );
 
   return (
-    // Below 768px the app's 52px top bar sits above this page.
-    <div className="flex h-[calc(100dvh-52px)] min-h-0 md:h-dvh">
+    // Below 768px the app's 52px top bar sits above this page; an employee's
+    // bar is there at every width (Phase 8.6).
+    <div className={cn("flex min-h-0", fullHeight)}>
       <aside
         aria-label="Conversations"
         className="border-border bg-background hidden w-[272px] shrink-0 flex-col border-r md:flex"
@@ -191,6 +337,7 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
       </ListSheet>
 
       <div className="flex min-w-0 flex-1 flex-col">
+        {previewing && <PreviewBanner assistantId={id} version={pinned} />}
         {error && (
           // The list (and its error) is in a closed sheet on phones.
           <Alert className="mx-4 mt-3 md:hidden">{error}</Alert>
@@ -202,8 +349,16 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
               conversationId={active}
               assistantId={id}
               assistantName={name}
+              starters={previewing ? [] : (assistant?.starters ?? [])}
+              newerVersion={
+                !previewing &&
+                Boolean(current?.assistant_version_id) &&
+                Boolean(assistant?.current_version_id) &&
+                current?.assistant_version_id !== assistant?.current_version_id
+              }
               title={current?.title ?? "Conversation"}
-              readOnly={!canAct(current, user?.id)}
+              readOnly={!canAct(current, user?.id) || Boolean(unavailable)}
+              readOnlyNote={unavailable ?? undefined}
               headerLeading={
                 <Button
                   id={listTriggerId}
@@ -218,6 +373,17 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
                   <MessagesSquare aria-hidden />
                 </Button>
               }
+              headerTrailing={
+                previewing ? undefined : (
+                  <>
+                    {canAct(current, user?.id) && <HandoffButton conversationId={active} />}
+                    {canAct(current, user?.id) && <ShareButton conversationId={active} />}
+                    <ExportButton conversationId={active} />
+                    <AssistantAbout assistantId={id} />
+                  </>
+                )
+              }
+              feedback={!previewing}
               onNewChat={() => void newChat()}
               onRename={(title) => current && void rename(current, title)}
               onArchive={() => current && void archive(current)}
@@ -231,27 +397,87 @@ export default function ChatPage({ params }: { params: Promise<{ id: string }> }
           ) : (
             <div className="h-full overflow-y-auto px-4 py-6 md:px-8">
               <h1 className="sr-only">{name ? `${name} chat` : "Chat"}</h1>
-              <BackLink
-                href={`/assistants/${id}/build`}
-                label={name ? `${name} settings` : "Assistant settings"}
-                className="mb-4 md:hidden"
-              />
-              <EmptyState
-                className="mx-auto mt-[10vh] w-full max-w-[560px]"
-                headingLevel={2}
-                title={name ? `Chat with ${name}` : "Start a conversation"}
-                description="Ask it anything. Every answer shows the steps it took, what it cost and the sources it used."
-                action={
-                  <Button onClick={() => void newChat()}>
-                    <Plus aria-hidden />
-                    Start a conversation
-                  </Button>
-                }
-              />
+              {employee ? (
+                <BackLink href="/chat" label="Chat" className="mb-4 md:hidden" />
+              ) : (
+                <BackLink
+                  href={`/assistants/${id}/build`}
+                  label={name ? `${name} settings` : "Assistant settings"}
+                  className="mb-4 md:hidden"
+                />
+              )}
+              {unavailable ? (
+                <EmptyState
+                  className="mx-auto mt-[10vh] w-full max-w-[560px]"
+                  headingLevel={2}
+                  title={name ? `${name} isn't answering yet` : "Not answering yet"}
+                  description={
+                    editor && assistant?.status !== "archived"
+                      ? `${unavailable} You can test the draft in a preview while it waits.`
+                      : unavailable
+                  }
+                  action={
+                    editor && assistant?.status !== "archived" ? (
+                      <Link href={previewHref(id)} className={buttonVariants()}>
+                        Preview the draft
+                      </Link>
+                    ) : undefined
+                  }
+                />
+              ) : (
+                <EmptyState
+                  className="mx-auto mt-[10vh] w-full max-w-[560px]"
+                  headingLevel={2}
+                  title={
+                    previewing
+                      ? pinned
+                        ? `Preview version ${pinned}`
+                        : "Preview the draft"
+                      : name
+                        ? `Chat with ${name}`
+                        : "Start a conversation"
+                  }
+                  description={
+                    previewing
+                      ? "Try it before it goes live. Writes it asks for still wait for approval."
+                      : employee
+                        ? "Ask it a question. Answers show the sources they come from, so you can check them."
+                        : "Ask it anything. Every answer shows the steps it took, what it cost and the sources it used."
+                  }
+                  action={
+                    <div className="flex flex-wrap justify-center gap-2">
+                      <Button onClick={() => void newChat()}>
+                        <Plus aria-hidden />
+                        Start a conversation
+                      </Button>
+                      {!previewing && <AssistantAbout assistantId={id} />}
+                    </div>
+                  }
+                />
+              )}
             </div>
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Says this is a preview, not Chat, and who sees it (Phase 7b.1). */
+function PreviewBanner({ assistantId, version }: { assistantId: string; version?: number }) {
+  return (
+    <div className="border-border bg-muted text-small flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2">
+      <p className="text-foreground min-w-0 flex-1">
+        {version ? `Preview of version ${version}. ` : "Preview of the draft, as it is now. "}
+        Only this assistant&apos;s builders and admins see previews; Chat answers from the approved
+        version.
+      </p>
+      <Link
+        href={`/assistants/${assistantId}/build`}
+        className={buttonVariants({ variant: "ghost", size: "sm" })}
+      >
+        Back to building
+      </Link>
     </div>
   );
 }

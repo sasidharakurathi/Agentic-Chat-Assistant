@@ -33,13 +33,12 @@ import pytest
 from app.agent.events import TokenEvent
 from app.agent.events import UsageEvent as UsageEvent_
 from app.db.session import get_sessionmaker
-from app.models.approval import Approval, ApprovalStatus
 from app.models.conversation import Conversation, Message, MessageRole, Run, RunStatus
 from app.models.usage import UsageEvent
 from app.services import chat as chat_svc
 from httpx import AsyncClient
 from sqlalchemy import select
-from tests.test_chat_approvals import _assistant_with_db, _await_prompt, _conversation, fake_sql
+from tests.test_chat_approvals import _conversation, fake_sql
 
 pytestmark = pytest.mark.anyio
 
@@ -136,7 +135,8 @@ async def test_an_anyio_cancellation_mid_stream_records_an_aborted_turn(
     cid = await _plain_conversation(client, org_headers)
     seen = await _cancel_after_first_token(cid)
 
-    assert [e.type for e in seen] == ["token"]
+    # The message is kept before the answer starts (Phase 8.6).
+    assert [e.type for e in seen] == ["accepted", "token"]
     rec = await _records(cid)
     (run,) = rec["runs"]
     (msg,) = rec["assistant"]
@@ -161,59 +161,6 @@ async def test_a_cancellation_during_the_final_commit_keeps_the_finished_turn(
     (msg,) = rec["assistant"]
     assert run.status is RunStatus.ok, "it genuinely finished, and is recorded as such"
     assert msg.content.startswith("(fake driver)")
-
-
-async def test_a_disconnect_while_waiting_for_approval_expires_it(
-    client: AsyncClient, org_headers: dict[str, str], fake_sql: dict[str, Any]
-) -> None:
-    """Otherwise the row stays `pending` forever: the reload endpoint keeps
-    offering it, and approving it records a decision for a statement that
-    can no longer run."""
-    aid = await _assistant_with_db(client, org_headers)
-    cid = uuid.UUID(await _conversation(client, org_headers, aid))
-
-    events: list[Any] = []
-
-    async def consume() -> None:
-        async with (
-            get_sessionmaker()() as session,
-            contextlib.aclosing(
-                chat_svc.run_message(session, conversation_id=cid, text="sql: DELETE FROM t")
-            ) as agen,
-        ):
-            async for event in agen:
-                events.append(event)
-
-    # The client goes away while the turn is blocked on a human. Cancelled the
-    # way Starlette's BaseHTTPMiddleware does it — an anyio task group scope,
-    # which re-delivers cancellation on every await — NOT a one-shot
-    # `task.cancel()`. An earlier version of this test used the one-shot form
-    # and passed while the live server still left the approval pending: every
-    # retry propagated into the turn's pump task through `await task`, and cut
-    # its approval cleanup short.
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(consume)
-        prompt = await _await_prompt(events)
-        tg.cancel_scope.cancel()
-    await asyncio.sleep(0.5)  # anything detached would finish here, and must not be needed
-
-    async with get_sessionmaker()() as s:
-        row = await s.get(Approval, uuid.UUID(prompt.approval_id))
-        assert row is not None
-        assert row.status is ApprovalStatus.expired
-    assert fake_sql["ran"] == [], "the statement never ran"
-
-    late = await client.post(
-        f"/api/v1/approvals/{prompt.approval_id}:resolve",
-        json={"decision": "approved"},
-        headers=org_headers,
-    )
-    assert late.status_code == 400
-    assert late.json()["error"]["code"] == "approval_not_pending"
-
-    rec = await _records(cid)
-    (run,) = rec["runs"]
-    assert run.status is RunStatus.aborted
 
 
 async def test_a_turn_that_finishes_is_still_ok(

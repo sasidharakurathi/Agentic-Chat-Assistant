@@ -14,7 +14,14 @@ import { Loading } from "@/components/ui/loading";
 import { SectionHeading } from "@/components/ui/section-heading";
 import { Segmented } from "@/components/ui/segmented";
 import { Textarea } from "@/components/ui/textarea";
-import { ApiError, dataSources, type DataSource } from "@/lib/api";
+import {
+  accessLabel,
+  HeldNotice,
+  scanSummary,
+  SourceAccessEditor,
+} from "@/components/sources/SourceAccess";
+import { ApiError, dataSources, orgs, type DataSource, type Group } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { formatRelative, failureMessage } from "@/lib/format";
 import { progressLabel, reportLabel } from "@/lib/ingest-status";
 import { cn } from "@/lib/utils";
@@ -51,6 +58,8 @@ type Failure = { what: string; todo: string };
 type AddMode = "file" | "url" | "text";
 
 export function SourcesManager({ assistantId }: { assistantId: string }) {
+  const { activeOrgId } = useAuth();
+  const [groups, setGroups] = useState<Group[] | null>(null);
   const [rows, setRows] = useState<DataSource[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -84,6 +93,15 @@ export function SourcesManager({ assistantId }: { assistantId: string }) {
     void load();
   }, [load]);
 
+  // Who may read each source names groups (Phase 9.4).
+  useEffect(() => {
+    if (!activeOrgId) return;
+    orgs
+      .groups(activeOrgId)
+      .then(setGroups)
+      .catch(() => setGroups([]));
+  }, [activeOrgId]);
+
   // Poll only while something is actually in flight, and stop as soon as
   // everything has settled: an idle sources tab shouldn't hit the API twice
   // a second forever.
@@ -95,14 +113,16 @@ export function SourcesManager({ assistantId }: { assistantId: string }) {
   }, [indexing, load]);
 
   const run = useCallback(
-    async (fn: () => Promise<unknown>, failure: Failure) => {
+    async (fn: () => Promise<unknown>, failure: Failure): Promise<boolean> => {
       setBusy(true);
       setError(null);
       try {
         await fn();
         await load();
+        return true;
       } catch (err) {
         setError(failureMessage(failure.what, reasonOf(err), failure.todo));
+        return false;
       } finally {
         setBusy(false);
       }
@@ -360,7 +380,20 @@ export function SourcesManager({ assistantId }: { assistantId: string }) {
                 <SourceRow
                   key={row.id}
                   row={row}
+                  groups={groups}
                   busy={busy}
+                  onAccess={(access) =>
+                    run(() => dataSources.setAccess(assistantId, row.id, access), {
+                      what: `Couldn't change who can read ${row.name}.`,
+                      todo: "Try again in a moment.",
+                    })
+                  }
+                  onConfirm={() =>
+                    void run(() => dataSources.confirmEveryone(assistantId, row.id), {
+                      what: `Couldn't index ${row.name}.`,
+                      todo: "Try again in a moment.",
+                    })
+                  }
                   onReindex={() =>
                     void run(() => dataSources.reindex(assistantId, row.id), {
                       what: `Couldn't reindex ${row.name}.`,
@@ -401,6 +434,8 @@ function SourceStatus({ row }: { row: DataSource }) {
       );
     case "error":
       return <Badge variant="destructive">Failed</Badge>;
+    case "held":
+      return <Badge variant="warning">Waiting for you</Badge>;
   }
 }
 
@@ -418,17 +453,25 @@ function describeSource(row: DataSource): string {
 
 function SourceRow({
   row,
+  groups,
   busy,
+  onAccess,
+  onConfirm,
   onReindex,
   onDelete,
 }: {
   row: DataSource;
+  groups: Group[] | null;
   busy: boolean;
+  onAccess: (access: { everyone: boolean; group_ids: string[] }) => Promise<boolean>;
+  onConfirm: () => void;
   onReindex: () => void;
   onDelete: () => void;
 }) {
+  const [editing, setEditing] = useState(false);
   const progress = progressLabel(row);
   const report = reportLabel(row);
+  const found = row.status === "ready" ? scanSummary(row.ingest_report?.sensitive) : "";
   return (
     <li className="border-border flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b py-4">
       <div className="flex min-w-0 flex-1 flex-col gap-1">
@@ -445,6 +488,44 @@ function SourceRow({
         </p>
         {row.type === "url" && row.uri && row.uri !== row.name && (
           <p className="text-small text-muted-foreground break-all">{row.uri}</p>
+        )}
+        <p className="text-small text-muted-foreground">
+          Who can read it: {accessLabel(row, groups)}.{" "}
+          {!editing && (
+            <button
+              type="button"
+              className="text-foreground underline underline-offset-2"
+              onClick={() => setEditing(true)}
+            >
+              Change
+            </button>
+          )}
+        </p>
+        {editing && groups && (
+          <SourceAccessEditor
+            row={row}
+            groups={groups}
+            busy={busy}
+            onCancel={() => setEditing(false)}
+            onSave={(access) =>
+              void onAccess(access).then((ok) => {
+                if (ok) setEditing(false);
+              })
+            }
+          />
+        )}
+        {row.status === "held" && !editing && (
+          <HeldNotice
+            row={row}
+            busy={busy}
+            onConfirm={onConfirm}
+            onChooseGroups={() => setEditing(true)}
+          />
+        )}
+        {found && (
+          <p className="text-small text-muted-foreground">
+            Personal or secret data found: {found}.
+          </p>
         )}
         {row.error && (
           <p className="text-small text-destructive break-words">

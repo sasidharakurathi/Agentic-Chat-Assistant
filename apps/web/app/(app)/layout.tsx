@@ -1,37 +1,103 @@
 "use client";
 
-import { Gauge, LogOut, Menu, Users, Waypoints, X, type LucideIcon } from "lucide-react";
+import {
+  BellRing,
+  Gauge,
+  LogOut,
+  Menu,
+  MessagesSquare,
+  ScrollText,
+  ShieldCheck,
+  Users,
+  UsersRound,
+  Waypoints,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
+import { AlertBanner } from "@/components/alerts/AlertBanner";
 import { BrandLockup, BrandMark } from "@/components/brand-mark";
+import { NoticeGate } from "@/components/privacy/NoticeGate";
 import { ThemeSegmented, ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Loading } from "@/components/ui/loading";
 import { Select } from "@/components/ui/select";
-import { useAuth } from "@/lib/auth";
+import { chat } from "@/lib/api";
+import { safeNext, useAuth } from "@/lib/auth";
+import { rememberOfflineHelp } from "@/lib/offline-help";
+import { employeeMayOpen, isEmployee } from "@/lib/roles";
+import { useApprovalSummary } from "@/lib/use-approval-summary";
 import { cn } from "@/lib/utils";
 
-const NAV: { href: string; label: string; icon: LucideIcon }[] = [
-  { href: "/assistants", label: "Assistants", icon: Waypoints },
-  { href: "/usage", label: "Usage", icon: Gauge },
-  { href: "/members", label: "Members", icon: Users },
+const NAV: {
+  href: string;
+  label: string;
+  icon: LucideIcon;
+  admins?: boolean;
+  /** The Studio's: not for the Employee role (Phase 8.1). */
+  studio?: boolean;
+}[] = [
+  { href: "/chat", label: "Chat", icon: MessagesSquare },
+  { href: "/assistants", label: "Assistants", icon: Waypoints, studio: true },
+  { href: "/usage", label: "Usage", icon: Gauge, studio: true },
+  { href: "/members", label: "Members", icon: Users, studio: true },
+  // Phase 8.5: who an assistant can be for.
+  { href: "/groups", label: "Groups", icon: UsersRound, admins: true },
+  // Phase 9.1: the requests waiting for you, an admin or a named approver.
+  { href: "/approvals", label: "Approvals", icon: ShieldCheck },
+  // Phase 7b.7: admins and the owner only (the API refuses everyone else).
+  { href: "/audit", label: "Audit log", icon: ScrollText, admins: true },
+  // Phase 8.9: what stopped Chat for everyone.
+  { href: "/alerts", label: "Alerts", icon: BellRing, admins: true },
 ];
+
+/** Chat's own pages (Phase 8.7): they wait for the privacy notice. A
+ *  preview is the Studio's; Privacy & help shows the notice itself. */
+function chatPage(pathname: string, search: string): boolean {
+  if (pathname === "/chat/privacy") return false;
+  if (pathname === "/chat" || pathname.startsWith("/chat/")) return true;
+  return (
+    /^\/assistants\/[^/]+\/chat\/?$/.test(pathname) && !new URLSearchParams(search).has("preview")
+  );
+}
 
 /** The builder and chat need the width: the rail shrinks to icons there. */
 const WORK_SURFACE = /^\/assistants\/[^/]+\/(build|chat)(\/|$)/;
 
 export default function AppLayout({ children }: { children: ReactNode }) {
-  const { ready, user, offline, refresh } = useAuth();
+  const { ready, user, offline, refresh, activeRole, activeOrgId, twoFactor } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
+
+  // An employee chats (Phase 8.1): any other page would only be refused by
+  // the server, so they are taken to Chat instead.
+  useEffect(() => {
+    if (!ready || !isEmployee(activeRole)) return;
+    if (!employeeMayOpen(pathname, window.location.search)) router.replace("/chat");
+  }, [ready, activeRole, pathname, router]);
   const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
-    // Offline is not signed out (Phase 7a.8): stay, and keep trying.
-    if (ready && !user && !offline) router.replace("/login");
-  }, [ready, user, offline, router]);
+    // Offline is not signed out (Phase 7a.8): stay, and keep trying. Signed
+    // out, the page asked for comes back after signing in (Phase 8.6): a
+    // link from an email used to land on the assistants list instead.
+    if (!ready || user || offline) return;
+    const back = safeNext(pathname + window.location.search);
+    router.replace(back ? `/login?next=${encodeURIComponent(back)}` : "/login");
+  }, [ready, user, offline, router, pathname]);
+
+  // The organisation's steps for getting on its network, kept for the
+  // offline page: the IT handbook sits behind the same VPN (Phase 8.6).
+  useEffect(() => {
+    if (!ready || !user || !activeOrgId) return;
+    chat
+      .help()
+      .then(rememberOfflineHelp)
+      .catch(() => {});
+  }, [ready, user, activeOrgId]);
 
   // A link in the sheet navigates; the sheet should not stay over the page.
   useEffect(() => {
@@ -56,6 +122,33 @@ export default function AppLayout({ children }: { children: ReactNode }) {
     return (
       <div className="flex min-h-dvh items-center justify-center p-6">
         <Loading what="your workspace" />
+      </div>
+    );
+  }
+
+  const page =
+    typeof window !== "undefined" && chatPage(pathname, window.location.search) ? (
+      <NoticeGate>{children}</NoticeGate>
+    ) : (
+      children
+    );
+
+  // An employee's Chat is its own app (Phase 8.6): a slim bar, no Studio.
+  if (isEmployee(activeRole)) {
+    return (
+      <div className="flex min-h-dvh flex-col">
+        <ChatBar />
+        <main className="bg-background min-w-0 flex-1">
+          {offline && (
+            <p
+              role="status"
+              className="border-border bg-muted text-small border-b px-4 py-2 text-center"
+            >
+              Can&apos;t reach the server right now. Trying again.
+            </p>
+          )}
+          {page}
+        </main>
       </div>
     );
   }
@@ -103,9 +196,84 @@ export default function AppLayout({ children }: { children: ReactNode }) {
             Can&apos;t reach the server right now. Trying again.
           </p>
         )}
-        {children}
+        {/* Phase 8.9: something stopped Chat for everyone. */}
+        {(activeRole === "owner" || activeRole === "admin") && activeOrgId && (
+          <AlertBanner orgId={activeOrgId} />
+        )}
+        {/* Phase 8.4: admin features wait for a second factor. */}
+        {twoFactor?.required && !twoFactor.session_verified && pathname !== "/account" && (
+          <p
+            role="status"
+            className="border-border bg-muted text-small border-b px-4 py-2 text-center"
+          >
+            Admin features need two-step sign-in.{" "}
+            <Link href="/account" className="font-medium underline underline-offset-[3px]">
+              {twoFactor.enabled ? "Confirm it's you" : "Set it up"}
+            </Link>{" "}
+            in Your account.
+          </p>
+        )}
+        {page}
       </main>
     </div>
+  );
+}
+
+/** The Chat app's bar, for employees (Phase 8.6): Chat, your account and
+ *  signing out, at every width. 52px, like the Studio's phone bar, so the
+ *  chat page's height is worked out the same way. */
+function ChatBar() {
+  const { user, logout } = useAuth();
+  // An employee can be an assistant's approver (Phase 9.1): the link shows
+  // when something waits for them, with how many (9.2).
+  const summary = useApprovalSummary(Boolean(user));
+  const toDecide = summary?.to_decide ?? 0;
+  if (!user) return null;
+  return (
+    <header className="border-border bg-background sticky top-0 z-30 flex h-[52px] shrink-0 items-center gap-2 border-b px-3 md:px-6">
+      <Link
+        href="/chat"
+        aria-label="Chat home"
+        className="focus-visible:ring-ring rounded-md px-1 focus-visible:ring-2 focus-visible:outline-none"
+      >
+        <BrandLockup />
+      </Link>
+      <div className="ml-auto flex items-center gap-1">
+        {toDecide > 0 && (
+          <Link
+            href="/approvals"
+            className="hover:bg-muted focus-visible:ring-ring flex h-9 items-center rounded-md px-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
+          >
+            Approvals <span className="num text-muted-foreground ml-1">{toDecide}</span>
+          </Link>
+        )}
+        <Link
+          href="/chat/privacy"
+          className="hover:bg-muted focus-visible:ring-ring flex h-9 items-center rounded-md px-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
+        >
+          <ShieldCheck aria-hidden className="size-4 sm:hidden" />
+          <span className="sr-only sm:not-sr-only">Privacy &amp; help</span>
+        </Link>
+        <ThemeToggle iconOnly />
+        <Link
+          href="/account"
+          title={`${user.email}: your account`}
+          className="hover:bg-muted focus-visible:ring-ring flex h-9 items-center gap-2 rounded-md px-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
+        >
+          <span
+            aria-hidden
+            className="bg-muted text-foreground text-small inline-flex size-7 shrink-0 items-center justify-center rounded-full font-semibold"
+          >
+            {initials(user.name, user.email)}
+          </span>
+          <span className="hidden sm:inline">Your account</span>
+          <span className="sr-only sm:hidden">Your account</span>
+        </Link>
+        <Button variant="ghost" size="sm" className="px-2" onClick={() => logout()}>
+          Sign out
+        </Button>
+      </div>
+    </header>
   );
 }
 
@@ -119,8 +287,11 @@ function RailContent({
   collapsed: boolean;
   onNavigate?: () => void;
 }) {
-  const { user, orgs, activeOrgId, setActiveOrg, logout } = useAuth();
+  const { user, orgs, activeOrgId, activeRole, setActiveOrg, logout } = useAuth();
+  const admin = activeRole === "owner" || activeRole === "admin";
   const orgId = useId();
+  // Requests waiting for this person to decide (Phase 9.2).
+  const summary = useApprovalSummary(Boolean(user));
   if (!user) return null;
   const activeOrg = orgs.find((o) => o.id === activeOrgId) ?? orgs[0];
 
@@ -140,7 +311,9 @@ function RailContent({
       </Link>
 
       <nav aria-label="Main" className={cn("mt-6 flex flex-col gap-1", !collapsed && "w-full")}>
-        {NAV.map((item) => (
+        {NAV.filter(
+          (item) => (!item.admins || admin) && (!item.studio || !isEmployee(activeRole)),
+        ).map((item) => (
           <NavLink
             key={item.href}
             href={item.href}
@@ -148,6 +321,7 @@ function RailContent({
             active={pathname.startsWith(item.href)}
             collapsed={collapsed}
             onNavigate={onNavigate}
+            count={item.href === "/approvals" ? summary?.to_decide : undefined}
           >
             {item.label}
           </NavLink>
@@ -223,9 +397,13 @@ function RailContent({
             </Button>
           ) : (
             <>
-              <span className="min-w-0 flex-1 truncate text-sm" title={user.email}>
+              <Link
+                href="/account"
+                className="hover:text-foreground focus-visible:ring-ring min-w-0 flex-1 truncate rounded-sm text-sm focus-visible:ring-2 focus-visible:outline-none"
+                title={`${user.email}: your account`}
+              >
                 {user.email}
-              </span>
+              </Link>
               <Button variant="ghost" size="sm" className="px-2" onClick={() => logout()}>
                 Sign out
               </Button>
@@ -243,6 +421,7 @@ function NavLink({
   active,
   collapsed,
   onNavigate,
+  count,
   children,
 }: {
   href: string;
@@ -250,6 +429,8 @@ function NavLink({
   active: boolean;
   collapsed: boolean;
   onNavigate?: () => void;
+  /** How many wait here (Phase 9.2): shown when more than none. */
+  count?: number;
   children: string;
 }) {
   return (
@@ -267,6 +448,16 @@ function NavLink({
     >
       <Icon aria-hidden className="size-4 shrink-0" />
       <span className={cn(collapsed && "sr-only")}>{children}</span>
+      {count ? (
+        collapsed ? (
+          <span aria-hidden className="bg-warning absolute top-1.5 right-1.5 size-2 rounded-full" />
+        ) : (
+          <span className="num text-small text-foreground ml-auto">
+            {count}
+            <span className="sr-only"> waiting</span>
+          </span>
+        )
+      ) : null}
       {collapsed && (
         <span
           aria-hidden

@@ -15,7 +15,6 @@ Retrieval arrived in Phase 2 (`test_agent_subagents.py`). What is new here:
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from typing import Any
 
@@ -253,13 +252,12 @@ async def test_a_write_from_inside_the_subagent_still_asks_a_person(
     aid = await _with_sql_subagent(client, org_headers)
     cid = await _conversation(client, org_headers, aid)
     events: list[Any] = []
-    turn = asyncio.create_task(_run_turn(cid, "sql: DELETE FROM sessions", events))
+    await _run_turn(cid, "sql: DELETE FROM sessions", events)
     prompt = await _await_prompt(events)
     assert prompt.rationale == "DELETE FROM sessions"
     assert fake_sql["ran"] == [], "nothing runs before a person decides"
 
     await _resolve(client, org_headers, prompt.approval_id, "denied")
-    await asyncio.wait_for(turn, timeout=15)
     assert fake_sql["ran"] == []
     nested = next(e for e in events if e.type == "tool_result" and e.parent_id is not None)
     assert nested.status == "denied"

@@ -114,7 +114,7 @@ async def test_the_document_records_its_type_and_checksum(
     assert document is not None
     assert document.mime == "text/plain"
     assert document.checksum == hashlib.sha256(LONG_TEXT.encode()).hexdigest()
-    assert document.id == document_id_for(source.id)
+    assert document.id == document_id_for(source.id, document.checksum)
 
 
 async def test_reindexing_unchanged_content_keeps_ids_and_pays_nothing(

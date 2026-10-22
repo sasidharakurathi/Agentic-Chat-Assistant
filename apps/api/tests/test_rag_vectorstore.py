@@ -20,6 +20,7 @@ from app.models.rag import Chunk, DataSource, DataSourceType, Document
 from app.rag.vectorstore import ChunkRecord, PgVectorStore
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from tests.infra import unavailable
 
 pytestmark = pytest.mark.integration
 
@@ -36,7 +37,7 @@ async def pg(request: pytest.FixtureRequest) -> AsyncIterator[AsyncSession]:
             pass
     except Exception as exc:  # pragma: no cover - environment-dependent
         await engine.dispose()
-        pytest.skip(f"Postgres not reachable at {POSTGRES_URL}: {exc}")
+        unavailable("postgres", f"Postgres not reachable at {POSTGRES_URL}: {exc}")
 
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     async with sessionmaker() as session:

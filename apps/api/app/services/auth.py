@@ -11,10 +11,11 @@ from functools import cache
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.errors import Conflict, Forbidden, Unauthorized
+from app.api.errors import AppError, Conflict, Forbidden, Unauthorized
 from app.config import settings
 from app.logging import get_logger
 from app.models.enums import MemberRole
+from app.models.invite import Invite
 from app.models.membership import Membership
 from app.models.organization import Organization
 from app.models.refresh_token import RefreshToken
@@ -58,25 +59,34 @@ async def _may_register(session: AsyncSession, email: str, invite_token: str | N
     whoever merely knows that an address was invited must not be able to
     take the account before its owner does.
     """
-    if settings.registration == "open":
+    # One company organisation (Phase 7b.8): after the first account, only
+    # an invite brings anyone in, whatever REGISTRATION says.
+    if settings.registration == "open" and settings.org_mode == "multi":
         return True
     if await session.scalar(select(User.id).limit(1)) is None:
         return True
+    return await _usable_invite(session, email, invite_token) is not None
+
+
+async def _usable_invite(
+    session: AsyncSession, email: str, invite_token: str | None
+) -> Invite | None:
+    """The invite this sign-up may use: open, for this address, and still
+    backed by whoever sent it (Phase 7b.4). None otherwise."""
     if not invite_token:
-        return False
+        return None
     # Imported here: `orgs` is the invites' home and imports nothing of ours.
-    from app.models.invite import Invite
-    from app.services.orgs import _hash_token
+    from app.services import orgs
 
     invite = await session.scalar(
-        select(Invite).where(Invite.token_hash == _hash_token(invite_token))
+        select(Invite).where(Invite.token_hash == orgs._hash_token(invite_token))
     )
-    return (
-        invite is not None
-        and invite.accepted_at is None
-        and invite.expires_at > datetime.now(UTC)
-        and invite.email == email
-    )
+    try:
+        await orgs.check_open(session, invite)
+    except AppError:
+        return None
+    assert invite is not None
+    return invite if invite.email == email else None
 
 
 async def register(
@@ -104,11 +114,34 @@ async def register(
     session.add(user)
     await session.flush()
 
+    # Signing up with an invite joins the organisation that sent it, and
+    # only that one (Phase 7b.4): no personal org beside it, and no second
+    # "Join" step a closed tab could leave undone.
+    invite = await _usable_invite(session, email, invite_token)
+    if invite is not None:
+        from app.services import orgs
+
+        await audit.record(
+            session,
+            action="user.register",
+            org_id=invite.org_id,
+            actor_user_id=user.id,
+            target_type="user",
+            target_id=user.id,
+            meta={"invite": str(invite.id)},
+            ip=ip,
+        )
+        await orgs.join(session, invite, user, ip=ip)
+        log.info("user_registered", user_id=str(user.id), org_id=str(invite.org_id))
+        return user
+
+    # In single-org mode only the first account gets here: its org is the
+    # company's, to rename in Settings, not a personal one.
     org_name = f"{name.strip() or email.split('@')[0]}'s Org"
     org = Organization(
         name=org_name,
         slug=await _unique_org_slug(session, org_name),
-        is_personal=True,
+        is_personal=settings.org_mode == "multi",
     )
     session.add(org)
     await session.flush()
@@ -148,13 +181,15 @@ async def authenticate(session: AsyncSession, *, email: str, password: str) -> U
     # An unknown address still costs one password hash (task 6.3). It used
     # to return at once, so the response time said whether an account
     # exists.
-    hashed = user.password_hash if user is not None else _decoy_hash()
-    if not verify_password(password, hashed) or user is None:
+    # An account made through Google has no password (Phase 8.3): checked
+    # against the decoy, so it costs the same and opens nothing.
+    hashed = user.password_hash if user is not None and user.password_hash else _decoy_hash()
+    if not verify_password(password, hashed) or user is None or user.password_hash is None:
         raise Unauthorized("Invalid email or password", code="invalid_credentials")
     if not user.is_active:
         raise Unauthorized("Account is disabled", code="account_disabled")
 
-    if needs_rehash(user.password_hash):
+    if user.password_hash and needs_rehash(user.password_hash):
         user.password_hash = hash_password(password)
     user.last_login_at = datetime.now(UTC)
     await session.flush()
@@ -168,8 +203,11 @@ async def issue_tokens(
     family_id: uuid.UUID | None = None,
     user_agent: str | None = None,
     ip: str | None = None,
+    strong: bool = False,
 ) -> IssuedTokens:
-    access, _ = create_access_token(user_id)
+    """`strong`: the sign-in passed a second factor (Phase 8.4); the
+    session's renewals keep it."""
+    access, _ = create_access_token(user_id, strong=strong)
     refresh, refresh_claims = create_refresh_token(user_id, family_id=family_id)
     session.add(
         RefreshToken(
@@ -179,6 +217,7 @@ async def issue_tokens(
             expires_at=refresh_claims.expires_at,
             user_agent=(user_agent or "")[:400] or None,
             ip=ip,
+            strong=strong,
         )
     )
     await session.flush()
@@ -208,7 +247,12 @@ async def rotate_refresh_token(
         if await _retry_after_lost_reply(session, row):
             log.info("refresh_retry_accepted", user_id=str(row.user_id), family=str(row.family_id))
             return await issue_tokens(
-                session, user_id=row.user_id, family_id=row.family_id, user_agent=user_agent, ip=ip
+                session,
+                user_id=row.user_id,
+                family_id=row.family_id,
+                user_agent=user_agent,
+                ip=ip,
+                strong=row.strong,
             )
         await _revoke_family(session, row.family_id, reason="reuse_detected")
         log.warning("refresh_reuse_detected", user_id=str(row.user_id), family=str(row.family_id))
@@ -217,6 +261,13 @@ async def rotate_refresh_token(
 
     if row.expires_at <= datetime.now(UTC):
         raise Unauthorized("Refresh token expired", code="refresh_expired")
+    # A switched-off account renews nothing (Phase 7b.4). Deactivation
+    # revokes every token already; this holds even if one slipped past.
+    owner = await session.get(User, row.user_id)
+    if owner is None or not owner.is_active:
+        await _revoke_family(session, row.family_id, reason="user_inactive")
+        await session.commit()
+        raise Unauthorized("This account has been switched off", code="user_inactive")
 
     # Claimed in one conditional UPDATE (task 6.3). Reading `used_at` and
     # then writing it let two requests with the same token both pass the
@@ -232,7 +283,12 @@ async def rotate_refresh_token(
         await session.commit()
         raise Unauthorized("Refresh token already used", code="refresh_reused")
     return await issue_tokens(
-        session, user_id=row.user_id, family_id=row.family_id, user_agent=user_agent, ip=ip
+        session,
+        user_id=row.user_id,
+        family_id=row.family_id,
+        user_agent=user_agent,
+        ip=ip,
+        strong=row.strong,
     )
 
 

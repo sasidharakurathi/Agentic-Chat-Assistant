@@ -20,8 +20,12 @@ async def _archived(client: AsyncClient, headers: dict[str, str]) -> tuple[str, 
     aid = (await client.post("/api/v1/assistants", json={"name": "A"}, headers=headers)).json()[
         "id"
     ]
-    keep = await client.post(f"/api/v1/assistants/{aid}/conversations", json={}, headers=headers)
-    gone = await client.post(f"/api/v1/assistants/{aid}/conversations", json={}, headers=headers)
+    keep = await client.post(
+        f"/api/v1/assistants/{aid}/conversations", json={"mode": "preview"}, headers=headers
+    )
+    gone = await client.post(
+        f"/api/v1/assistants/{aid}/conversations", json={"mode": "preview"}, headers=headers
+    )
     r = await client.delete(f"/api/v1/conversations/{gone.json()['id']}", headers=headers)
     assert r.status_code == 200, r.text
     return aid, gone.json()["id"], keep.json()["id"]
@@ -31,7 +35,9 @@ async def test_an_archived_conversation_leaves_the_list(
     client: AsyncClient, org_headers: dict[str, str]
 ) -> None:
     aid, gone, keep = await _archived(client, org_headers)
-    listed = await client.get(f"/api/v1/assistants/{aid}/conversations", headers=org_headers)
+    listed = await client.get(
+        f"/api/v1/assistants/{aid}/conversations?mode=preview", headers=org_headers
+    )
     ids = {c["id"] for c in listed.json()["items"]}
     assert keep in ids
     assert gone not in ids, "it used to come straight back on reload"

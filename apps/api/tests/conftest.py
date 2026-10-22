@@ -32,6 +32,11 @@ os.environ.setdefault("LOG_FORMAT", "console")
 os.environ.setdefault("RATE_LIMIT_ENABLED", "0")
 # Tests that need an MCP runner start their own; nothing else should reach one.
 os.environ.setdefault("MCP_RUNNER_URL", "")
+# Mail stays in the process (Phase 7b.5), whatever the repo .env says: a test
+# must never email anyone. Assigned, not defaulted, for that reason.
+os.environ["MAIL_BACKEND"] = "memory"
+# Phase 8.7: the notice's own tests turn it on; the rest chat without it.
+os.environ["PRIVACY_NOTICE_REQUIRED"] = "0"
 
 
 import pytest  # noqa: E402

@@ -85,6 +85,9 @@ lerna-debug.log*
 
 
 playwright-report/
+# The browser tests (Phase 8.11): their web build, and the seed's state.
+.next-e2e/
+apps/web/e2e/.state.json
 playwright/.cache/
 test-results/
 blob-report/

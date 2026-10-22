@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import {
@@ -13,19 +14,39 @@ import { stationLabel } from "@/components/canvas/graph-sync";
 import { SUBAGENT_ROLE_NAME, TOOL_NAME } from "@/components/canvas/station";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { useConfirm, usePrompt } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { nodeTypeLabel } from "@/components/ui/line-bullet";
 import { Loading } from "@/components/ui/loading";
 import { SectionHeading } from "@/components/ui/section-heading";
+import { OfficialToggle, VersionListingSummary } from "@/components/listing/VersionListing";
+import { ActionApprovers } from "@/components/versions/ActionApprovers";
+import { ApprovalEvidence } from "@/components/versions/ApprovalEvidence";
+import { AssistantEditors } from "@/components/versions/AssistantEditors";
+import { useToast } from "@/components/ui/toast";
 import {
   ApiError,
   assistants,
+  orgs,
+  type AssistantDetail,
   type AssistantVersion,
   type DiffEntry,
   type Graph,
   type VersionDiff,
 } from "@/lib/api";
+import {
+  VERSION_STATUS_WORD,
+  approveRule,
+  canEditAssistant,
+  isAdminRole,
+  previewHref,
+  reviewersOf,
+  versionActions,
+  type VersionStatus,
+} from "@/lib/assistant-lifecycle";
+import { useAuth } from "@/lib/auth";
+import { compareManifests, type Manifest } from "@/lib/manifest-diff";
 import { cn } from "@/lib/utils";
 
 // The canvas is the largest thing on the page, and History is one tab of
@@ -47,21 +68,56 @@ function failed(what: string, err: unknown, todo: string): string {
 const when = (iso: string) =>
   new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 
-/** Published versions, and what changed between any two of them.
+const STATUS_TONE: Record<VersionStatus, "success" | "warning" | "destructive" | "muted"> = {
+  submitted: "warning",
+  approved: "success",
+  rejected: "destructive",
+  superseded: "muted",
+  withdrawn: "muted",
+  rolled_back: "destructive",
+};
+
+/** Versions, their review, and what changed between any two of them.
  *
- *  The backend has listed versions and diffed them since task 1.2; nothing in
- *  the UI called either. A version is immutable, so this is read-only: pick
- *  two, see the two pipelines as one drawing with what changed marked on it
- *  (task 6.8), then the same changes as a list, and the config changes by
- *  setting. */
+ *  A version never changes once submitted. An admin approves it before Chat
+ *  answers from it (Phase 7b.1): here they approve or reject it, roll back
+ *  to an earlier approved one, and pause the assistant. Its builders can
+ *  take back a submission and preview any version. Pick two to see the two
+ *  pipelines as one drawing with what changed marked on it (task 6.8), then
+ *  the same changes as a list, and the config changes by setting. */
 export function VersionHistory({
-  assistantId,
+  assistant,
   sourceLabels = {},
+  onChanged,
 }: {
-  assistantId: string;
+  assistant: AssistantDetail;
   /** Names for the documents, databases and servers a station points at. */
   sourceLabels?: Record<string, string>;
+  /** The assistant's state changed (approved, rolled back, paused). */
+  onChanged: () => Promise<void>;
 }) {
+  const assistantId = assistant.id;
+  const { user, activeRole, activeOrgId } = useAuth();
+  const admin = isAdminRole(activeRole);
+  const editor = canEditAssistant(assistant, user?.id, activeRole);
+  // Who else could approve (Phase 7b.3): nobody approves their own work
+  // while another active admin or the owner could.
+  const [reviewers, setReviewers] = useState<string[]>([]);
+  useEffect(() => {
+    if (!admin || !activeOrgId) return;
+    orgs
+      .members(activeOrgId)
+      .then((page) => setReviewers(reviewersOf(page.items)))
+      .catch(() => {});
+  }, [admin, activeOrgId]);
+  const ruleFor = (v: AssistantVersion) =>
+    approveRule({
+      me: user?.id,
+      role: activeRole,
+      submittedBy: v.created_by,
+      builtBy: assistant.created_by,
+      reviewers,
+    });
   const [rows, setRows] = useState<AssistantVersion[]>([]);
   const [more, setMore] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -72,28 +128,161 @@ export function VersionHistory({
   // The two versions' graphs, for the drawing. The list and the table need
   // only the diff, so they show even if these fail to load.
   const [graphs, setGraphs] = useState<{ from: Graph; to: Graph } | null>(null);
+  // What each was submitted with: knowledge, connections, tools (7b.1).
+  const [manifests, setManifests] = useState<{ from: Manifest | null; to: Manifest | null } | null>(
+    null,
+  );
+  // What has changed since the right-hand version was submitted.
+  const [drift, setDrift] = useState<{ number: number; items: string[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
 
+  const loadVersions = useCallback(
+    () =>
+      assistants
+        .versions(assistantId)
+        .then((page) => {
+          setRows(page.items);
+          setMore(page.next_cursor);
+          if (page.items.length >= 2) {
+            setTo((t) => t ?? page.items[0].version_number);
+            setFrom((f) => f ?? page.items[1].version_number);
+          }
+        })
+        .catch((err) =>
+          setError(failed("Couldn't load the versions.", err, "Reload the page to try again.")),
+        )
+        .finally(() => setLoaded(true)),
+    [assistantId],
+  );
+
   useEffect(() => {
-    assistants
-      .versions(assistantId)
-      .then((page) => {
-        setRows(page.items);
-        setMore(page.next_cursor);
-        if (page.items.length >= 2) {
-          setTo(page.items[0].version_number);
-          setFrom(page.items[1].version_number);
-        }
+    void loadVersions();
+  }, [loadVersions]);
+
+  // ── review, rollback, pause ──
+  const confirm = useConfirm();
+  const ask = usePrompt();
+  const toast = useToast();
+  const [acting, setActing] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const act = useCallback(
+    async (what: string, run: () => Promise<unknown>, done: string) => {
+      setActing(true);
+      setActionError(null);
+      try {
+        await run();
+        await Promise.all([loadVersions(), onChanged()]);
+        toast(done, "success");
+      } catch (err) {
+        setActionError(failed(`Couldn't ${what}.`, err, "Reload the page, then try again."));
+      } finally {
+        setActing(false);
+      }
+    },
+    [loadVersions, onChanged, toast],
+  );
+
+  const liveNumber = rows.find((v) => v.id === assistant.current_version_id)?.version_number;
+
+  const onAction = async (action: ReturnType<typeof versionActions>[number], n: number) => {
+    if (action === "approve") {
+      const version = rows.find((r) => r.version_number === n);
+      const own = version !== undefined && ruleFor(version) === "needs_note";
+      const note = await ask({
+        title: own ? `Approve your own version ${n}?` : `Approve version ${n}?`,
+        description: own
+          ? "Nobody else can review it, so you may approve it yourself. Say why it is ready: the note is kept with the approval, marked as self-approved."
+          : "It becomes the live version: new conversations answer from it. Conversations already running stay on the version they started on.",
+        label: own ? "Why it is ready" : "Note for the builder (optional)",
+        confirmLabel: "Approve",
+      });
+      if (note === null) return;
+      if (own && !note.trim()) {
+        setActionError("Approving your own version needs a note saying why it is ready.");
+        return;
+      }
+      await act(
+        "approve the version",
+        () => assistants.approve(assistantId, n, note.trim()),
+        `Approved version ${n}`,
+      );
+    } else if (action === "reject") {
+      const note = (
+        await ask({
+          title: `Reject version ${n}?`,
+          description: "The builder reads your reason, so say what to change.",
+          label: "Reason",
+          confirmLabel: "Reject",
+        })
+      )?.trim();
+      if (note === undefined) return;
+      if (!note) {
+        setActionError("A rejection needs a reason, so the builder knows what to change.");
+        return;
+      }
+      await act(
+        "reject the version",
+        () => assistants.reject(assistantId, n, note),
+        `Rejected version ${n}`,
+      );
+    } else if (action === "withdraw") {
+      const sure = await confirm({
+        title: `Withdraw version ${n}?`,
+        description: "It leaves the review queue. Submit again when it is ready.",
+        confirmLabel: "Withdraw",
+      });
+      if (!sure) return;
+      await act(
+        "withdraw the version",
+        () => assistants.withdraw(assistantId, n),
+        `Withdrew version ${n}`,
+      );
+    } else if (action === "make-live") {
+      const sure = await confirm({
+        title: `Roll back to version ${n}?`,
+        description:
+          liveNumber !== undefined
+            ? `Version ${liveNumber} stops answering and can't go live again without a new submission. Its conversations move to version ${n} on their next message.`
+            : `Version ${n} becomes the live version.`,
+        confirmLabel: "Roll back",
+        destructive: true,
+      });
+      if (!sure) return;
+      await act(
+        "roll back",
+        () => assistants.makeLive(assistantId, n),
+        `Version ${n} is live again`,
+      );
+    }
+  };
+
+  const pause = async () => {
+    const reason = (
+      await ask({
+        title: "Pause this assistant?",
+        description:
+          "Nothing answers until it is reopened, previews included. Answers being written stop, and approvals waiting in its conversations expire.",
+        label: "Reason",
+        confirmLabel: "Pause",
       })
-      .catch((err) =>
-        setError(
-          failed("Couldn't load the published versions.", err, "Reload the page to try again."),
-        ),
-      )
-      .finally(() => setLoaded(true));
-  }, [assistantId]);
+    )?.trim();
+    if (reason === undefined) return;
+    if (!reason) {
+      setActionError("Pausing needs a reason, for the audit log and the builder.");
+      return;
+    }
+    await act(
+      "pause the assistant",
+      () => assistants.archive(assistantId, reason),
+      "Paused the assistant",
+    );
+  };
+
+  const reopen = () =>
+    act("reopen the assistant", () => assistants.unarchive(assistantId), "Reopened the assistant");
 
   const loadMore = useCallback(async () => {
     if (!more) return;
@@ -111,7 +300,23 @@ export function VersionHistory({
   }, [assistantId, more]);
 
   useEffect(() => {
+    setDrift(null);
+    if (to === null) return;
+    let live = true;
+    assistants
+      .drift(assistantId, to)
+      .then((d) => {
+        if (live) setDrift({ number: to, items: d.drift.map((x) => x.message) });
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [assistantId, to, rows]);
+
+  useEffect(() => {
     setGraphs(null);
+    setManifests(null);
     if (from === null || to === null || from === to) {
       setDiff(null);
       return;
@@ -120,7 +325,12 @@ export function VersionHistory({
     let live = true;
     Promise.all([assistants.version(assistantId, from), assistants.version(assistantId, to)])
       .then(([a, b]) => {
-        if (live) setGraphs({ from: a.graph, to: b.graph });
+        if (!live) return;
+        setGraphs({ from: a.graph, to: b.graph });
+        setManifests({
+          from: (a.manifest ?? null) as Manifest | null,
+          to: (b.manifest ?? null) as Manifest | null,
+        });
       })
       .catch(() => {});
     assistants
@@ -145,7 +355,7 @@ export function VersionHistory({
   if (!loaded) {
     return (
       <div className="mx-auto w-full max-w-5xl px-4 py-6 md:px-8">
-        <Loading what="published versions" rows={3} rowHeight={72} />
+        <Loading what="versions" rows={3} rowHeight={72} />
       </div>
     );
   }
@@ -157,26 +367,53 @@ export function VersionHistory({
           <SectionHeading
             id="versions-heading"
             level={2}
-            title="Published versions"
+            title="Versions"
             description={
               rows.length > 0
-                ? "Pick a version on each side to compare. Versions never change once published."
+                ? "A version never changes once submitted. Chat answers only from the one an admin approved. Pick a version on each side to compare."
                 : undefined
             }
           />
+          <LiveState
+            status={assistant.status}
+            liveNumber={liveNumber}
+            admin={admin}
+            busy={acting}
+            onPause={() => void pause()}
+            onReopen={() => void reopen()}
+          />
+          {actionError && (
+            <Alert className="mt-3" role="alert">
+              {actionError}
+            </Alert>
+          )}
+          <AssistantEditors assistant={assistant} />
+          <ActionApprovers assistant={assistant} />
+          {admin && <OfficialToggle assistant={assistant} onChanged={onChanged} />}
           {rows.length === 0 && !error && (
             <EmptyState
               className="mt-4"
-              title="Nothing published yet"
-              description="Publish the draft to create version 1. Each version keeps the assistant as it was, so you can compare them here."
+              title="Nothing submitted yet"
+              description="Submit the draft for review to create version 1. Each version keeps the assistant as it was, so you can compare them here."
             />
           )}
           {rows.length > 0 && (
             <ul className="border-border mt-4 border-t">
               {rows.map((v) => (
-                <li key={v.id} className="border-border flex items-center gap-3 border-b py-2.5">
+                <li key={v.id} className="border-border flex items-start gap-3 border-b py-2.5">
                   <div className="min-w-0 flex-1">
-                    <p className="num text-sm font-medium">Version {v.version_number}</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="num text-sm font-medium">Version {v.version_number}</p>
+                      <Badge
+                        variant={
+                          v.id === assistant.current_version_id ? "success" : STATUS_TONE[v.status]
+                        }
+                      >
+                        {v.id === assistant.current_version_id
+                          ? "Live"
+                          : VERSION_STATUS_WORD[v.status]}
+                      </Badge>
+                    </div>
                     <p className="text-small text-muted-foreground num">{when(v.created_at)}</p>
                     <p
                       className={cn(
@@ -187,6 +424,45 @@ export function VersionHistory({
                     >
                       {v.note || "No note"}
                     </p>
+                    {v.status === "submitted" && admin && ruleFor(v) === "refused" && (
+                      <p className="text-small text-muted-foreground">
+                        You submitted this or built the assistant, so another admin or the owner
+                        approves it.
+                      </p>
+                    )}
+                    {v.review_note && (
+                      <p className="text-small text-muted-foreground" title={v.review_note}>
+                        Review: {v.review_note}
+                      </p>
+                    )}
+                    {v.status === "submitted" &&
+                      liveNumber !== undefined &&
+                      liveNumber !== v.version_number && (
+                        <Button
+                          type="button"
+                          variant="link"
+                          size="sm"
+                          className="mt-1"
+                          onClick={() => {
+                            setFrom(liveNumber);
+                            setTo(v.version_number);
+                          }}
+                        >
+                          Compare with the live version
+                        </Button>
+                      )}
+                    <VersionActions
+                      assistantId={assistantId}
+                      number={v.version_number}
+                      actions={versionActions(v, {
+                        live: v.id === assistant.current_version_id,
+                        admin,
+                        editor,
+                        approve: ruleFor(v),
+                      })}
+                      busy={acting}
+                      onAction={(a) => void onAction(a, v.version_number)}
+                    />
                   </div>
                   <div
                     role="group"
@@ -228,9 +504,16 @@ export function VersionHistory({
 
         <section aria-label="Changes" className="min-w-0 flex-1">
           {error && <Alert>{error}</Alert>}
+          {/* Approve on evidence (Phase 10.4): for the people who review. */}
+          {admin &&
+            to !== null &&
+            rows.some((r) => r.version_number === to && r.status === "submitted") && (
+              <ApprovalEvidence assistantId={assistantId} number={to} />
+            )}
+          {to !== null && <VersionListingSummary assistantId={assistantId} number={to} />}
           {rows.length === 1 && (
             <p className="text-muted-foreground max-w-[60ch] text-sm">
-              Only one version so far. Publish again to have something to compare.
+              Only one version so far. Submit again to have something to compare.
             </p>
           )}
           {from !== null && from === to && (
@@ -238,9 +521,167 @@ export function VersionHistory({
               Pick two different versions to see what changed.
             </p>
           )}
+          {drift && drift.items.length > 0 && (
+            <DriftNotice
+              number={drift.number}
+              live={drift.number === liveNumber}
+              items={drift.items}
+            />
+          )}
+          {manifests && <UsesChanges from={from} to={to} manifests={manifests} />}
           {diff && <DiffView diff={diff} graphs={graphs} sourceLabels={sourceLabels} />}
         </section>
       </div>
+    </div>
+  );
+}
+
+const ACTION_LABEL: Record<
+  Exclude<ReturnType<typeof versionActions>[number], "preview">,
+  string
+> = {
+  approve: "Approve",
+  reject: "Reject",
+  withdraw: "Withdraw",
+  "make-live": "Roll back to this",
+};
+
+/** What can be done with one version: review it, take it back, roll back
+ *  to it, or chat with it in a preview. */
+function VersionActions({
+  assistantId,
+  number,
+  actions,
+  busy,
+  onAction,
+}: {
+  assistantId: string;
+  number: number;
+  actions: ReturnType<typeof versionActions>;
+  busy: boolean;
+  onAction: (action: ReturnType<typeof versionActions>[number]) => void;
+}) {
+  if (actions.length === 0) return null;
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-1.5">
+      {actions.map((a) =>
+        a === "preview" ? (
+          <Link
+            key={a}
+            href={previewHref(assistantId, number)}
+            className={buttonVariants({ variant: "ghost", size: "sm" })}
+            aria-label={`Preview version ${number}`}
+          >
+            Preview
+          </Link>
+        ) : (
+          <Button
+            key={a}
+            type="button"
+            size="sm"
+            variant={a === "approve" ? "default" : "outline"}
+            disabled={busy}
+            onClick={() => onAction(a)}
+            aria-label={`${ACTION_LABEL[a]}: version ${number}`}
+          >
+            {ACTION_LABEL[a]}
+          </Button>
+        ),
+      )}
+    </div>
+  );
+}
+
+/** Something a version uses has changed since it was submitted. */
+function DriftNotice({ number, live, items }: { number: number; live: boolean; items: string[] }) {
+  return (
+    <Alert className="mb-6" role="status">
+      <p className="font-medium">Version {number} has changed since it was submitted.</p>
+      <ul className="mt-1 list-disc pl-5">
+        {items.map((t) => (
+          <li key={t}>{t}.</li>
+        ))}
+      </ul>
+      <p className="mt-1">
+        {live
+          ? "Chat leaves these out of its answers until a new version is approved."
+          : "It can't be approved or rolled back to until it is submitted again."}
+      </p>
+    </Alert>
+  );
+}
+
+/** What changed in what the two versions use: knowledge, connections and
+ *  MCP tools, as each was submitted (Phase 7b.1). */
+function UsesChanges({
+  from,
+  to,
+  manifests,
+}: {
+  from: number | null;
+  to: number | null;
+  manifests: { from: Manifest | null; to: Manifest | null };
+}) {
+  if (!manifests.from || !manifests.to) return null;
+  const changes = compareManifests(manifests.from, manifests.to);
+  return (
+    <section aria-labelledby="uses-heading" className="mb-8">
+      <SectionHeading
+        id="uses-heading"
+        level={3}
+        title="Knowledge, connections and tools"
+        description={`What version ${to} uses, against version ${from}.`}
+      />
+      {changes.length === 0 ? (
+        <p className="text-muted-foreground mt-2 text-sm">No change.</p>
+      ) : (
+        <ul className="border-border mt-2 border-t">
+          {changes.map((c) => (
+            <li key={c.text} className="border-border text-small border-b py-2">
+              {c.text}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** Where the assistant stands in Chat, and an admin's pause switch. */
+function LiveState({
+  status,
+  liveNumber,
+  admin,
+  busy,
+  onPause,
+  onReopen,
+}: {
+  status: AssistantDetail["status"];
+  liveNumber: number | undefined;
+  admin: boolean;
+  busy: boolean;
+  onPause: () => void;
+  onReopen: () => void;
+}) {
+  const text =
+    status === "archived"
+      ? "Paused by an admin. Nothing answers, previews included."
+      : liveNumber !== undefined
+        ? `Chat answers from version ${liveNumber}.`
+        : "Nobody can chat with it until an admin approves a version.";
+  return (
+    <div className="border-border mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2">
+      <p className="text-small text-foreground min-w-0 flex-1">{text}</p>
+      {admin &&
+        (status === "archived" ? (
+          <Button type="button" size="sm" variant="outline" disabled={busy} onClick={onReopen}>
+            Reopen
+          </Button>
+        ) : (
+          <Button type="button" size="sm" variant="outline" disabled={busy} onClick={onPause}>
+            Pause
+          </Button>
+        ))}
     </div>
   );
 }

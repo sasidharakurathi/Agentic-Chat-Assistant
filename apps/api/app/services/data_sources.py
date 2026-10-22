@@ -13,13 +13,13 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.errors import BadRequest, NotFound
+from app.api.errors import BadRequest, Conflict, NotFound
 from app.db.pagination import PageResult, keyset_page
 from app.models.assistant import Assistant
 from app.models.rag import Chunk, DataSource, DataSourceStatus, DataSourceType, Document
 from app.queue import enqueue_ingest
-from app.schemas.data_source import ContentUrl, DataSourceSummary, IngestProgress
-from app.services import audit
+from app.schemas.data_source import ContentUrl, DataSourceSummary, IngestProgress, SourceAccess
+from app.services import audit, manifest
 from app.storage import delete_object, presigned_get_url, put_object
 from app.storage.file_types import (
     UnsupportedUpload,
@@ -223,7 +223,9 @@ async def counts_for(
                 func.count(Chunk.id),
             )
             .outerjoin(Chunk, Chunk.document_id == Document.id)
-            .where(Document.assistant_id == assistant_id)
+            # The current copy: one kept for an approved version is not
+            # what the source holds now (Phase 7b.1).
+            .where(Document.assistant_id == assistant_id, Document.superseded_at.is_(None))
             .group_by(Document.data_source_id)
         )
     ).all()
@@ -274,9 +276,113 @@ async def reindex(
     return source
 
 
+def _access(source: DataSource) -> dict[str, Any]:
+    return {"everyone": source.everyone, "group_ids": sorted(source.group_ids or [])}
+
+
+async def set_access(
+    session: AsyncSession,
+    source: DataSource,
+    body: SourceAccess,
+    *,
+    user_id: uuid.UUID,
+    ip: str | None = None,
+) -> DataSource:
+    """Who may read it (Phase 9.4). Any change bumps the access epoch, so
+    conversations on it start fresh; a source held back by the scan is
+    indexed once it is no longer everyone's."""
+    from app.models.group import Group
+    from app.services import knowledge_access
+
+    wanted = sorted({str(g) for g in body.group_ids})
+    if wanted:
+        known = {
+            str(g)
+            for g in await session.scalars(
+                select(Group.id).where(
+                    Group.org_id == source.org_id, Group.id.in_([uuid.UUID(g) for g in wanted])
+                )
+            )
+        }
+        if unknown := [g for g in wanted if g not in known]:
+            raise BadRequest(
+                f"{len(unknown)} of those groups aren't in this organisation", code="unknown_group"
+            )
+    before = _access(source)
+    source.everyone = body.everyone
+    source.group_ids = [] if body.everyone else wanted
+    after = _access(source)
+    if after == before:
+        return source
+    await knowledge_access.bump_epoch(session, source.org_id)
+    await audit.record(
+        session,
+        action="data_source.access",
+        org_id=source.org_id,
+        actor_user_id=user_id,
+        target_type="data_source",
+        target_id=source.id,
+        meta={"from": before, "to": after},
+        ip=ip,
+    )
+    held = source.status is DataSourceStatus.held and not source.everyone
+    if held:
+        source.status = DataSourceStatus.pending
+    await session.commit()
+    if held:
+        await _queue(session, source)
+    await session.refresh(source)
+    return source
+
+
+async def confirm_everyone(
+    session: AsyncSession, source: DataSource, *, user_id: uuid.UUID, ip: str | None = None
+) -> DataSource:
+    """Its builder confirms everyone may read what the scan found (Phase
+    9.4): recorded with what was found, then indexed. New content is asked
+    about again."""
+    scanned = (source.ingest_report or {}).get("sensitive") or {}
+    if source.status is not DataSourceStatus.held or not scanned.get("checksum"):
+        raise BadRequest("This source isn't waiting for a decision", code="not_held")
+    source.sensitive_confirmed_checksum = scanned["checksum"]
+    source.status = DataSourceStatus.pending
+    await audit.record(
+        session,
+        action="data_source.sensitive_confirmed",
+        org_id=source.org_id,
+        actor_user_id=user_id,
+        target_type="data_source",
+        target_id=source.id,
+        meta={"counts": scanned.get("counts") or {}, "reason": scanned.get("reason") or ""},
+        ip=ip,
+    )
+    await session.commit()
+    await _queue(session, source)
+    await session.refresh(source)
+    return source
+
+
 async def delete(
     session: AsyncSession, source: DataSource, *, user_id: uuid.UUID, ip: str | None = None
 ) -> None:
+    # The live version, or the one waiting for review, answers from this
+    # source's documents (Phase 7b.1): deleting it would change what an
+    # admin approved without a review. Submit a version without it first.
+    assistant = await session.get(Assistant, source.assistant_id)
+    using = await manifest.versions_using_source(
+        session,
+        source.assistant_id,
+        assistant.current_version_id if assistant is not None else None,
+        source.id,
+    )
+    if using:
+        named = ", ".join(str(n) for n in using)
+        raise Conflict(
+            f"Version {named} answers from this source. Submit a version without it, "
+            "and have it approved, before deleting it",
+            code="source_in_use",
+            details={"versions": using},
+        )
     if source.object_key:
         await delete_object(source.object_key)
     await audit.record(

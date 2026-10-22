@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 import pytest
 from app.db.redis import get_redis
 from app.services import turns
+from tests.infra import unavailable
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -25,7 +26,7 @@ async def redis_log(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[turns.Redi
     try:
         await get_redis().ping()
     except Exception as exc:  # pragma: no cover - environment-dependent
-        pytest.skip(f"Redis not reachable: {type(exc).__name__}")
+        unavailable("redis", f"Redis not reachable: {type(exc).__name__}")
     # Short waits, so a test about waiting does not take five seconds.
     monkeypatch.setattr(turns, "BLOCK_S", 0.3)
     # Every key the log uses, to delete afterwards: the real names, recorded.

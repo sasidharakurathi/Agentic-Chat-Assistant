@@ -55,6 +55,12 @@ class EvalSuite(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
 
+#: Where a case's follow-up messages live (Phase 9.8): a reserved key in its
+#: `metadata` JSON, so multi-turn cases needed no migration. The API keeps it
+#: out of the author's own metadata in both directions.
+FOLLOW_UPS_KEY = "follow_ups"
+
+
 class EvalCase(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "eval_cases"
 
@@ -73,6 +79,17 @@ class EvalCase(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     labels: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     #: The author's own notes and tags ("metadata" is taken by SQLAlchemy).
     meta: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False, default=dict)
+
+    @property
+    def follow_ups(self) -> list[str]:
+        """Messages sent after `input`, in order (Phase 9.8)."""
+        raw = (self.meta or {}).get(FOLLOW_UPS_KEY)
+        return [str(text) for text in raw] if isinstance(raw, list) else []
+
+    @property
+    def author_meta(self) -> dict[str, Any]:
+        """`meta` without the reserved follow-ups key: the author's own."""
+        return {k: v for k, v in (self.meta or {}).items() if k != FOLLOW_UPS_KEY}
 
 
 class EvalRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -141,4 +158,4 @@ class EvalCaseResult(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
-__all__ = ["EvalCase", "EvalCaseResult", "EvalRun", "EvalRunStatus", "EvalSuite"]
+__all__ = ["FOLLOW_UPS_KEY", "EvalCase", "EvalCaseResult", "EvalRun", "EvalRunStatus", "EvalSuite"]

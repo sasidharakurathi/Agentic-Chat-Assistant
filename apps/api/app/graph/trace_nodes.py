@@ -23,7 +23,8 @@ from typing import Any
 
 from app.agent.caps import CAPS_SERVER_NAME
 from app.agent.options import SUBAGENT_TOOL, WEB_SEARCH_TOOL
-from app.graph.nodes import Graph
+from app.agent.scope import ACTION_PREFIX
+from app.graph.nodes import DatabaseNode, Graph, ToolNode
 
 _DB_TOOLS = ("sql_query", "sql_introspect", "sql_list_schemas", "mongo_find", "mongo_aggregate")
 
@@ -71,7 +72,32 @@ def nodes_for_tool(
     return _caps_nodes(graph, tool, args)
 
 
+def action_nodes(graph: Graph, action: str) -> list[str]:
+    """Where a declared action lives: the database node that declares a SQL
+    action (Phase 9.1), else the HTTP request tool that declares it (9.3)."""
+    dbs = [
+        n.id
+        for n in graph.nodes
+        if isinstance(n, DatabaseNode) and any(a.name == action for a in n.data.actions)
+    ]
+    if dbs:
+        return dbs
+    out: list[str] = []
+    for n in graph.nodes:
+        if not isinstance(n, ToolNode) or n.data.key != "http_request":
+            continue
+        declared = n.data.config.get("actions")
+        if isinstance(declared, list) and any(
+            isinstance(a, dict) and a.get("name") == action for a in declared
+        ):
+            out.append(n.id)
+    return out
+
+
 def _caps_nodes(graph: Graph, tool: str, args: dict[str, Any]) -> list[str]:
+    if tool.startswith(ACTION_PREFIX):
+        # A run's trace places declared actions too (Phase 9.9).
+        return action_nodes(graph, tool[len(ACTION_PREFIX) :])
     if tool not in _CAPS:
         return []
     node_type, field, from_input = _CAPS[tool]
@@ -88,4 +114,4 @@ def always_nodes(graph: Graph) -> list[str]:
     return [n.id for n in graph.nodes if n.type in ALWAYS]
 
 
-__all__ = ["always_nodes", "guardrail_nodes", "nodes_for_tool"]
+__all__ = ["action_nodes", "always_nodes", "guardrail_nodes", "nodes_for_tool"]

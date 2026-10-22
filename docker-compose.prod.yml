@@ -42,6 +42,23 @@ x-api-env: &api-env
   # One proxy in front: the client's address is the last X-Forwarded-For hop.
   TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-1}
   REGISTRATION: ${REGISTRATION:-invite}
+  # The proxy's choices, for the preflight's hosting review (Phase 8.2).
+  TLS_MODE: ${TLS_MODE:-public}
+  BIND_IP: ${BIND_IP:-}
+  # Google sign-in (Phase 8.3): both empty is off.
+  GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+  GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+  GOOGLE_ALLOWED_DOMAIN: ${GOOGLE_ALLOWED_DOMAIN:-}
+  # Admins act as admins only after a second factor (Phase 8.4).
+  REQUIRE_ADMIN_2FA: ${REQUIRE_ADMIN_2FA:-true}
+  # Office and VPN ranges that share one address (CIDRs, comma-separated).
+  TRUSTED_INTERNAL_NETS: ${TRUSTED_INTERNAL_NETS:-}
+  # This stack's own networks (Phase 9.3): never reached by an outbound
+  # request, whatever an organisation's internal destinations say.
+  PLATFORM_NETWORKS: ${EDGE_SUBNET:-172.31.240.0/24},${DATA_SUBNET:-172.31.241.0/24},${MCP_SUBNET:-172.31.242.0/24}
+  # One company organisation (Phase 7b.8).
+  ORG_MODE: ${ORG_MODE:-single}
+  INVITE_TTL_DAYS: ${INVITE_TTL_DAYS:-7}
   DATABASE_URL: postgresql+asyncpg://app:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (letters and digits only - it goes into a URL)}@postgres:5432/app
   REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD (letters and digits only)}@redis:6379/0
   S3_ENDPOINT: http://minio:9000
@@ -57,7 +74,7 @@ x-api-env: &api-env
   # `fake` answers without calling the model: for trying the stack at no cost.
   AGENT_DRIVER: ${AGENT_DRIVER:-auto}
   # Repoint a model alias, e.g. {"haiku": "<pinned id>"} (Phase 7a.6).
-  MODEL_ALIASES: '${MODEL_ALIASES:-{}}'
+  MODEL_ALIASES: "${MODEL_ALIASES:-{}}"
   VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
   RAG_OFFLINE: ${RAG_OFFLINE:-0}
   AGENT_MAX_CONCURRENCY: ${AGENT_MAX_CONCURRENCY:-8}
@@ -65,6 +82,14 @@ x-api-env: &api-env
   DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
   METRICS_TOKEN: ${METRICS_TOKEN:-}
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  # Email (Phase 7b.5): environment only, never editable in the app.
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+  MAIL_FROM: ${MAIL_FROM:-}
+  MAIL_FROM_NAME: ${MAIL_FROM_NAME:-Assistant Studio}
   LANGFUSE_HOST: ${LANGFUSE_HOST:-}
   LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
   LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
@@ -78,10 +103,21 @@ services:
     environment:
       SITE_ADDRESS: ${DOMAIN}
       S3_BUCKET: ${S3_BUCKET:-assistant-uploads}
+      # How the certificate is obtained (Phase 8.2, deploy/proxy/Caddyfile).
+      # The DNS credentials are the proxy's alone: no other service sees them.
+      TLS_MODE: ${TLS_MODE:-public}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+      ACMEDNS_USERNAME: ${ACMEDNS_USERNAME:-}
+      ACMEDNS_PASSWORD: ${ACMEDNS_PASSWORD:-}
+      ACMEDNS_SUBDOMAIN: ${ACMEDNS_SUBDOMAIN:-}
+      ACMEDNS_SERVER_URL: ${ACMEDNS_SERVER_URL:-}
     ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
-      - "${HTTPS_PORT:-443}:443/udp"
+      # BIND_IP: the one address people reach (the server's office-LAN
+      # address, or its Tailscale one); empty is every interface, which only
+      # a firewall should then narrow (Phase 8.2).
+      - "${BIND_IP:-0.0.0.0}:${HTTP_PORT:-80}:80"
+      - "${BIND_IP:-0.0.0.0}:${HTTPS_PORT:-443}:443"
+      - "${BIND_IP:-0.0.0.0}:${HTTPS_PORT:-443}:443/udp"
     volumes:
       - ./deploy/proxy/Caddyfile:/etc/caddy/Caddyfile:ro
       # Certificates and their keys. Losing this volume means asking for
@@ -156,7 +192,13 @@ services:
       minio-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)",
+        ]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -179,6 +221,29 @@ services:
     mem_limit: ${WORKER_MEMORY:-4g}
     volumes:
       - agentstate:/var/lib/assistant-studio
+    stop_grace_period: 30s
+    healthcheck:
+      disable: true
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Sends email from its own queue (Phase 7b.5): a slow mail server never
+  # holds up indexing or evals, and they never hold up an invite.
+  mailer:
+    <<: *hardened
+    image: assistant-studio-api:${APP_VERSION:-latest}
+    command: ["arq", "app.worker.MailWorkerSettings"]
+    environment:
+      <<: *api-env
+      RUN_MIGRATIONS: "0"
+      PREFLIGHT: "0"
+    # `edge` for the way out to the mail server; `data` for Redis and Postgres.
+    networks: [edge, data]
+    cap_drop: [ALL]
+    init: true
+    pids_limit: 256
+    mem_limit: ${MAILER_MEMORY:-512m}
     stop_grace_period: 30s
     healthcheck:
       disable: true
@@ -228,14 +293,14 @@ services:
     image: redis:7-alpine
     # The password on the command line would show in `docker inspect` and
     # in the process list; from the environment it shows in neither.
-    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    command: ["sh", "-c", 'exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"']
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
     volumes:
       - redisdata:/data
     networks: [data]
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      test: ["CMD-SHELL", 'redis-cli -a "$$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG']
       interval: 5s
       timeout: 3s
       retries: 20
@@ -253,7 +318,8 @@ services:
     volumes:
       - miniodata:/data
     network_mode: none
-    entrypoint: ["/bin/sh", "-c", "[ \"$$(stat -c %u /data)\" = 65532 ] || chown -R 65532:65532 /data"]
+    entrypoint:
+      ["/bin/sh", "-c", '[ "$$(stat -c %u /data)" = 65532 ] || chown -R 65532:65532 /data']
     restart: "no"
 
   minio:
@@ -300,16 +366,26 @@ services:
     networks: [data]
     restart: "no"
 
+# Fixed address ranges (Phase 9.3), so the SSRF guard knows them: the API
+# never reaches its own networks, whatever an internal destination says
+# (PLATFORM_NETWORKS above). Change them if they clash with your office or
+# VPN ranges, before the first `up` (Docker keeps a network's range).
 networks:
   # The proxy's side, and the way out to the internet.
-  edge: {}
+  edge:
+    ipam:
+      config: [{ subnet: "${EDGE_SUBNET:-172.31.240.0/24}" }]
   # The datastores. No route out: nothing on it can call home, and nothing
   # outside can reach it.
   data:
     internal: true
+    ipam:
+      config: [{ subnet: "${DATA_SUBNET:-172.31.241.0/24}" }]
   # The runner's only network.
   mcp:
     internal: true
+    ipam:
+      config: [{ subnet: "${MCP_SUBNET:-172.31.242.0/24}" }]
 
 volumes:
   pgdata:

@@ -2,11 +2,12 @@
 
 import type { ReactNode } from "react";
 
+import { HttpActionsEditor } from "@/components/config/HttpActionsEditor";
 import { Field, Toggle } from "@/components/config/panels";
 import { Alert } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
-import type { AssistantConfig } from "@/lib/api";
+import type { AssistantConfig, HttpAction } from "@/lib/api";
 import { useOfflineMode } from "@/lib/instance";
 
 /** Per-tool settings: the same editors in the Settings tab and in a canvas
@@ -180,7 +181,7 @@ export function HttpRequestSettings({
       <DomainsField
         value={domains}
         onCommit={(d) => onChange({ allowed_domains: d })}
-        hint="Separate sites with commas. Only these sites and their subdomains can be reached: with none listed, every request is refused. Private and internal addresses are always blocked."
+        hint="Separate sites with commas. Only these sites and their subdomains can be reached by requests the assistant writes itself: with none listed, there are none, and only declared calls can be made. Private and internal addresses are always blocked."
       />
       <ApprovalSelect
         label="Requests that change something"
@@ -332,10 +333,13 @@ export function ApprovalPolicyPanel({
 export function ToolNodePanel({
   data,
   policy,
+  assistantId,
   onChange,
 }: {
   data: Data;
   policy: ApprovalMode;
+  /** For an HTTP request node's connections and calls (Phase 9.3). */
+  assistantId?: string;
   onChange: (patch: Data) => void;
 }) {
   const key = String(data.key ?? "");
@@ -353,15 +357,24 @@ export function ToolNodePanel({
   }
   if (key === "http_request") {
     return (
-      <HttpRequestSettings
-        domains={(cfg.allowed_domains as string[] | undefined) ?? []}
-        approval={mode(data.approval)}
-        policy={policy}
-        onChange={({ approval, ...rest }) => {
-          if (approval) onChange({ approval });
-          if (Object.keys(rest).length) setCfg(rest);
-        }}
-      />
+      <div className="flex flex-col gap-6">
+        <HttpRequestSettings
+          domains={(cfg.allowed_domains as string[] | undefined) ?? []}
+          approval={mode(data.approval)}
+          policy={policy}
+          onChange={({ approval, ...rest }) => {
+            if (approval) onChange({ approval });
+            if (Object.keys(rest).length) setCfg(rest);
+          }}
+        />
+        {assistantId && (
+          <HttpActionsEditor
+            assistantId={assistantId}
+            actions={(cfg.actions as HttpAction[] | undefined) ?? []}
+            onChange={(actions) => setCfg({ actions })}
+          />
+        )}
+      </div>
     );
   }
   return (

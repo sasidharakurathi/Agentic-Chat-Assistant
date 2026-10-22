@@ -25,6 +25,7 @@ from app.observability import collect, metrics
 from app.observability.metrics import Counter, Histogram, Sample
 from app.services import budgets
 from httpx import AsyncClient
+from tests.pending import decide, waiting_request
 
 pytestmark = pytest.mark.anyio
 
@@ -141,7 +142,9 @@ async def _assistant(client: AsyncClient, headers: dict[str, str], **config: Any
 
 
 async def _say(client: AsyncClient, headers: dict[str, str], aid: str, text: str) -> None:
-    conv = await client.post(f"{API}/assistants/{aid}/conversations", json={}, headers=headers)
+    conv = await client.post(
+        f"{API}/assistants/{aid}/conversations", json={"mode": "preview"}, headers=headers
+    )
     async with client.stream(
         "POST",
         f"{API}/conversations/{conv.json()['id']}/messages",
@@ -409,23 +412,18 @@ def test_prometheus_scrapes_the_api_with_a_token_from_a_file() -> None:
 async def test_an_approval_reports_how_long_it_waited(
     client: AsyncClient, org_headers: dict[str, str]
 ) -> None:
-    from app.services import approvals
 
     aid = await _assistant(client, org_headers)
-    conv = await client.post(f"{API}/assistants/{aid}/conversations", json={}, headers=org_headers)
+    conv = await client.post(
+        f"{API}/assistants/{aid}/conversations", json={"mode": "preview"}, headers=org_headers
+    )
     async with get_sessionmaker()() as s:
-        row = await approvals.create(
+        row = await waiting_request(
             s,
             conversation_id=uuid.UUID(conv.json()["id"]),
-            org_id=uuid.UUID(org_headers["X-Org-Id"]),
-            tool_name="mcp__caps__sql_query",
             tool_input={"sql": "DELETE FROM orders"},
-            risk="high",
-            rationale="writes",
         )
-    done = await client.post(
-        f"{API}/approvals/{row.id}:resolve", json={"decision": "denied"}, headers=org_headers
-    )
+    done = await decide(client, org_headers, row.id, "denied")
     assert done.status_code == 200, done.text
     assert metrics.APPROVAL_WAIT.count("denied") == 1
     assert metrics.APPROVAL_WAIT.count("approved") == 0
@@ -451,6 +449,12 @@ async def test_a_search_is_timed_whether_it_answers_or_fails(
             config=RagRetrieval(),
         )
 
+    async def one_document(*_a: Any) -> list[Any]:
+        return [uuid.uuid4()]
+
+    # The search first finds the assistant's current documents (7b.1), with
+    # the session this test doesn't have; with none it would stop there.
+    monkeypatch.setattr(retrieve, "current_documents", one_document)
     monkeypatch.setattr(retrieve, "_retrieve", found)
     assert await search() == []
     monkeypatch.setattr(retrieve, "_retrieve", broke)

@@ -11,7 +11,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loading } from "@/components/ui/loading";
 import { ApiError } from "@/lib/api";
+import { GoogleButton } from "@/components/auth/GoogleButton";
 import { safeNext, useAuth } from "@/lib/auth";
+import { inviteTokenFrom } from "@/lib/safe-next";
 
 import { AuthCard } from "../auth-card";
 
@@ -106,6 +108,7 @@ function RegisterForm() {
               Sign in
             </Link>
           </p>
+          <GoogleButton next={next} invite={inviteTokenFrom(next)} label="Join with Google" />
         </form>
       </CardContent>
     </AuthCard>

@@ -34,6 +34,7 @@ from app.graph.project import project_config
 from app.graph.validate import ValidationResult, validate_graph
 from app.logging import get_logger
 from app.models.integration import DbConnection, McpServer
+from app.models.membership import Membership
 from app.models.rag import DataSource
 from app.models.usage import UsageEvent, UsageKind
 from app.schemas.assist import (
@@ -99,13 +100,19 @@ def _failure(exc: Exception, what: Literal["prompt", "pipeline"]) -> AppError:
 
 
 async def _record(
-    session: AsyncSession, org_id: uuid.UUID, assistant_id: uuid.UUID | None, spend: Spend
+    session: AsyncSession,
+    org_id: uuid.UUID,
+    assistant_id: uuid.UUID | None,
+    spend: Spend,
+    user_id: uuid.UUID | None = None,
 ) -> None:
-    """A model call: on the ledger like any other spend (task 1.8)."""
+    """A model call: on the ledger like any other spend (task 1.8), with
+    whose it is (Phase 8.9)."""
     session.add(
         UsageEvent(
             org_id=org_id,
             assistant_id=assistant_id,
+            user_id=user_id,
             kind=UsageKind.llm,
             model=spend.model,
             tokens_in=spend.tokens_in,
@@ -117,17 +124,21 @@ async def _record(
 
 
 async def _within_budget(
-    session: AsyncSession, org_id: uuid.UUID, assistant_id: uuid.UUID | None
+    session: AsyncSession,
+    org_id: uuid.UUID,
+    assistant_id: uuid.UUID | None,
+    person: Membership | None = None,
 ) -> None:
     """On the real model the helpers spend, so not once a budget is used up
-    (task 5.7). The free templates always run."""
+    (task 5.7), the caller's own included (Phase 8.9). The free templates
+    always run."""
     if not claude_api.real_model_allowed():
         return
-    over = (await budgets.gate(session, org_id, assistant_id)).exceeded
+    over = (await budgets.gate(session, org_id, assistant_id, person=person)).exceeded
     if over is not None:
         raise AppError(
             over.exceeded_message(),
-            code="budget_exceeded",
+            code="person_limit" if over.scope == "person" else "budget_exceeded",
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
         )
 
@@ -179,7 +190,7 @@ async def generate_prompt(
     assistant = ctx.assistant
     config = AssistantConfig.model_validate(assistant.draft_config or {})
     wiring = await _wiring(session, assistant.id, config)
-    await _within_budget(session, assistant.org_id, assistant.id)
+    await _within_budget(session, assistant.org_id, assistant.id, ctx.membership)
     try:
         draft = await prompt_assist.generate(
             config,
@@ -190,13 +201,15 @@ async def generate_prompt(
         )
     except AssistFailed as exc:
         log.warning("prompt_generate_failed", reason=exc.reason)
-        await _record(session, assistant.org_id, assistant.id, exc.spend)  # billed all the same
+        await _record(  # billed all the same
+            session, assistant.org_id, assistant.id, exc.spend, ctx.membership.user_id
+        )
         raise _failure(exc, "prompt") from None
     except anthropic.APIError as exc:
         log.warning("prompt_generate_failed", error=type(exc).__name__)
         raise _failure(exc, "prompt") from None
     if draft.spend is not None:
-        await _record(session, assistant.org_id, assistant.id, draft.spend)
+        await _record(session, assistant.org_id, assistant.id, draft.spend, ctx.membership.user_id)
     return PromptSuggestion(
         system_prompt=draft.system_prompt,
         rules=draft.rules,
@@ -248,21 +261,24 @@ async def _recommend(
     name: str,
     description: str,
     inventory: pipeline_assist.Inventory,
+    person: Membership,
 ) -> pipeline_assist.Recommendation:
-    await _within_budget(session, org_id, assistant_id)
+    await _within_budget(session, org_id, assistant_id, person)
     try:
         rec = await pipeline_assist.recommend(
             base, name=name, description=description, inventory=inventory
         )
     except AssistFailed as exc:
         log.warning("pipeline_recommend_failed", reason=exc.reason)
-        await _record(session, org_id, assistant_id, exc.spend)  # billed all the same
+        await _record(
+            session, org_id, assistant_id, exc.spend, person.user_id
+        )  # billed all the same
         raise _failure(exc, "pipeline") from None
     except anthropic.APIError as exc:
         log.warning("pipeline_recommend_failed", error=type(exc).__name__)
         raise _failure(exc, "pipeline") from None
     if rec.spend is not None:
-        await _record(session, org_id, assistant_id, rec.spend)
+        await _record(session, org_id, assistant_id, rec.spend, person.user_id)
     return rec
 
 
@@ -306,6 +322,7 @@ async def recommend_pipeline(
         name=assistant.name,
         description=body.description,
         inventory=inventory,
+        person=ctx.membership,
     )
     # Laid out against the canvas as it is, so nodes already there stay put.
     graph = project_config(rec.config, existing_graph=assistants_svc.load_graph(assistant))
@@ -328,6 +345,7 @@ async def recommend_starter(
         name=body.name,
         description=body.description,
         inventory=pipeline_assist.Inventory(offline=settings.rag_offline),
+        person=m,
     )
     graph = project_config(rec.config)
     return _suggestion(rec, graph, validate_graph(graph), [])

@@ -26,7 +26,12 @@ async def rollup(
     date_from: datetime | None,
     date_to: datetime | None,
     limit: int | None = None,
+    viewer_id: uuid.UUID | None = None,
+    viewer_is_admin: bool = True,
 ) -> list[UsageRollupRow]:
+    """By conversation, a title is shown only to the person whose
+    conversation it is (Phase 7b.2): it is the start of their first message.
+    An admin sees everyone's spend, untitled; anyone else only their own."""
     group_col: Any
     label: Any = None
     if group_by == "assistant":
@@ -45,6 +50,9 @@ async def rollup(
     if label is not None:
         cols.append(func.max(label).label("label"))
     if group_by == "conversation":
+        # Grouped on, not aggregated: one person per conversation, and
+        # Postgres has no max() for uuid.
+        cols.append(Conversation.created_by.label("started_by"))
         # Titles repeat ("New conversation"); whose conversation it was tells
         # them apart.
         cols.append(func.max(Assistant.name).label("detail"))
@@ -57,7 +65,10 @@ async def rollup(
         stmt = stmt.outerjoin(
             Conversation, Conversation.id == UsageEvent.conversation_id
         ).outerjoin(Assistant, Assistant.id == Conversation.assistant_id)
-    stmt = stmt.group_by(group_col).order_by(func.sum(UsageEvent.cost_usd).desc())
+        if not viewer_is_admin:
+            stmt = stmt.where(Conversation.created_by == viewer_id)
+    keys = [group_col, Conversation.created_by] if group_by == "conversation" else [group_col]
+    stmt = stmt.group_by(*keys).order_by(func.sum(UsageEvent.cost_usd).desc())
     if date_from is not None:
         stmt = stmt.where(UsageEvent.created_at >= date_from)
     if date_to is not None:
@@ -66,10 +77,18 @@ async def rollup(
         stmt = stmt.limit(limit)
 
     rows = (await session.execute(stmt)).all()
+
+    def shown(r: Any) -> Any:
+        if label is None:
+            return r.group_key
+        if group_by == "conversation" and getattr(r, "started_by", None) != viewer_id:
+            return None
+        return getattr(r, "label", None)
+
     return [
         UsageRollupRow(
             group_key=str(r.group_key) if r.group_key is not None else None,
-            label=getattr(r, "label", None) if label is not None else r.group_key,
+            label=shown(r),
             detail=getattr(r, "detail", None),
             event_count=r.event_count,
             tokens_in=int(r.tokens_in or 0),

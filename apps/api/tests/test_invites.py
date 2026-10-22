@@ -39,7 +39,7 @@ async def test_an_invite_can_be_previewed_without_signing_in(client: AsyncClient
     assert r.json() | {"expires_at": None} == {
         "org_name": "Acme",
         "email": "new1@example.com",
-        "role": "member",
+        "role": "employee",  # the default (Phase 8.1, plan D2)
         "status": "pending",
         "expires_at": None,
     }
@@ -52,7 +52,7 @@ async def test_accepting_returns_the_org_and_it_is_listed_at_once(client: AsyncC
 
     r = await client.post(f"/api/v1/invites/{token}/accept", headers=invitee.headers)
     assert r.status_code == 200
-    assert r.json() == {"org_id": org_id, "org_name": "Acme", "role": "member"}
+    assert r.json() == {"org_id": org_id, "org_name": "Acme", "role": "employee"}
 
     orgs = (await client.get("/api/v1/orgs", headers=invitee.headers)).json()["items"]
     assert org_id in {o["id"] for o in orgs}

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Query, status
@@ -8,10 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import samples
 from app.api.deps import (
     ActiveMembership,
+    AdminAssistantCtx,
     AssistantContext,
     AssistantCtx,
     ClientIP,
     EditableAssistantCtx,
+    OwnerAssistantCtx,
     PageQuery,
     SessionDep,
 )
@@ -19,7 +23,11 @@ from app.api.errors import BadRequest, NotFound
 from app.graph.compile import GraphCompileError, compile_graph
 from app.graph.nodes import Graph
 from app.graph.validate import ValidationResult
+from app.models.enums import MemberRole
+from app.schemas.approval_evidence import VersionEvidenceOut
 from app.schemas.assistant import (
+    ApproveRequest,
+    ArchiveRequest,
     AssistantCreate,
     AssistantDetail,
     AssistantFromSample,
@@ -27,15 +35,25 @@ from app.schemas.assistant import (
     AssistantSummary,
     DraftConfigSaveResult,
     DraftGraphSaveResult,
+    EditorAdd,
+    EditorOut,
     GraphCompileResult,
     PublishRequest,
+    RejectRequest,
     VersionDetail,
     VersionDiff,
+    VersionDrift,
     VersionSummary,
 )
 from app.schemas.assistant_config import AssistantConfig
 from app.schemas.common import Message, Page
+from app.schemas.feedback import FeedbackCommentOut, FeedbackSummaryOut, VersionCountOut
+from app.schemas.listing import Listing, OfficialIn
+from app.services import approval_evidence as evidence_svc
 from app.services import assistants as svc
+from app.services import audit, editors
+from app.services import feedback as feedback_service
+from app.services import listing as listing_service
 from app.services import samples as samples_svc
 
 router = APIRouter(prefix="/assistants", tags=["assistants"])
@@ -50,6 +68,7 @@ async def _detail(ctx: AssistantContext, session: AsyncSession) -> AssistantDeta
         # With references, so an error survives a page reload rather than
         # only appearing in the save response.
         draft_validation=await svc.full_validation(session, a),
+        can_edit=ctx.can_edit,
     )
 
 
@@ -79,7 +98,7 @@ async def create_assistant(
         description=body.description,
         ip=ip,
     )
-    return await _detail(AssistantContext(assistant=a, membership=m), session)
+    return await _detail(AssistantContext(assistant=a, membership=m, can_edit=True), session)
 
 
 @router.post(":from-sample", response_model=AssistantDetail, status_code=status.HTTP_201_CREATED)
@@ -94,7 +113,7 @@ async def create_from_sample(
     a = await samples_svc.create_from(
         session, sample, org_id=m.org_id, user_id=m.user_id, name=body.name, ip=ip
     )
-    return await _detail(AssistantContext(assistant=a, membership=m), session)
+    return await _detail(AssistantContext(assistant=a, membership=m, can_edit=True), session)
 
 
 # ── single ───────────────────────────────────────────────────
@@ -114,7 +133,6 @@ async def update_assistant(
         ctx.assistant,
         name=body.name,
         description=body.description,
-        status=body.status,
         actor_id=ctx.membership.user_id,
         ip=ip,
     )
@@ -175,13 +193,142 @@ async def dry_run_compile(body: Graph, ctx: AssistantCtx) -> GraphCompileResult:
 @router.post(
     "/{assistant_id}/versions", response_model=VersionDetail, status_code=status.HTTP_201_CREATED
 )
-async def publish_version(
+async def submit_version(
     body: PublishRequest, ctx: EditableAssistantCtx, session: SessionDep, ip: ClientIP
 ) -> VersionDetail:
-    version = await svc.publish(
+    """Submit the draft for review (Phase 7b.1). It answers in Chat only once
+    an admin approves it."""
+    version = await svc.submit(
         session, ctx.assistant, actor_id=ctx.membership.user_id, note=body.note, ip=ip
     )
     return VersionDetail.model_validate(version)
+
+
+@router.get("/{assistant_id}/feedback", response_model=FeedbackSummaryOut)
+async def assistant_feedback(
+    ctx: EditableAssistantCtx,
+    session: SessionDep,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> FeedbackSummaryOut:
+    """What people said about its answers (Phase 8.8): thumbs by version,
+    "Did this solve it?" with how many could have said, and the latest
+    comments with their question and answer. Never who asked; an admin also
+    gets the conversation, to open with a recorded reason."""
+    admin = ctx.membership.role.satisfies(MemberRole.admin)
+    out = await feedback_service.summary(session, ctx.assistant, admin=admin, limit=limit)
+    return FeedbackSummaryOut(
+        versions=[VersionCountOut(**vars(v)) for v in out.versions],
+        solved_yes=out.solved_yes,
+        solved_no=out.solved_no,
+        conversations=out.conversations,
+        comments=[FeedbackCommentOut(**vars(c)) for c in out.comments],
+    )
+
+
+@router.get("/{assistant_id}/listing", response_model=Listing)
+async def get_listing(ctx: AssistantCtx) -> Listing:
+    """The draft listing (Phase 8.5): category, starters, audience. What Chat
+    shows is the live version's."""
+    return listing_service.draft_of(ctx.assistant)
+
+
+@router.put("/{assistant_id}/listing", response_model=Listing)
+async def put_listing(body: Listing, ctx: EditableAssistantCtx, session: SessionDep) -> Listing:
+    """Save the draft listing. It reaches Chat with the next approved
+    version, reviewed with it."""
+    return await listing_service.save_draft(session, ctx.assistant, body)
+
+
+@router.post("/{assistant_id}:official", response_model=AssistantSummary)
+async def set_official(
+    body: OfficialIn, ctx: AdminAssistantCtx, session: SessionDep, ip: ClientIP
+) -> AssistantSummary:
+    """Mark it Official, or not (Phase 8.5): admins vouch for it, and the
+    catalog shows it first."""
+    a = ctx.assistant
+    was = a.official_at is not None
+    if body.official != was:
+        a.official_at = datetime.now(UTC) if body.official else None
+        a.official_by = ctx.membership.user_id if body.official else None
+        await audit.record(
+            session,
+            action="assistant.official",
+            org_id=a.org_id,
+            actor_user_id=ctx.membership.user_id,
+            target_type="assistant",
+            target_id=a.id,
+            meta={"official": body.official},
+            ip=ip,
+        )
+        await session.commit()
+        await session.refresh(a)
+    return AssistantSummary.model_validate(a)
+
+
+@router.post("/{assistant_id}/versions/{number}/approve", response_model=VersionDetail)
+async def approve_version(
+    number: int, body: ApproveRequest, ctx: AdminAssistantCtx, session: SessionDep, ip: ClientIP
+) -> VersionDetail:
+    version = await svc.approve(
+        session,
+        ctx.assistant,
+        number,
+        actor_id=ctx.membership.user_id,
+        actor_role=ctx.membership.role,
+        note=body.note,
+        ip=ip,
+    )
+    return VersionDetail.model_validate(version)
+
+
+@router.post("/{assistant_id}/versions/{number}/reject", response_model=VersionDetail)
+async def reject_version(
+    number: int, body: RejectRequest, ctx: AdminAssistantCtx, session: SessionDep, ip: ClientIP
+) -> VersionDetail:
+    version = await svc.reject(
+        session, ctx.assistant, number, actor_id=ctx.membership.user_id, note=body.note, ip=ip
+    )
+    return VersionDetail.model_validate(version)
+
+
+@router.post("/{assistant_id}/versions/{number}/withdraw", response_model=VersionDetail)
+async def withdraw_version(
+    number: int, ctx: EditableAssistantCtx, session: SessionDep, ip: ClientIP
+) -> VersionDetail:
+    version = await svc.withdraw(
+        session, ctx.assistant, number, actor_id=ctx.membership.user_id, ip=ip
+    )
+    return VersionDetail.model_validate(version)
+
+
+@router.post("/{assistant_id}/versions/{number}/make-live", response_model=VersionDetail)
+async def make_version_live(
+    number: int, ctx: AdminAssistantCtx, session: SessionDep, ip: ClientIP
+) -> VersionDetail:
+    """Roll back to an earlier approved version."""
+    version = await svc.make_live(
+        session, ctx.assistant, number, actor_id=ctx.membership.user_id, ip=ip
+    )
+    return VersionDetail.model_validate(version)
+
+
+@router.post("/{assistant_id}/archive", response_model=AssistantDetail)
+async def archive_assistant(
+    body: ArchiveRequest, ctx: AdminAssistantCtx, session: SessionDep, ip: ClientIP
+) -> AssistantDetail:
+    """Pause: nothing answers until an admin reopens it."""
+    await svc.archive(
+        session, ctx.assistant, actor_id=ctx.membership.user_id, reason=body.reason, ip=ip
+    )
+    return await _detail(ctx, session)
+
+
+@router.post("/{assistant_id}/unarchive", response_model=AssistantDetail)
+async def unarchive_assistant(
+    ctx: AdminAssistantCtx, session: SessionDep, ip: ClientIP
+) -> AssistantDetail:
+    await svc.unarchive(session, ctx.assistant, actor_id=ctx.membership.user_id, ip=ip)
+    return await _detail(ctx, session)
 
 
 @router.get("/{assistant_id}/versions", response_model=Page[VersionSummary])
@@ -203,6 +350,58 @@ async def diff_versions(
     b: Annotated[int, Query(ge=1)],
 ) -> VersionDiff:
     return await svc.diff_versions(session, ctx.assistant.id, a, b)
+
+
+# ── co-editors (Phase 7b.4) ──────────────────────────────────
+
+
+@router.get("/{assistant_id}/editors", response_model=list[EditorOut])
+async def list_editors(ctx: AssistantCtx, session: SessionDep) -> list[EditorOut]:
+    """Who besides its creator may edit it."""
+    return [EditorOut.model_validate(e) for e in await editors.list_for(session, ctx.assistant)]
+
+
+@router.post(
+    "/{assistant_id}/editors", response_model=list[EditorOut], status_code=status.HTTP_201_CREATED
+)
+async def add_editor(
+    body: EditorAdd, ctx: OwnerAssistantCtx, session: SessionDep, ip: ClientIP
+) -> list[EditorOut]:
+    """Its creator or an admin names a co-editor: an active member of the
+    organisation."""
+    await editors.add(
+        session, ctx.assistant, user_id=body.user_id, actor_id=ctx.membership.user_id, ip=ip
+    )
+    return [EditorOut.model_validate(e) for e in await editors.list_for(session, ctx.assistant)]
+
+
+@router.delete("/{assistant_id}/editors/{user_id}", response_model=Message)
+async def remove_editor(
+    user_id: uuid.UUID, ctx: OwnerAssistantCtx, session: SessionDep, ip: ClientIP
+) -> Message:
+    await editors.remove(
+        session, ctx.assistant, user_id=user_id, actor_id=ctx.membership.user_id, ip=ip
+    )
+    return Message(message="removed")
+
+
+@router.get("/{assistant_id}/versions/{number}/drift", response_model=VersionDrift)
+async def version_drift(ctx: AssistantCtx, session: SessionDep, number: int) -> VersionDrift:
+    """What has changed since this version was submitted (Phase 7b.1)."""
+    return await svc.drift(session, ctx.assistant, number)
+
+
+@router.get("/{assistant_id}/versions/{number}/evidence", response_model=VersionEvidenceOut)
+async def version_evidence(
+    ctx: AdminAssistantCtx,
+    session: SessionDep,
+    number: int,
+    per_month: Annotated[int, Query(ge=1, le=10_000_000)] = evidence_svc.DEFAULT_PER_MONTH,
+) -> VersionEvidenceOut:
+    """What to approve on (Phase 10.4): the eval scorecard, the "no
+    unapproved write" safety line and a cost forecast for `per_month`
+    conversations. For the people who review: read-only, so not audited."""
+    return await evidence_svc.evidence(session, ctx.assistant, number, per_month=per_month)
 
 
 @router.get("/{assistant_id}/versions/{number}", response_model=VersionDetail)

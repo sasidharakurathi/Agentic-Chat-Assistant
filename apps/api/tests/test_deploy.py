@@ -40,6 +40,8 @@ def _production(**over: Any) -> Settings:
         "app_kek": KEK,
         "anthropic_api_key": "sk-ant-fake",
         "voyage_api_key": "pa-fake",
+        # Online unless a case says otherwise, whatever the shell sets.
+        "rag_offline": False,
         "mcp_runner_url": "http://mcp-runner:8100",
         "mcp_runner_token": "r" * 32,
         "s3_secret_key": "a-real-object-store-secret",
@@ -47,6 +49,10 @@ def _production(**over: Any) -> Settings:
         "app_base_url": "https://assistant.example.com",
         "cors_origins": "https://assistant.example.com",
         "registration": "invite",
+        "org_mode": "single",
+        "tls_mode": "acmedns",
+        "require_admin_2fa": True,
+        "bind_ip": "10.20.0.5",
         "metrics_token": "m" * 32,
         "trusted_proxy_hops": 1,
         "database_url": "postgresql+asyncpg://app:pw@postgres:5432/app",
@@ -70,7 +76,7 @@ def test_a_well_configured_production_server_gets_no_warnings() -> None:
 @pytest.mark.parametrize(
     ("override", "warned"),
     [
-        ({"registration": "open"}, "REGISTRATION"),
+        ({"org_mode": "multi"}, "ORG_MODE"),
         ({"app_base_url": "http://localhost:3000"}, "APP_BASE_URL"),
         ({"cors_origins": "https://a.example,http://127.0.0.1:3000"}, "CORS_ORIGINS"),
         ({"database_url": "sqlite+aiosqlite:///./x.db"}, "DATABASE_URL"),
@@ -88,6 +94,17 @@ def test_the_preflight_warns_about_what_is_valid_and_probably_not_meant(
         preflight.review(_production(**override), report)
     assert _names(report, "warn") == [warned]
     assert not report.failed  # a warning never stops the server
+
+
+def test_open_registration_matters_only_with_many_organisations() -> None:
+    """In single-org mode sign-up is by invite whatever REGISTRATION says
+    (Phase 7b.8), so `open` is worth a warning only with `multi`."""
+    report = preflight.Report()
+    preflight.review(_production(registration="open"), report)
+    assert report.findings == []
+    report = preflight.Report()
+    preflight.review(_production(registration="open", org_mode="multi"), report)
+    assert _names(report, "warn") == ["ORG_MODE", "REGISTRATION"]
 
 
 def test_the_local_model_on_purpose_is_not_a_warning() -> None:
@@ -326,6 +343,15 @@ def test_the_datastores_have_no_route_out(prod: dict[str, Any]) -> None:
     assert "data" not in services["web"]["networks"]
 
 
+def test_the_api_knows_its_own_networks(prod: dict[str, Any]) -> None:
+    """Each network has a fixed range (Phase 9.3), and the API is told all
+    of them, so no internal destination can point it at its own datastores."""
+    told = prod["x-api-env"]["PLATFORM_NETWORKS"]
+    for name in ("edge", "data", "mcp"):
+        (pool,) = prod["networks"][name]["ipam"]["config"]
+        assert pool["subnet"] in told, name
+
+
 def test_the_api_starts_as_production_behind_one_proxy(prod: dict[str, Any]) -> None:
     env = prod["x-api-env"]
     assert env["APP_ENV"] == "production"
@@ -344,12 +370,27 @@ def test_every_long_running_container_is_locked_down(prod: dict[str, Any]) -> No
         assert svc["restart"] == "unless-stopped", name
         assert svc["security_opt"] == ["no-new-privileges:true"], name
         assert svc["logging"]["options"]["max-size"], name
-    for name in ("proxy", "web", "api", "worker", "mcp-runner"):
+    for name in ("proxy", "web", "api", "worker", "mailer", "mcp-runner"):
         assert prod["services"][name]["cap_drop"] == ["ALL"], name
     assert prod["services"]["proxy"]["cap_add"] == ["NET_BIND_SERVICE"]
     assert prod["services"]["mcp-runner"]["read_only"] is True
-    # One container migrates; the other must not race it.
-    assert prod["services"]["worker"]["environment"]["RUN_MIGRATIONS"] == "0"
+    # One container migrates; the others must not race it.
+    for name in ("worker", "mailer"):
+        assert prod["services"][name]["environment"]["RUN_MIGRATIONS"] == "0", name
+
+
+def test_mail_has_its_own_worker_and_its_settings_come_from_the_environment(
+    prod: dict[str, Any],
+) -> None:
+    """Phase 7b.5: the mail queue's own worker, which reaches the mail server
+    (`edge`) and the queue (`data`), and nothing else; the SMTP settings are
+    passed from the environment, with no password written in."""
+    mailer = prod["services"]["mailer"]
+    assert mailer["command"] == ["arq", "app.worker.MailWorkerSettings"]
+    assert set(mailer["networks"]) == {"edge", "data"}
+    env = prod["services"]["api"]["environment"]
+    assert env["SMTP_PASSWORD"] == "${SMTP_PASSWORD:-}"
+    assert env["SMTP_SECURITY"] == "${SMTP_SECURITY:-starttls}"
 
 
 def test_the_redis_password_is_not_on_a_command_line(prod: dict[str, Any]) -> None:
@@ -573,3 +614,87 @@ def test_the_proxy_keeps_an_access_log_for_half_a_year(prod: dict[str, Any]) -> 
     assert "log_credentials" not in caddy, "Authorization and Cookie stay redacted"
     assert "caddylogs:/var/log/caddy" in prod["services"]["proxy"]["volumes"]
     assert "caddylogs" in prod["volumes"]
+
+
+# ── internal hosting (Phase 8.2) ─────────────────────────────
+
+
+def _hosting_findings(**over: Any) -> dict[str, str]:
+    report = preflight.Report()
+    preflight.review_hosting(_production(**over), report)
+    return {f.name: f.level for f in report.findings}
+
+
+def test_an_internal_install_gets_no_hosting_warning() -> None:
+    assert _hosting_findings() == {}
+    assert _hosting_findings(tls_mode="cloudflare", bind_ip="100.101.2.3") == {}, "Tailscale"
+
+
+@pytest.mark.parametrize(
+    ("over", "warned"),
+    [
+        ({"tls_mode": "public"}, "TLS_MODE"),
+        ({"tls_mode": "local"}, "TLS_MODE"),
+        ({"bind_ip": ""}, "BIND_IP"),
+        ({"bind_ip": "0.0.0.0"}, "BIND_IP"),
+        ({"bind_ip": "8.8.4.4"}, "BIND_IP"),
+    ],
+)
+def test_the_preflight_says_when_the_server_may_face_the_internet(
+    over: dict[str, Any], warned: str
+) -> None:
+    assert _hosting_findings(**over) == {warned: "warn"}
+
+
+async def _resolving(monkeypatch: pytest.MonkeyPatch, addresses: list[str], **over: Any) -> str:
+    import asyncio
+
+    from app import config
+
+    monkeypatch.setattr(config, "settings", _production(**over))
+
+    async def lookup(_host: str, _port: Any) -> list[Any]:
+        if not addresses:
+            raise OSError("no such name")
+        return [(2, 1, 6, "", (a, 0)) for a in addresses]
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", lookup)
+    return await preflight._hosting()
+
+
+async def test_the_site_name_should_resolve_to_a_private_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert "10.20.0.5" in await _resolving(monkeypatch, ["10.20.0.5"])
+    assert "100.101.2.3" in await _resolving(monkeypatch, ["100.101.2.3"]), "Tailscale"
+    with pytest.raises(RuntimeError, match="public address"):
+        await _resolving(monkeypatch, ["8.8.4.4"])
+    # Intended, with TLS_MODE=public.
+    assert "8.8.4.4" in await _resolving(monkeypatch, ["8.8.4.4"], tls_mode="public")
+    with pytest.raises(RuntimeError, match="doesn't resolve"):
+        await _resolving(monkeypatch, [])
+
+
+def test_the_proxy_gets_its_certificate_as_tls_mode_says() -> None:
+    caddy = _without_comments(ROOT / "deploy" / "proxy" / "Caddyfile")
+    assert "import tls_{$TLS_MODE:public}" in caddy
+    for mode in ("public", "local", "cloudflare", "acmedns"):
+        assert f"(tls_{mode})" in caddy, mode
+    assert "persist_config off" in caddy, "the DNS credentials stay out of /config"
+    image = (ROOT / "deploy" / "proxy" / "caddy.Dockerfile").read_text(encoding="utf-8")
+    assert "caddy-dns/acmedns" in image and "caddy-dns/cloudflare" in image
+
+
+def test_the_dns_credentials_are_the_proxys_alone(prod: dict[str, Any]) -> None:
+    secrets = {"CLOUDFLARE_API_TOKEN", "ACMEDNS_USERNAME", "ACMEDNS_PASSWORD"}
+    for name, service in prod["services"].items():
+        env = set(service.get("environment") or {})
+        if name == "proxy":
+            assert secrets <= env
+        else:
+            assert not secrets & env, name
+
+
+def test_the_proxy_listens_on_bind_ip(prod: dict[str, Any]) -> None:
+    ports = prod["services"]["proxy"]["ports"]
+    assert ports and all(p.startswith("${BIND_IP:-0.0.0.0}:") for p in ports)

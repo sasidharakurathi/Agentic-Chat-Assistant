@@ -32,6 +32,7 @@ from httpx import AsyncClient
 from scripts import loadtest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from tests.infra import unavailable
 
 pytestmark = pytest.mark.anyio
 
@@ -51,7 +52,9 @@ def _clean() -> Any:
 
 async def _conversation(client: AsyncClient, headers: dict[str, str]) -> str:
     a = (await client.post(f"{API}/assistants", json={"name": "Shop"}, headers=headers)).json()
-    conv = await client.post(f"{API}/assistants/{a['id']}/conversations", json={}, headers=headers)
+    conv = await client.post(
+        f"{API}/assistants/{a['id']}/conversations", json={"mode": "preview"}, headers=headers
+    )
     return str(conv.json()["id"])
 
 
@@ -219,7 +222,7 @@ async def test_the_index_settings_last_one_transaction(monkeypatch: pytest.Monke
             pass
     except Exception as exc:  # pragma: no cover - environment-dependent
         await engine.dispose()
-        pytest.skip(f"Postgres not reachable: {type(exc).__name__}")
+        unavailable("postgres", f"Postgres not reachable: {type(exc).__name__}")
     monkeypatch.setattr(settings, "rag_hnsw_ef_search", 100)
     try:
         async with async_sessionmaker(engine)() as s:

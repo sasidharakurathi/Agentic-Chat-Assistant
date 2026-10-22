@@ -24,6 +24,7 @@ from app.logging import configure_logging, get_logger
 from app.observability.otel import setup_tracing, shutdown_tracing, span
 from app.rag.ingest import ingest_data_source
 from app.services import conversation_memory
+from app.services.mail import MAIL_QUEUE
 
 log = get_logger(__name__)
 
@@ -128,8 +129,9 @@ async def mcp_health_sweep(ctx: dict[Any, Any], *_args: Any, **_kwargs: Any) -> 
 
 
 async def recovery_sweep(ctx: dict[Any, Any], *_args: Any, **_kwargs: Any) -> None:
-    """Every minute: close approvals a dead process left pending, and leave
-    a notice on questions a dead turn never answered (Phase 7a.7)."""
+    """Every minute: expire requests nobody decided, remind approvers once,
+    settle requests a dead process left behind (Phase 9.1), and leave a
+    notice on questions a dead turn never answered (Phase 7a.7)."""
     from app.services import recovery
 
     await recovery.sweep()
@@ -165,6 +167,96 @@ async def agent_files_sweep(ctx: dict[Any, Any], *_args: Any, **_kwargs: Any) ->
     cli_files.sweep(keep)
 
 
+async def review_fixed_sweep(ctx: dict[Any, Any], *_args: Any, **_kwargs: Any) -> None:
+    """Tell people that what they reported was fixed (Phase 10.3): items in
+    the needs-review queue whose test case now passes on the live version.
+    Each person once."""
+    from app.services import review_queue
+
+    told = await review_queue.fixed_sweep()
+    if told:
+        log.info("review_fixed_sweep", told=told)
+
+
+async def retention_sweep(ctx: dict[Any, Any], *_args: Any, **_kwargs: Any) -> None:
+    """Erase for good the conversations quiet for longer than each
+    organisation keeps them (Phase 8.10), in small batches. Held ones stay.
+
+    First, the screenshots attached more than a day ago and never sent
+    (Phase 9.6): nothing will ever send them, and otherwise they would stay
+    until their conversation is erased. A failure there is logged and the
+    retention sweep still runs."""
+    from app.services import attachments, retention
+
+    try:
+        async with get_sessionmaker()() as session:
+            await attachments.sweep_unsent(session)
+    except Exception:
+        log.exception("unsent_attachments_sweep_failed")
+    await retention.retention_sweep()
+
+
+async def knowledge_sweep(ctx: dict[Any, Any], *_args: Any, **_kwargs: Any) -> None:
+    """Remove document copies kept for versions that no longer need them
+    (Phase 7b.1): a version rejected, withdrawn or rolled back gives up the
+    copy it was approved with. A reindex sweeps its own source; this
+    catches the copies a review decision freed."""
+    from app.services import manifest
+
+    async with get_sessionmaker()() as session:
+        removed = await manifest.sweep_superseded(session)
+        await session.commit()
+    if removed:
+        log.info("knowledge_sweep", removed=removed)
+
+
+async def send_mail_job(ctx: dict[Any, Any], message_id: str, data: dict) -> None:
+    """Deliver one email (Phase 7b.5): retried with a growing wait while the
+    failure may pass, recorded as failed when it won't or the attempts run
+    out."""
+    from arq import Retry
+
+    from app.services import mail
+
+    attempt = int(ctx.get("job_try", 1))
+    if not await mail.deliver(uuid.UUID(message_id), data, attempt=attempt):
+        raise Retry(defer=mail.retry_delay_s(attempt))
+
+
+async def execute_request_job(ctx: dict[Any, Any], approval_id: str) -> None:
+    """Run one approved request (Phase 9.1). Tried once: its claim makes a
+    second delivery a no-op, and a write is never retried by itself."""
+    from app.services import executor
+
+    await executor.execute(uuid.UUID(approval_id))
+
+
+async def audit_seal(ctx: dict[Any, Any], *_args: Any, **_kwargs: Any) -> None:
+    """Seal the audit rows written since the last run into the hash chain
+    (Phase 7b.7)."""
+    from app.services import audit_chain
+
+    async with get_sessionmaker()() as session:
+        await audit_chain.seal(session)
+
+
+class MailWorkerSettings:
+    """The interactive queue's worker (`arq app.worker.MailWorkerSettings`):
+    email, and since Phase 9.1 approved requests. A slow SMTP server, or a
+    backlog, never holds up indexing and evals, and they never hold up an
+    invite or a request someone is waiting on."""
+
+    queue_name = MAIL_QUEUE
+    functions: ClassVar = [
+        func(send_mail_job, max_tries=settings.mail_max_tries, timeout=60),
+        func(execute_request_job, max_tries=1, timeout=120),
+    ]
+    max_jobs = 4
+    on_startup = startup
+    on_shutdown = shutdown
+    redis_settings = RedisSettings.from_dsn(settings.redis_url)
+
+
 class WorkerSettings:
     functions: ClassVar = [
         # Arq's default job timeout is 300 s. Indexing a long document on the
@@ -178,8 +270,12 @@ class WorkerSettings:
     cron_jobs: ClassVar = [
         cron(mcp_health_sweep, minute={0, 15, 30, 45}, run_at_startup=False, timeout=600),
         cron(agent_files_sweep, hour={3}, minute={30}, run_at_startup=False, timeout=600),
+        cron(knowledge_sweep, hour={3}, minute={45}, run_at_startup=False, timeout=600),
+        cron(retention_sweep, hour={2}, minute={30}, run_at_startup=False, timeout=1800),
+        cron(review_fixed_sweep, minute=set(range(0, 60, 5)), run_at_startup=False, timeout=240),
         # Every minute, starting at once: a restart is exactly when it matters.
         cron(recovery_sweep, run_at_startup=True, timeout=55),
+        cron(audit_seal, run_at_startup=True, timeout=55),
     ]
     on_startup = startup
     on_shutdown = shutdown
@@ -187,12 +283,17 @@ class WorkerSettings:
 
 
 __all__ = [
+    "MailWorkerSettings",
     "WorkerSettings",
     "agent_files_sweep",
+    "audit_seal",
     "ingest_data_source_job",
+    "knowledge_sweep",
     "mcp_health_sweep",
     "recovery_sweep",
     "refresh_schema_job",
+    "review_fixed_sweep",
     "run_eval_job",
+    "send_mail_job",
     "summarize_conversation_job",
 ]

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatCount, formatUsd } from "./format";
+import { formatCount, formatDateTime, formatUsd } from "./format";
 
 describe("formatUsd", () => {
   it.each([
@@ -30,5 +30,16 @@ describe("formatCount", () => {
     [2_500_000, "2.5M"],
   ])("%d -> %s", (n, expected) => {
     expect(formatCount(n)).toBe(expected);
+  });
+});
+
+describe("formatDateTime", () => {
+  it("adds the time to the date, and the year only when it differs", () => {
+    const now = new Date(2026, 9, 12, 9, 0);
+    expect(formatDateTime(new Date(2026, 2, 12, 14, 5).toISOString(), now)).toBe("12 Mar, 14:05");
+    expect(formatDateTime(new Date(2025, 2, 12, 9, 30).toISOString(), now)).toBe(
+      "12 Mar 2025, 09:30",
+    );
+    expect(formatDateTime("not a date", now)).toBe("");
   });
 });

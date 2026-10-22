@@ -7,6 +7,7 @@ import { canAct } from "@/components/chat/conversation-access";
 import { groupByDay } from "@/components/chat/conversation-groups";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Segmented } from "@/components/ui/segmented";
 import { Lamp } from "@/components/ui/lamp";
 import { BackLink } from "@/components/ui/page-header";
 import type { Conversation } from "@/lib/api";
@@ -34,6 +35,7 @@ export function ConversationList({
   onArchive,
   onLoadMore,
   headerAction,
+  scope,
 }: {
   assistantId: string;
   name: string;
@@ -51,6 +53,8 @@ export function ConversationList({
   onLoadMore: () => void;
   /** Extra control at the end of the top row, e.g. the sheet's close button. */
   headerAction?: ReactNode;
+  /** Admins only: list everyone's conversations, not only theirs (7b.2). */
+  scope?: { everyone: boolean; onChange: (everyone: boolean) => void };
 }) {
   const baseId = useId();
   const groups = groupByDay(rows);
@@ -64,7 +68,19 @@ export function ConversationList({
         />
         {headerAction}
       </div>
-      <div className="shrink-0 px-3 pt-3">
+      <div className="flex shrink-0 flex-col gap-2 px-3 pt-3">
+        {scope && (
+          <Segmented
+            label="Whose conversations"
+            size="sm"
+            value={scope.everyone ? "everyone" : "mine"}
+            onChange={(v) => scope.onChange(v === "everyone")}
+            options={[
+              { value: "mine", label: "Mine" },
+              { value: "everyone", label: "Everyone's" },
+            ]}
+          />
+        )}
         <Button variant="outline" size="sm" className="w-full" onClick={onNewChat}>
           <Plus aria-hidden />
           New chat
@@ -104,6 +120,12 @@ export function ConversationList({
         })}
         {rows.length === 0 && (
           <p className="text-small text-muted-foreground px-3 py-4">No conversations yet.</p>
+        )}
+        {scope?.everyone && rows.length > 0 && (
+          <p className="text-small text-muted-foreground px-3 pt-4">
+            Other people&apos;s titles are private. Opening one asks for your reason, which is
+            recorded in the audit log.
+          </p>
         )}
         {more && (
           <Button
@@ -205,8 +227,8 @@ function RowActions({
         variant="ghost"
         size="icon"
         className="hover:bg-background hover:text-destructive size-7"
-        aria-label={`Archive ${c.title}`}
-        title="Archive"
+        aria-label={`Remove ${c.title} from your history`}
+        title="Remove from your history"
         onClick={() => onArchive(c)}
       >
         <Archive aria-hidden className="size-3.5" />

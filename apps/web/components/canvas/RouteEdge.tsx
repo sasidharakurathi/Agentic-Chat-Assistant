@@ -13,6 +13,7 @@ import { memo, useEffect, useRef } from "react";
 
 import { prefersReducedMotion, strokeFor, useCanvasView } from "@/components/canvas/canvas-view";
 import type { RouteEdgeData, StationData } from "@/components/canvas/graph-sync";
+import { useTrafficView } from "@/components/canvas/traffic-context";
 import { Lamp } from "@/components/ui/lamp";
 import { cn } from "@/lib/utils";
 
@@ -20,6 +21,11 @@ export type RouteEdgeType = Edge<RouteEdgeData, "route">;
 
 /** How far before a line's end the safety marker sits. */
 const MARKER_OFFSET = 28;
+
+/** Traffic (Phase 10.2): the length of the marker dash that travels a busy
+ *  line, and its speed in px per second. */
+const FLOW_DASH = 14;
+const FLOW_SPEED = 160;
 
 function beforeEnd(x: number, y: number, side: Position) {
   if (side === Position.Top) return { x, y: y - MARKER_OFFSET };
@@ -39,6 +45,8 @@ function beforeEnd(x: number, y: number, side: Position) {
  *  is dashed red: it is, exactly, a line that no longer runs. */
 export const RouteEdge = memo(function RouteEdge({
   id,
+  source,
+  target,
   sourceX,
   sourceY,
   targetX,
@@ -50,6 +58,7 @@ export const RouteEdge = memo(function RouteEdge({
   interactionWidth = 16,
 }: EdgeProps<RouteEdgeType>) {
   const { keyFocus } = useCanvasView();
+  const traffic = useTrafficView();
   const [path, labelX, labelY] = getSmoothStepPath({
     sourceX,
     sourceY,
@@ -94,6 +103,23 @@ export const RouteEdge = memo(function RouteEdge({
 
   const marker = data?.writes && !problem ? beforeEnd(targetX, targetY, targetPosition) : null;
 
+  // Traffic (Phase 10.2): a line that carried live calls is drawn heavier,
+  // and a marker dash travels it toward its target, the landing page's "in
+  // use". Under reduced motion it is only heavier.
+  const busy = Boolean(traffic?.edges.has(`${source}>${target}`)) && !problem && !removed;
+  const flow = useRef<SVGPathElement>(null);
+  useEffect(() => {
+    const el = flow.current;
+    if (!busy || !el || typeof el.animate !== "function" || prefersReducedMotion()) return;
+    const length = el.getTotalLength();
+    el.style.strokeDasharray = `${FLOW_DASH} ${length + FLOW_DASH}`;
+    const run = el.animate(
+      [{ strokeDashoffset: `${FLOW_DASH}` }, { strokeDashoffset: `${-length}` }],
+      { duration: Math.max(900, ((length + FLOW_DASH) / FLOW_SPEED) * 1000), iterations: Infinity },
+    );
+    return () => run.cancel();
+  }, [busy, path]);
+
   return (
     <>
       <g className="group">
@@ -137,10 +163,27 @@ export const RouteEdge = memo(function RouteEdge({
           className={cn(
             "transition-[stroke] duration-120 ease-out",
             colour,
-            main && !problem && !removed ? "stroke-5" : "stroke-3",
+            main && !problem && !removed
+              ? busy
+                ? "stroke-6"
+                : "stroke-5"
+              : busy
+                ? "stroke-5"
+                : "stroke-3",
             (problem || removed) && "[stroke-dasharray:6_4]",
           )}
         />
+        {busy && (
+          // Hidden until the animation measures the line and gives it its dash.
+          <path
+            ref={flow}
+            d={path}
+            fill="none"
+            aria-hidden
+            className={cn("stroke-marker pointer-events-none", main ? "stroke-6" : "stroke-5")}
+            style={{ strokeDasharray: "0 100000" }}
+          />
+        )}
         {interactionWidth > 0 && (
           <path
             d={path}

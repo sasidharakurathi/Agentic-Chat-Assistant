@@ -22,6 +22,9 @@ const SECURITY_HEADERS = [
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // The browser tests' own web app (Phase 8.11) builds into `.next-e2e`, so
+  // it can run beside the dev server without either disturbing the other.
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   reactStrictMode: true,
   // The shared package ships TypeScript source, not a build: Next compiles it.
   transpilePackages: ["@assistant-studio/shared"],

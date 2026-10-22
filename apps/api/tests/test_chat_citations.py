@@ -88,7 +88,9 @@ async def _rag_assistant(
 
 
 async def _conversation(client: AsyncClient, org_headers: dict[str, str], aid: str) -> str:
-    r = await client.post(f"/api/v1/assistants/{aid}/conversations", json={}, headers=org_headers)
+    r = await client.post(
+        f"/api/v1/assistants/{aid}/conversations", json={"mode": "preview"}, headers=org_headers
+    )
     assert r.status_code == 201, r.text
     return str(r.json()["id"])
 

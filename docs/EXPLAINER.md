@@ -5950,7 +5950,8 @@ ones in `vitest` need a major upgrade and are listed as open.
 
 #### What is still open
 
-Listed in full in `docs/THREAT_MODEL.md` §5. The three to know:
+Listed in full in `docs/THREAT_MODEL.md` §6 (§5 before the 7b.10
+rewrite). The three to know, as they stood then:
 
 - **The MCP runner is one trust zone.** Local-command servers share a
   user, `/tmp` and `/proc`, so one can read another's secrets. The fix is
@@ -7920,3 +7921,2463 @@ builder's hint even said "Leave empty to allow any public site".
   half new, with a copy of section 13's ending and the old section 14
   after it. They are merged back into one section 14.
 
+## 17. Phase 7b: governance foundations
+
+Phase 7a closed the holes a hostile document or a weak network could use.
+Phase 7b puts in the controls an organisation relies on before it opens
+the assistants to everyone: who approves what, who reads what, and a
+record of both (`docs/INTERNAL_PLAN.md`, Phase 7b).
+
+### 7b.1 The approval gate
+
+**The hole.** Publishing was one step. A builder pressed Publish and the
+draft became what everyone got, in every conversation, at once; the
+builder could also set an assistant's status to "published" (or reopen
+one an admin had archived) with a plain edit. Nothing was reviewed. And
+even if publishing had needed an approval, it would not have held: a
+version kept only its graph and config, so a builder could change live
+behaviour after approval by reindexing a document, pointing a database
+connection at another database or giving it write access, or letting an
+MCP server's tool description change. With no approved version, Chat ran
+the draft.
+
+**Decided (2026-10-08):** an approved assistant's knowledge stays as it
+was approved (old and new copies side by side, the new one previewed
+until the next approval); builders test their draft in a preview only
+they and admins see, and the reviewing admin can chat with the submitted
+version.
+
+**Now:**
+
+- **Versions have a review state** (`models/assistant.py`,
+  `VersionStatus`): `submitted`, `approved`, `rejected`, `superseded` (a
+  newer submission replaced it before review), `withdrawn` (its builder
+  took it back) and `rolled_back`. A version records who submitted it and
+  when, and who reviewed it, when, and their note. A partial unique index
+  allows one submission waiting per assistant.
+- **Submit, then approve** (`services/assistants.py`). `POST .../versions`
+  now submits: it validates the draft, freezes it as a new version and
+  does not touch what Chat answers from. An admin (or the owner) calls
+  `.../versions/{n}/approve` or `.../reject` (a reason is required); the
+  builder can `.../withdraw`. Each is a conditional update, so of two
+  admins deciding at once only one decision lands, and each is audited.
+  Approving re-checks everything the version names (a connection deleted
+  since would fail mid-conversation) and refuses with `version_invalid`.
+- **Only approving moves the live pointer.** `Assistant.current_version_id`
+  is now "the approved version Chat answers from", set by approve and by
+  rollback only. The status is not an edit any more: `PATCH` refuses
+  unknown fields, `status` included (a client still sending it is told,
+  not ignored). The status follows the lifecycle: `published` on the first
+  approval, `archived` and back through the admin's pause.
+- **Chat never runs the draft** (`services/chat.py`). Starting a
+  conversation, posting in one and the turn itself refuse with
+  `assistant_unavailable` (409) while nothing is approved or the
+  assistant is paused. The route refuses before the stream opens; a pause
+  that lands between the check and the turn ends the turn with the same
+  code.
+- **A conversation stays on its version.** It records the approved
+  version it started on, and every turn runs that one. Approving version
+  3 reaches new conversations; one already going keeps the behaviour its
+  person has been talking to (and its SDK session still holds that
+  version's results). A conversation from before the gate with no version
+  goes to the live one.
+- **Rollback** (`.../versions/{n}/make-live`, admins): makes an earlier
+  approved version live without rebuilding anything from the draft, after
+  re-checking what it names. The version it replaces becomes
+  `rolled_back`: it cannot go live again without a new submission, and its
+  conversations move to the live version on their next message, since an
+  admin judged it bad.
+- **Pause** (`POST .../archive` with a reason; `.../unarchive`, admins):
+  nothing answers, previews included. Approvals waiting in its
+  conversations expire, and answers being written are stopped (locally
+  and through the interrupt channel). Reopening brings back the live
+  version, or a draft if none was ever approved. Approving while paused
+  does not reopen it.
+- **Previews** (`conversations.mode`, `live` or `preview`). The Studio's
+  test chat is a preview: it runs the draft as it is now, or one chosen
+  version (`version` on create), which is how the reviewing admin chats
+  with what was submitted. Only the assistant's builder and admins can
+  start, list or post in one, and the post check runs on every message, so
+  a preview whose starter can no longer edit the assistant stops. Chat's
+  list leaves previews out (`?mode=preview` lists them). Writes in a
+  preview still wait for approval. Usage needs no tag: each usage row
+  names its conversation, and the conversation its mode.
+- **What a version uses is frozen with it** (`services/manifest.py`). On
+  submission the version records a manifest: its knowledge, document by
+  document; a fingerprint of each database connection (engine, host,
+  port, database, user, which secret, options, TLS, permissions); and of
+  each MCP server (transport, command, URL, header and environment names,
+  which secrets, sandbox) and each tool it is allowed (description, input
+  schema, read-only hint). The secret's id is fingerprinted, not its
+  value, so rotating a password is not a change.
+  - **Knowledge keeps the approved copy.** A document's id now follows its
+    content. A reindex that would replace a document a version still
+    needs marks it `superseded` and keeps it with its chunks
+    (`rag/ingest.py`); turns on that version search only the documents in
+    its manifest, and previews only current ones (`rag/retrieve.py`). The
+    copies kept are those of the submitted version, the live one and the
+    approved one before it (the usual rollback target): keeping every
+    version's copy would grow without end. Older copies are removed after
+    each reindex and by a daily sweep (`knowledge_sweep`, 03:45), and a
+    rollback to a version whose documents are gone is refused. A knowledge
+    source the live or submitted version answers from can't be deleted
+    (`source_in_use`); the Sources tab counts only current copies.
+  - **Connections and tools fail closed.** Each turn on a version compares
+    the live resources with its manifest. A connection, server or tool
+    that has changed or gone is left out of that turn's tools (logged as
+    `version_drift`) until a version with it is approved. Approving, and
+    rolling back, refuse with `version_drifted` while anything has
+    drifted. `GET .../versions/{n}/drift` lists what changed.
+  - **Each run records the manifest hash** it answered with, beside its
+    version number. A version from before the gate gets its manifest at
+    its first turn, with an audit row saying so.
+- **The migration** (`c7b1a2d3e4f5`, `c7b1d4e5f6a7`): every existing
+  version had been published, so each becomes `approved` with no
+  reviewer, and one audit row per assistant says it was grandfathered in;
+  a conversation with no version (it answered from the draft) becomes a
+  preview; an assistant marked published with nothing published goes back
+  to draft.
+- **The web app.** The builder header shows where the assistant stands
+  (Not approved yet, Live, Paused), **Preview** and **Submit for
+  review**. History lists each version's state and review note, with the
+  actions the viewer may take: Approve and Reject (admins), Withdraw (the
+  builder), Roll back to this (admins), Preview. **Compare with the live
+  version** puts the submission beside what is live; above the pipeline
+  and settings diff, it lists what changed in knowledge, connections and
+  tools (`lib/manifest-diff.ts`), and a version with drift says so. An
+  admin's Pause and Reopen sit at the top. The chat page has a preview
+  mode (`?preview=1`, `&version=N`) with a banner saying who sees it; when
+  Chat is unavailable it says why and offers the builder a preview, and a
+  paused assistant's threads show the reason instead of a message box.
+
+**Verified:**
+
+- `test_approval_gate.py` (17):
+  - nothing answers before approval, and a builder can't approve their own;
+  - supersede, reject (with a reason) and withdraw;
+  - a decision moves only a version still waiting;
+  - the status can't be edited;
+  - Chat never runs the draft;
+  - a conversation stays on its version;
+  - a rollback moves the rolled-back version's conversations;
+  - approval re-checks references;
+  - previews and the reviewer's preview of the submitted version;
+  - a preview stops for someone who can no longer edit;
+  - pausing stops everything (approvals expire, the running answer is
+    stopped) and approving while paused doesn't reopen;
+  - reopening a never-approved assistant leaves a draft;
+  - an HTTP tool with no sites can't be approved.
+- `test_frozen_versions.py` (9):
+  - the approved copy against the preview's new copy, both by retrieval
+    and through the turn's own `kb_search` tool;
+  - which copies are kept, and the rollback refused once one is gone;
+  - a used source can't be deleted, and a version approved with no
+    knowledge searches nothing;
+  - a changed connection is left out of Chat but not of a preview, and
+    approving refuses it;
+  - a changed MCP tool or server is dropped;
+  - runs record the manifest, and an old version records one at its
+    first turn.
+- `test_conversation_versions.py`: each run records the version that
+  answered it: live, draft preview and pinned preview.
+- `test_version_review_migration.py`: real rows at the revision before,
+  upgraded, checked, downgraded.
+- About 40 existing test files moved from chatting with a draft to a
+  preview (or to approving first); the role matrix lists the new routes.
+- Browser-checked on the dev stack:
+  - an unapproved assistant refuses in Chat and offers a preview;
+  - the preview answers;
+  - approving makes it Live;
+  - pausing shows its reason in place of the message box;
+  - comparing with the live version lists a connection that changed with
+    no settings change;
+  - the live version shows its drift notice.
+- Web: `assistant-lifecycle.test.ts` (7) and `manifest-diff.test.ts` (5).
+- Mutation-tested: 36 of 36, after two survivors got tests. One of those
+  tests found a bug: rejecting or withdrawing a version no longer waiting
+  answered 500, not 409, because the refusal read the version after
+  rolling back its transaction.
+
+**Left for later:**
+
+- **Nobody approves their own work** (7b.3). Today an admin can approve
+  their own submission; 7b.3 adds the rule and the owner's override.
+- **Catalog text** (name, description) is still edited live, outside
+  versions; it becomes part of the reviewed listing with the catalog
+  (Phase 8). Each rename is audited with before and after.
+- **Pausing one tool** rather than the whole assistant, and durable
+  deferred actions that check the live version before running, come with
+  Phase 9.
+- **Eval evidence on the review page.** An eval run can already target the
+  submitted version; linking its result into the review is a small
+  follow-up.
+- **The HTTP tool's site list in the review** (from 7a.9) is shown as part
+  of the settings diff, not yet called out on its own.
+
+### 7b.2 Conversations are private, and an admin's read is recorded first
+
+**The hole.** Any member could list an assistant's conversations and open
+any of them: messages, runs, approvals, a live answer. The Usage page
+listed every conversation by title, and a title is the start of the first
+message. The team's decision (plan D5) is that conversations are private
+between employees, admins may read any, and every such read is recorded.
+The gap review added how that record fails: written after the response
+(on this FastAPI the request's commit runs after the body is sent), so it
+can be lost after the content left; one row per call, so one page open
+makes five; and the audit log itself held content (a rename stored the old
+and new titles).
+
+**Now:**
+
+- **Your own, only** (`api/routes/conversations.py`). The conversation list
+  returns the caller's own. An admin may ask for everyone's
+  (`?everyone=true`); other people's titles come back as "Conversation"
+  with `title_hidden`, so the list reveals nothing anyone wrote.
+- **One check for every read** (`api/deps.py`,
+  `require_conversation_reader`). Every route that returns a
+  conversation's detail, messages, runs, a run's trace, approvals, the
+  running turn or its events depends on it. The person who started the
+  conversation passes. A member who didn't gets 403
+  `not_conversation_owner`. An admin or the owner must send a reason in the
+  `X-Read-Reason` header (URL-encoded, at most 500 characters; a header,
+  not the URL, which the proxy logs); without one, 403
+  `read_reason_required`. Acting in someone's conversation is unchanged:
+  only its starter (7a.4).
+- **Recorded, and committed, before the content**
+  (`services/conversation_reads.py`). The check writes
+  `conversation.read_by_admin` and commits it before the handler runs; if
+  the commit fails, the request fails and nothing is returned. One row per
+  admin, conversation and reason in 30 minutes, so opening a thread (five
+  calls) is one record, and a new reason is a new one. The row names the
+  reader (id, plus their email and role at the time, kept if the account
+  goes later), whose conversation it was (by id), and the reason. Never
+  the content.
+- **No content in the audit log.** A rename records the old and new
+  lengths, not the titles.
+- **Usage** (`services/usage.py`). Grouped by conversation, a member sees
+  only their own conversations' spend; an admin sees everyone's, with a
+  title only on their own. Grouping by assistant or model is unchanged
+  (no content in it).
+- **A test holds the line** (`tests/test_conversation_privacy.py`): it walks
+  every route (through FastAPI's nested routers) and fails on one with
+  `{conversation_id}` that depends on neither the read check nor the
+  starter check, or a GET that skips the read check.
+- **The web app.** An admin's conversation list has **Mine / Everyone's**.
+  Opening someone else's asks for a reason ("Conversations are private.
+  Admins can open any, and each opening is recorded in the audit log with
+  your reason"); it is kept for that conversation in the tab and sent with
+  each of its reads, the live answer's stream included
+  (`lib/read-reasons.ts`). It opens read-only, as before. The Usage page
+  names such a row "Someone else's conversation (its title is private)".
+
+**Verified:**
+
+- `test_conversation_privacy.py` (8):
+  - the route walk (every conversation route has the read or starter
+    check; every GET has the read check);
+  - a teammate can neither list nor read your conversation, on each read
+    route, and your own reads aren't recorded;
+  - an admin is refused without a reason, then reads with one; five calls
+    make one record holding the reason, email, role and owner and none of
+    the content, and a new reason makes a second;
+  - the record survives a request that then fails (an invalid cursor);
+  - a reason in Hindi is kept as written, and a 501-character one is
+    refused;
+  - an admin's list of everyone's hides titles;
+  - usage by conversation shows a member only their own, and an admin no
+    one else's titles;
+  - a rename records lengths only.
+- The role matrix has a reader level (the starter, or an admin or owner
+  with a reason), and its walk passes with it.
+- Tests that relied on the old rules now check the new ones:
+  - admins read with a reason (the 7a.4 tests);
+  - a teammate is refused;
+  - the approval card's member can't see the approval list.
+- Web: `read-reasons.test.ts` (the reason goes with each read of that
+  conversation, encoded, and nowhere else).
+- Mutation-tested: 13 of 13.
+
+**Left for later:**
+
+- **The admin-reads view** on the audit page, and telling an employee when
+  their conversation was read: 7b.7, with the audit log page.
+- **Accountability across erasure** (pseudonymising a person rather than
+  deleting them, so who read what survives): with 10.3. The reader's email
+  and role are already kept in each row.
+- **Langfuse.** With `LANGFUSE_*` set, full prompts and answers go to
+  Langfuse, outside this check; OPERATIONS says to leave it unset or limit
+  its access to the owner.
+- **Eval conversations** belong to whoever started the run; builders read
+  results through the eval run, which is theirs.
+
+### 7b.3 Nobody approves their own work
+
+**The hole.** An approval is meant to be a second pair of eyes. But any
+admin could approve a version they had submitted themselves, of an
+assistant they had built. And a tool-call approval's record never said
+whether the person who decided it was the person who had asked. With two
+or three admins, the audit log would show reviews that never happened.
+
+**Decided (2026-10-09):**
+- **Tool calls stay as they are.** Today's in-chat approval, decided by
+  the person in the conversation, stays until Phase 9 (plan D17). An
+  approval waits five minutes in memory, so requiring someone else now
+  would expire nearly every write. Each decision is recorded honestly
+  instead.
+- **The sole owner may approve their own version.** When nobody else
+  could review it, the owner may approve their own work, with a note.
+
+**Now:**
+
+- **Versions** (`services/duties.py`, called from `assistants.approve`).
+  Whoever submitted the version, or built the assistant, may not approve
+  it while another active admin or the owner could: 403
+  `cannot_approve_own`. "Active" means the account isn't deactivated.
+  - **The owner, with nobody else to ask** (a one-person organisation),
+    may approve their own, but only with a note saying why it is ready
+    (403 `self_approval_needs_note` without one).
+  - **An admin** never approves their own: there is always an owner to
+    ask.
+  - **The approval's audit entry** records who submitted the version, who
+    built the assistant, the approver's role, and `self_approved`.
+  - **Rejecting your own submission** is still allowed: it changes
+    nothing anyone sees.
+- **Tool calls** (`services/approvals.py`). Each approval now records who
+  asked (`requested_by`, the person whose conversation raised it). It is
+  kept on the row, so it survives if the conversation goes; existing rows
+  are filled in by migration `c7b3e1f2a3b4`. The decision's audit entry
+  says:
+  - who asked;
+  - the decider's role;
+  - the risk;
+  - `self_approved` when the asker decided their own request.
+
+  Phase 9 turns on "never the asker" once an admin can answer later.
+- **Members** shows who is active (`is_active` on each member).
+- **The web app.**
+  - **History** doesn't offer Approve to someone who may not approve that
+    version, and says why: "You submitted this or built the assistant, so
+    another admin or the owner approves it". Reject stays.
+  - **The owner approving their own** is asked "Why it is ready", and the
+    approval refuses an empty note.
+  - **The Members page** warns when only one person can approve
+    assistants.
+  - All of this mirrors the server's rule (`approveRule` in
+    `lib/assistant-lifecycle.ts`); the server decides regardless.
+
+**Left for later:**
+
+- **"Never the asker" for writes**, the approvals inbox, and copying a
+  turn's guardrail findings onto its approval ("this turn read untrusted
+  text"): Phase 9.
+- **Who receives approval emails**, worked out from active admins at send
+  time: with email (7b.5) and the inbox.
+
+**Verified** at the end of Phase 7b (2026-10-09):
+`test_separation_of_duties.py` (10) passes. The mutation check caught 11
+of 11 changes, after one more test: an admin left with no other reviewer,
+the owner switched off, still can't approve their own.
+
+### 7b.4 People: joining, leaving, coming back
+
+**The hole.**
+- **Nobody could be removed.** A leaver kept their membership: they could
+  still read the org's assistants, renew their session indefinitely, and
+  have a pending write approved after they'd gone.
+- **Leavers' assistants were orphaned.** An assistant belonged to its
+  creator and nobody else, so it was left with no owner who still worked
+  there.
+- **Invites had holes.** They couldn't be listed or withdrawn, and several
+  could be open for one address. One sent by an admin since demoted still
+  worked, and a deactivated person couldn't be invited back.
+- **Signing up with an invite made a personal organisation** beside the
+  team's, and needed a second "Join" click that a closed tab left undone.
+- **The last-owner check counted owners** who could no longer sign in.
+
+**Now:**
+
+- **Signing up with an invite joins that organisation only**
+  (`services/auth.py`): the account, the membership with the invite's
+  role and the used invite, in one step; no personal org. Signing up
+  without one (the first account, or open registration) is unchanged.
+- **Deactivating** (`POST /orgs/{org}/members/{user}:deactivate`, admins;
+  `services/people.py`) is how someone is removed. The membership row
+  stays, deactivated, so their name stays on what they did. In one
+  transaction:
+  - **Access ends.** They reach nothing in the org from their next
+    request: `member_of` refuses a deactivated membership.
+  - **Sessions end.** Every refresh token they hold is revoked, so no
+    phone or tab renews a session. A refresh by a switched-off account is
+    refused besides.
+  - **The account is switched off** if they belong to no other org.
+  - **Their assistants pass to someone who stays:** the admin doing it,
+    or whoever they name. Each transfer is audited
+    (`assistant.transfer`).
+  - **Their co-editor grants are withdrawn.**
+  - **Their pending approvals close:** nothing a leaver asked for runs
+    after they've gone.
+  - **The invites they sent and nobody used are revoked.**
+  - **After the commit,** any answer being written in their conversations
+    is stopped.
+  - **The rank rule of role changes applies:** an admin removes members;
+    an owner removes anyone but themselves.
+  - **The audit entry** records each count.
+- **What they leave behind** (`GET .../members/{user}/leaving`) is shown
+  before an admin confirms:
+  - their assistants, and who will take them over;
+  - the database connections and MCP servers on assistants they built or
+    co-edited (credentials they may know, with a reminder to rotate
+    them);
+  - their pending approvals, open invites and co-editor grants.
+- **Reactivating** (`:reactivate`) brings back the membership and the
+  account, nothing else. Ownership and grants stay where deactivation put
+  them, so coming back doesn't quietly restore edit rights.
+- **An organisation keeps an active owner.** The last owner who can sign
+  in and is still a member can't be demoted or removed
+  (`ensure_not_last_active_owner`, `last_owner`); a deactivated owner
+  doesn't count. Changing a deactivated person's role is refused: they
+  are reactivated first.
+- **Invites:**
+  - **Listed** (`GET /orgs/{org}/invites`): the open ones, expired ones
+    included.
+  - **Withdrawn** (`DELETE .../invites/{id}`), audited. A withdrawn link
+    opens nothing: preview says `revoked`; accepting or signing up with it
+    joins nothing.
+  - **One open per address:** a new invite voids the old (a partial unique
+    index holds it; the migration revokes older duplicates).
+  - **Backed by their sender:** an invite works only while whoever sent it
+    is still an active admin or owner who could grant its role, so
+    demoting or removing them voids it.
+  - **A deactivated person is reactivated, not re-invited** (409
+    `member_deactivated`).
+  - **The link lasts `INVITE_TTL_DAYS`** (7 by default).
+- **Co-editors** (`assistant_editors`, `services/editors.py`). An
+  assistant's creator or an admin names others who may edit it. They
+  change it, preview it and submit it like its creator, but don't name
+  co-editors themselves (`OwnerAssistantCtx`).
+  - **One rule decides who edits** (`access.can_edit_assistant`), read by
+    the assistant, conversation and eval contexts alike. It used to be two
+    copies.
+  - **The assistant's detail says `can_edit`** for the caller, which the
+    web app uses.
+- **Reviewers** (7b.3) count only active memberships.
+- **The web app:**
+  - **Members:**
+    - a **Remove** button for whoever the viewer may remove, opening a
+      dialog that lists what the person leaves behind and asks who takes
+      over their assistants;
+    - **Removed** people marked, with **Reactivate**;
+    - the invites not yet used, each with **Withdraw**.
+  - **History:** a **Who can edit** panel to add and remove co-editors.
+  - **The invite page:** says when a link was withdrawn, and "You've
+    joined …" after signing up with it.
+
+**Left for later:**
+
+- **Turning the existing personal orgs into one company org** (the
+  invite path no longer makes them): 7b.8, migration and rollout.
+- **An absolute session lifetime,** and password sign-in turned off for
+  Google accounts: 8.2.
+- **Legal holds** and pseudonymising someone instead of deleting them:
+  10.3.
+- **Knowledge-only editors** (sources, not the pipeline): with groups,
+  8.4.
+- **Email aliases** (a Gmail address with dots) still have to match the
+  invite exactly.
+
+**Verified** at the end of Phase 7b (2026-10-09):
+`test_people_lifecycle.py` (14) and the web tests pass. The mutation check
+caught 21 of 21 changes, after one more test (a switched-off account can't
+renew with a refresh token it still holds) and two patterns moved by 7b.8.
+
+### 7b.5 Email, that only ever notifies
+
+**Why now.**
+- **No email meant everything was by hand.** Every invite link had to be
+  copied and sent by hand, nobody was told when a version waited for
+  review or had been decided, and password reset (7b.6) needs a way to
+  reach someone.
+- **Email is also a way in.** The gap review listed what goes wrong:
+  - mail scanners open every link, so a one-click "approve" link would
+    approve;
+  - a name written into a message can forge a header or carry a phishing
+    link;
+  - a personal Gmail app password opens the whole account;
+  - settings editable in the app could point the server at someone's own
+    mail server, and so collect the password.
+
+**Now:**
+
+- **The rules** (`app/mail`):
+  - **Emails only notify.** A message says what happened and links to the
+    page where it is seen or decided while signed in. Nothing acts on a
+    click.
+  - **No conversation content,** and no free text from the model or from
+    people:
+    - a rejection says to read the reason in History, rather than quoting
+      it;
+    - names (an assistant's, an organisation's, a person's) go through
+      `clean_field`, which keeps them to one line, replaces anything that
+      reads as a web address, and caps the length.
+    - A subject or address with a line break is refused outright.
+  - **Plain text,** ending with: open the link on the office network or
+    VPN, and Assistant Studio never asks you to approve anything or type
+    your password from an email.
+- **Settings in the environment only:**
+  - `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY` (`starttls`, `ssl` or
+    `none`), `SMTP_USERNAME`, `SMTP_PASSWORD`, `MAIL_FROM` and
+    `MAIL_FROM_NAME`;
+  - `MAIL_BACKEND` picks where mail goes: `smtp`, `console` (development:
+    the message is written to the log), `memory` (tests) or `off`. Unset,
+    it is `smtp` with a host, else `console` in development and `off` in
+    production.
+  - The tests force `memory`, whatever the repo's `.env` says, so a test
+    run never emails anyone.
+- **A record, a queue, retries** (`services/mail.py`, `mail_messages`):
+  - **The record:** each message is kept with who it went to, its kind, its
+    subject, its attempts and its outcome. Never its body: an invite's
+    body holds a live link, which the database keeps only as a hash.
+  - **The queue:** with SMTP, the message goes on its own Arq queue,
+    `arq:mail`, drained by its own worker (`MailWorkerSettings`, a new
+    `mailer` container). A slow mail server never holds up a request, and
+    mail never waits behind indexing.
+  - **Retries:** a failure that may pass (a timeout, a busy server) is
+    retried after 30 s, then twice as long each time, up to 30 minutes and
+    `MAIL_MAX_TRIES` (5). One that won't pass (the sign-in or the address
+    refused) is recorded as failed at once.
+  - **Development and tests** (`console`, `memory`) deliver straight away,
+    with no queue.
+  - **A failure never fails the request:** an invite is still created,
+    with its link shown to copy.
+  - **The SMTP sign-in** uses Python's `smtplib` with certificate checks.
+    A refused sign-in is reported as just that, never with the password.
+- **Who is told what** (`services/notify.py`). Recipients are worked out
+  when the message is sent, from active members only.
+  - **An invite** goes to the address invited, with its link (the admin
+    still sees the link too).
+  - **A version waiting for review** goes to the active admins and owners,
+    not to whoever submitted it.
+  - **A version approved or rejected** goes to whoever submitted it,
+    unless they decided it themselves.
+- **For admins** (Members › Email):
+  - how this server sends email, read-only;
+  - the last week's sent and failed counts;
+  - **Send me a test**, which goes to the admin asking and nobody else (3
+    an hour).
+- **The preflight** in production:
+  - refuses `console` or `memory`, which would write invite links to a
+    log;
+  - refuses SMTP with no address to send from, or a username without a
+    password;
+  - warns when email is off;
+  - warns about `SMTP_SECURITY=none` to another host, and about a
+    personal gmail.com account, whose app password opens the whole
+    account.
+
+**Left for later:**
+
+- **The approvals inbox and its emails** (Phase 9).
+- **Sending email on behalf of an assistant** (a hand-off): links only,
+  through the same audited reads, with Phase 9.
+- **Unsubscribing from notifications.**
+
+**Verified** at the end of Phase 7b (2026-10-09): `test_mail.py` (13) and
+the deploy tests pass; the mutation check caught 17 of 17 changes. The run
+corrected three tests: an address in a name is removed whole, not just its
+domain; the team's own invites are in the outbox; and the tests' own
+`MAIL_BACKEND=memory` must not reach the production settings the preflight
+test builds.
+
+### 7b.6 Getting back in: password reset, change, verified addresses
+
+**The hole.**
+- **A forgotten password was a lost account.** There was no reset, no way
+  to change a password, and no record of whether an address reached its
+  owner, which identity for data access (Phase 9) will need.
+- **The obvious designs leak.** A reset link with its token in the URL
+  lands in the proxy's access log and the Referer header. A form that
+  says "no account has that address" tells anyone who works here.
+- **A changed password left sessions running.** Access tokens already
+  issued kept working.
+
+**Now:**
+
+- **One-time links** (`user_tokens`, `services/account.py`):
+  - **stored as a hash,** like invites;
+  - **used once,** claimed in one conditional update, so two clicks can't
+    both succeed;
+  - **short-lived:** a reset for `PASSWORD_RESET_TTL_MINUTES` (60), an
+    address check for `VERIFY_EMAIL_TTL_HOURS` (48);
+  - **a newer one voids the older.**
+  - **The token travels after `#`** (`/reset-password#token=...`). A
+    browser never sends that part to a server, so it stays out of every
+    log and the Referer. The page reads it and posts it.
+  - **Opening a page changes nothing.** The reset page sets the password
+    only when its form is sent, and the confirm page has a button, so a
+    mail scanner following the link does no harm.
+- **Password reset** (`POST /auth/password-reset`, then `.../confirm`):
+  - **The same answer either way:** "If an account has that address, a
+    link... is on its way", whether one does or not.
+  - **Rate-limited** per address and per IP.
+  - **Using the link:**
+    - sets the new password;
+    - confirms the address (the link reached it);
+    - ends every session: each refresh token is revoked, and an access
+      token issued before the change is refused (`session_ended`, checked
+      in `get_current_user` against `password_changed_at`). Both times are
+      to the microsecond: access tokens carry `iat_us` beside the
+      whole-second `iat`. With whole seconds, a token issued earlier in
+      the same second as the reset survived it (found by the phase-end
+      run);
+    - emails a notice that the password changed, with a link to reset it
+      again if that wasn't them.
+- **Change password** (`POST /auth/password`) while signed in: the
+  current password first, a new one that differs. Every other session
+  ends; this one gets a fresh pair, so the person isn't signed out. Same
+  notice email.
+- **Verified addresses** (`users.email_verified_at`):
+  - **By link:** `POST /auth/verify-email/send` emails one, and
+    `POST /auth/verify-email` confirms it. No sign-in is needed to
+    confirm: the link is the proof.
+  - **By invite:** joining through an invite to the address counts, and
+    the migration marks people who already joined that way.
+  - `/auth/me` reports it.
+- **When email can't help** (no SMTP, or the owner locked out): the
+  operator runs `python -m scripts.reset_link someone@company.example` on
+  the server. It prints a reset link and records issuing it in the audit
+  log.
+- **Audited:** `user.password_reset_requested`, `user.password_reset`
+  (with how many sessions ended), `user.password_change`,
+  `user.email_verified`, `user.password_reset_link_issued`.
+- **The web app:**
+  - **Forgot your password?** on sign-in;
+  - **the link pages** (`/forgot-password`, `/reset-password`,
+    `/verify-email`) in a layout that works on a phone, where people read
+    email;
+  - **an Account page** (the email at the foot of the sidebar opens it):
+    change password, and the address marked Confirmed or Not confirmed
+    with **Email me a link**.
+
+**Left for later:**
+
+- **Turning email verification into a requirement:** identity given to
+  tools must refuse an unverified account (Phase 9).
+- **Password sign-in for a Google-linked account** (8.2).
+- **A password strength meter** beyond the 8-character minimum.
+
+**Verified** at the end of Phase 7b (2026-10-09):
+`test_account_recovery.py` (10) and the web tests pass. The run found a
+real bug: with whole seconds, an access token issued earlier in the same
+second as a reset survived it; tokens now carry `iat_us`. The mutation
+check caught 12 of 12 changes, after one more test (a link sent before the
+account was switched off opens nothing); a 13th, dropping the used-link
+check before the claim, is equivalent, as the claim's own
+`used_at IS NULL` refuses a second use.
+
+### 7b.7 The audit log: complete, readable, and provably unchanged
+
+**The hole.**
+- **Append-only, but not tamper-evident.** A trigger refused UPDATE and
+  DELETE (7a.8), but anyone with the database's owner role can drop a
+  trigger. An edited or removed row left no trace.
+- **Gaps.** Sign-ins, failed sign-ins and sign-outs weren't recorded, nor
+  were eval suite changes, cancelling an eval run, refreshing an MCP
+  server's tools, clearing memory, or the admin's test email. Nothing
+  checked that a new route recorded anything.
+- **Unreadable.** Only the API listed it, unfiltered, with user ids and no
+  names; a deleted account left an id nobody could resolve. No page, no
+  export.
+
+**Now:**
+
+- **A hash chain** (`services/audit_chain.py`, migration `c7b7a2b3c4d5`):
+  - each row gets `seq` (its place, from 1), `prev_hash` and `row_hash`:
+    SHA-256 of the previous hash and the row's own fields (id, time to the
+    microsecond, action, target, meta, IP, actor) as sorted JSON;
+  - **sealed by the worker** every minute (`audit_seal` cron, and at
+    start-up), not at insert: one chain across the database needs one
+    writer, and a lock taken on every audited request would serialise
+    them. A Postgres advisory lock keeps two workers from sealing at once;
+    each row is sealed by a conditional update (`seq IS NULL`);
+  - **the trigger now allows exactly one change**: setting `seq`,
+    `prev_hash` and `row_hash` on a row that has none. Anything else, or
+    sealing twice, is still refused;
+  - **`verify()` walks the chain** from 1, recomputing each hash. A changed
+    field, a deleted row (a gap in `seq`) or an inserted one all break it
+    at that entry.
+  - **What it proves, and what it doesn't.** Someone who can rewrite the
+    table can recompute every hash after their edit. The newest hash
+    (`last_hash`), copied outside the server, closes that: a chain that
+    no longer reaches a hash written down earlier was rewritten. The
+    owner's integrity check shows it to copy.
+  - **Not in the hash:** `org_id` and `actor_user_id`, which Postgres
+    clears when an org or an account is deleted (the email in
+    `actor_label` is in it). Moving an entry to another org is caught only
+    by the trigger.
+  - **One chain for the server,** not one per org: the integrity check
+    reports every org's entries together. With one organisation per
+    server (the internal direction) that is the same thing.
+- **`actor_label`**: the actor's email, written with the row, so an entry
+  still names its person after the account is gone. The migration fills
+  it in for old rows.
+- **Complete, and kept so**:
+  - **sign-ins**: `user.login`, `user.login_failed` (with why: wrong
+    password or account switched off; an unknown address is not recorded,
+    as it belongs to no org), `user.logout`, filed under the person's
+    first active organisation;
+  - **the missing changes**: `eval_suite.update`, `eval_suite.cases`,
+    `eval_run.cancel`, `mcp_server.discover`, `memory.clear`, `mail.test`,
+    `audit.export`;
+  - **a coverage test** (`test_audit_log.py`): every route that changes
+    something is listed with the action it records, or a reason it
+    records none. A new route not in the table fails the test, and so does
+    an action named in the table that no code records.
+- **Readable**:
+  - **filters** on `GET /orgs/{org}/audit-log`: `action` (a prefix:
+    `assistant.` is all about assistants), `actor`, `target`, `since`,
+    `until`; entries carry `actor_label`, `ip` and `seq`;
+  - **an Audit log page** for admins and the owner (in the sidebar): what,
+    who and when, in words (`lib/audit-words.ts`), with
+    **Admins opening conversations** as its own view, each with the
+    reason given;
+  - **the owner's tools**: **Export CSV** (`/audit-log.csv`, the same
+    filters, up to 50,000 rows, itself recorded as `audit.export`) and
+    **Check integrity** (`/audit-log/integrity`: seal what is waiting,
+    verify, and show how many entries check out and the newest hash). The
+    owner only: an admin is among those the log watches.
+
+**Left for later:**
+
+- **Sending the newest hash somewhere automatically** (a daily email to
+  the owner, or a write-once bucket), so nobody has to remember.
+- **Retention:** nothing is deleted. A time limit needs a decision on how
+  long, and a chain that starts again after a cut.
+- **Turns and tool calls stay in their own tables** (`runs`, `tool_calls`),
+  not the audit log; OPERATIONS §9 has the queries.
+
+**Verified** at the end of Phase 7b (2026-10-09): `test_audit_log.py` (17)
+passes, and on Postgres the seal-once trigger and the sealer's lock. The
+upgrade was rehearsed on a copy of the development database: 563 entries
+sealed, intact, and an edit made with the trigger switched off was found
+at its entry. The mutation check caught 19 of 19 changes, after two more
+tests: an edit whose hash is rewritten still breaks the next link, and a
+removed row shows as a gap even after the rest is re-linked.
+
+### 7b.8 Carrying a running server over: one organisation, settings, a report
+
+**The hole.**
+- **Personal orgs everywhere.** Before 7b.4, everyone who signed up got
+  an org of their own, invited or not. On a server that grew from one
+  person's sign-up, the company's org is itself one of those, marked
+  personal. The web app opened whichever org came first, often someone's
+  empty one.
+- **Anyone could create an org,** outside the company's admins, budgets
+  and audit log.
+- **No per-org settings.** Nowhere to rename the org, or for the owner to
+  decide how the 7b changes apply to their organisation.
+- **No way to see what an upgrade did** before trusting it.
+
+**Now:**
+
+- **The migration** (`c7b8a1b2c3d4`) sorts out the personal orgs:
+  - **one that others joined is the team's:** it stops being personal
+    (`org.became_team` in its audit log);
+  - **an empty one is archived** (no assistants, conversations, sources or
+    spend), but only when each of its members is active in a team org, so
+    nobody is left with nowhere to sign in (`org.archive`, with the
+    reason);
+  - **the rest stay** for the operator to decide.
+- **Archived** (`organizations.archived_at`, `archived_reason`): nothing
+  is deleted. `member_of`, which every org-scoped route goes through,
+  refuses an archived org, so it is a 404 for everyone. It drops out of
+  `GET /orgs` and `/auth/me`, its invites lead nowhere, and sign-ins are
+  filed elsewhere.
+- **Single-org mode** (`ORG_MODE=single`, the production compose
+  default; development stays `multi`, which the tenancy tests need):
+  - **the first account** creates the organisation, as the company's
+    rather than a personal one;
+  - **nobody creates another** (`POST /orgs`: 403 `org_creation_closed`);
+  - **sign-up is by invite** after the first account, whatever
+    `REGISTRATION` says;
+  - **the preflight warns** when production runs `multi`.
+  - The web app opens a team org before a personal one in either mode.
+- **Settings** (`organizations.settings`, `services/org_settings.py`):
+  - JSON read through `Switches`, so each key has a default, a switch
+    added later needs no migration, and a key this version doesn't know
+    is kept;
+  - `GET /orgs/{org}/settings` for admins, `PATCH` for the owner: the
+    name and three switches, each change recorded as
+    `org.settings.update` with before and after;
+  - **the switches:** emailing admins when a version waits
+    (`review_emails`), emailing builders when theirs is decided
+    (`decision_emails`), and whether the sole owner may approve their own
+    version with a note (`sole_reviewer_self_approval`, 7b.3). All on by
+    default;
+  - **an Organisation section on Members:** the name and the switches,
+    which only the owner can change.
+- **The operator's report** (`python -m scripts.upgrade_report`,
+  `services/rollout.py`):
+  - read-only by default: each org with its owners, members, assistants
+    (live, closed at the gate, paused), conversations and spend;
+  - **flags** an org with no owner who can sign in, a personal org with
+    content, assistants closed until a version is approved, more than one
+    open org in single mode, and whether the audit chain is intact;
+  - **`archive`** (with a reason; it refuses when someone would be left
+    with no organisation, unless `--force`), **`unarchive`**, and
+    **`freeze`**: day and month limits of zero, so nothing more is spent,
+    while everything stays readable.
+- **The upgrade runbook** (OPERATIONS §7): rehearse on a copy of the
+  database first, read the report, then upgrade.
+
+**Left for later:**
+
+- **The Employee role and its landing page** (8.1): it must use the role
+  in the company org.
+- **Retention settings** (8.10) and sharing (8.7) go in the same settings
+  store.
+- **Archiving from the app:** today it is the operator's, on the server.
+
+**Verified** at the end of Phase 7b (2026-10-09): `test_rollout.py` (12)
+passes, and the mutation check caught 21 of 21 changes. On a copy of the
+development database (87 organisations) the migration made 3 personal orgs
+that others had joined into team orgs, archived 8 empty ones, filled in
+517 actor emails, and `alembic check` found the models and Postgres agree;
+the report listed the rest.
+
+### 7b.9 CI runs the Postgres and Redis tiers
+
+**The hole.**
+- **CI ran the unit tier only,** on SQLite. The integration tier ran in
+  `scripts/check.ps1`, at the end of a phase, on a developer's machine.
+- **What only exists on Postgres went untested on a pull request:**
+  pgvector and full-text search, the append-only trigger, partial unique
+  indexes. That includes the retrieval filters that will keep one group's
+  documents from another (9.4). The SQLite stand-in (`lexical_rag.py`)
+  can't show them wrong.
+- **Redis paths too:** approvals across processes, turns, rate limits.
+- **A missing service read as a pass.** Every integration fixture skipped
+  when it couldn't connect, so a broken container would turn the tier
+  quietly green.
+- **Migrations were never taken back down** with data in them, on either
+  database.
+
+**Now:**
+
+- **`api-integration`, a CI job on every pull request:**
+  - starts the repo's own compose services (Postgres with pgvector,
+    Redis, MinIO and its bucket, MySQL, Mongo), so the ports and
+    credentials are the ones development uses;
+  - migrates Postgres and runs `alembic check` there: the models must
+    match, the HNSW and GIN indexes included;
+  - runs `pytest -m "integration and not local_models"`;
+  - prints the datastores' logs when it fails.
+- **`api-retrieval`,** nightly and on `main`: the tests that load the local
+  embedder and reranker (`local_models`, a new marker), with the models
+  cached between runs. Off pull requests: the first download is several
+  gigabytes.
+- **A missing service fails** (`tests/infra.py`): each integration fixture
+  calls `unavailable(service, why)`, which skips, or fails when
+  `REQUIRE_INTEGRATION` names that service. CI requires `postgres`,
+  `redis`, `mysql` and `mongodb` (and `models` in the retrieval job);
+  `check.ps1` requires `postgres,redis` unless set otherwise.
+- **Phase 7 there and back:**
+  - on SQLite (`test_migrations.py`): rows seeded at the head before Phase
+    7 (an org two people share, an empty personal org, a published
+    version, a conversation, an invite, an audit row), then up, down and
+    up again, then `alembic check`. The data steps run on real rows;
+  - on Postgres (`test_migrations_postgres.py`): the whole chain on a
+    scratch database (never the dev one), Phase 7 down and up, `alembic
+    check`, and the 7b.7 trigger is in place at the end.
+- **The 7b.7 trigger on real Postgres:** the seal is written once, then
+  `seq`, both hashes, the label and the action are all refused; and a
+  second sealer can't take the advisory lock while one holds it.
+
+**Left for later:**
+
+- **The 9.4 acceptance tests** (two groups' restricted sources on one
+  assistant; no route returns the other's chunks): written with the
+  feature, in the Postgres tier this job now runs.
+- **Browser tests in CI** (8.11).
+
+**Verified** at the end of Phase 7b (2026-10-09): `test_infra.py` (4), the
+SQLite round trip and the Postgres one (a scratch database, dropped after)
+pass; the whole integration tier passes with
+`REQUIRE_INTEGRATION=postgres,redis` (84 tests, none skipped). The
+mutation check caught 4 of 4 changes, after `test_infra.py` was fixed:
+pytest's skip is not caught by `pytest.raises(fail)`, so a mutant that
+skipped instead of failing had skipped the test itself. The CI jobs run on
+the first push.
+
+### 7b.10 The threat model, rewritten for one company
+
+**The hole.** `docs/THREAT_MODEL.md` was written in Phase 6 for a server
+anyone could sign up to. It described attackers that no longer fit (a
+user of another org was "anyone"), walls that had moved (any member
+reading every conversation, the creator approving writes, open
+registration), and had no place for the insider admin, email, the
+approval gate or the audit chain. Its role table was written by hand and
+could drift from the code.
+
+**Now:**
+
+- **Rewritten for the deployment it protects** (section 1): one company
+  organisation, on the office network and VPN, builders and admins today
+  and every employee once Chat opens.
+- **Assets** (section 2) add employees' conversations wherever they live
+  (backups, the CLI's transcripts, traces), knowledge documents, what
+  answers in Chat, and the record of who did what.
+- **Attackers** (section 3): the builder, the admin as an insider, the
+  owner, the leaver, forged email links, someone with the database but
+  not the KEK; the Employee role and Google sign-in listed as planned.
+- **The walls** (section 4) gain their own sections for private
+  conversations, the approval gate, people and sessions, what reaches the
+  browser, email and evidence. The database, network, MCP, secrets and
+  spend sections carry over.
+- **Findings** (section 5): the Phase 6 table and Phase 7's, unchanged.
+- **What is still open** (section 6), regrouped and rewritten for one
+  company: an admin reading conversations, the asker approving a write,
+  no two-factor sign-in, everyone invited being a builder, traces and
+  backups holding conversations, what leaves the building, a server still
+  reachable from the internet.
+- **Before Chat opens to employees** (section 7): the plan's security
+  baseline (D19) as a checklist, with what Phase 7 finished and what
+  Phase 8 must; and a second security pass before the full pilot, added
+  to the plan as 9.9.
+- **The route list writes itself** (`tests/role_table.py`): the appendix
+  is `ROLE_MATRIX` in words, written by `python -m tests.role_table`, and
+  `test_role_matrix` fails when the two differ. The matrix is what the
+  role walk tests, so the document can't claim a wall the code doesn't
+  have.
+- OPERATIONS' go-live checklist points at sections 6 and 7.
+
+**Verified** at the end of Phase 7b (2026-10-09): `test_role_matrix.py`
+(7) passes, the appendix included; the mutation check caught 2 of 2
+changes.
+
+## 18. Phase 8: Chat for everyone
+
+Phase 7 made the platform safe to open; Phase 8 opens it, to every
+employee, through Chat (`docs/INTERNAL_PLAN.md`, Phase 8).
+
+### 8.1 The Employee role, and what an employee receives
+
+**The hole.**
+- **Everyone invited was a builder.** A `member` can create assistants,
+  connect databases on any host the server reaches, add URL sources and
+  MCP servers, and spend. There was no role that only chats (plan D2).
+- **Hiding wasn't enough.** Even a chat-only page would receive what the
+  API sends: the SQL a tool ran, the rows it returned, the model, tokens
+  and cost. Anyone can read a response in the browser's tools.
+- **An employee would decide their own writes.** The person in a
+  conversation approves what their assistant does (D17, until Phase 9).
+  Plan D7 wants every write by an employee decided by an admin.
+
+**Now:**
+
+- **The role** (`MemberRole.employee`, rank below `member`): below the
+  Studio floor (7a.3), so every route refuses it with
+  `studio_access_required` until a route asks for Chat by name. No
+  migration: the column holds the name as text. **Invites make employees**
+  unless the admin chooses Builder (plan D2).
+- **Chat routes ask for it by name** (`api/deps.py`): `ChatMembership`,
+  `ChatAssistantCtx`, `ChatConversationCtx`, `ChatReadableConversationCtx`
+  and `ChatConversationStarterCtx` are the Studio dependencies with one
+  difference, `member_of(..., chat=True)`. They are used on:
+  - **the new Chat routes** (`routes/chat.py`): `GET /chat/assistants`
+    (what answers in Chat: approved, not paused), `GET
+    /chat/assistants/{id}` (a card: name, description, status, version,
+    whether you may edit it) and `GET /chat/conversations` (your own,
+    every assistant);
+  - **starting, listing, reading, posting into, stopping, renaming and
+    archiving** your own conversations, watching a turn, your requests
+    waiting, your memories, and citation links.
+  - Runs and traces, the assistant's full record and everything else stay
+    Studio-only. An employee asking for an assistant that doesn't answer
+    in Chat (a draft, a paused one) gets "not found".
+- **What an employee receives** (`services/chat_view.py`), decided on the
+  server for every response and every streamed event:
+  - a tool call is its plain label ("Looked up data", "Searched the
+    knowledge base") and its status, never its input or output;
+  - no model, tokens, cost or latency on messages or conversations;
+  - no `thinking`, `usage` or `budget` events (the budget words for
+    employees come with 8.6);
+  - their own request waiting shows what kind of thing waits, not the
+    statement.
+  - This is defence in depth: an employee can ask the model to repeat
+    what a tool said. What a tool returns to whom is the tool's to decide
+    (D8, Phase 9.3).
+- **An employee's requests wait for an admin** (D7):
+  - `POST /approvals/{id}:resolve` refuses an employee (`admin_decides`);
+    the card in Chat says "Waiting for an admin", with no buttons;
+  - **the admins' queue**: `GET /orgs/{org}/approvals` (and an
+    **Approvals** page) lists every request waiting, who asked, the
+    assistant and the kind of tool, never what it would do. **Open to
+    decide** asks the admin's reason and opens the conversation, where
+    the read is recorded (7b.2);
+  - **an email to the admins** when an employee's request starts waiting
+    (`approval_emails` switch, on by default). Still bounded by the
+    five-minute wait (D17): assistants with write tools aren't ready for
+    employees until Phase 9.1.
+- **An employee builds nothing**: `can_edit_assistant` is false below the
+  floor, so a builder demoted to employee keeps their name on what they
+  built and edits none of it, previews included; an employee can't be a
+  co-editor (`not_a_builder`) or receive a leaver's assistants
+  (`invalid_transfer`).
+- **The web app:**
+  - **Chat** in the sidebar for everyone: the assistants that answer and
+    your conversations. An employee sees only Chat; any Studio page takes
+    them there (`lib/roles.ts`).
+  - The chat page loads the card (`chat.assistant`), opens a conversation
+    named in the address, and for an employee leaves out run details.
+  - Members invites an **Employee (chats)** by default, or a **Builder**.
+  - A changed role reaches an open app the next time it comes into view
+    (at most once a minute).
+- **The role matrix walks a real employee:** three Chat levels (`chat`,
+  `chat-reader`, `chat-starter`); outside them every org route must
+  refuse the employee at the floor, and the threat model's route list
+  shows them.
+
+**Left for later:**
+
+- **Audiences** (8.5): every employee sees every approved assistant.
+- **The Chat app** (8.6): its own layout, error words for employees, the
+  installable app.
+- **Changing someone's role in the web app**: the API has it
+  (`PATCH /orgs/{org}/members/{user}`); the Members page doesn't yet.
+- **Admin-approved writes that wait safely** (9.1).
+
+**Verified** at the end of Phase 8 (2026-10-11): `test_employee_role.py`
+(12), the role matrix walking the employee, and web `roles.test.ts` (3)
+pass. The mutation check caught 19 of 20 changes, after one more check:
+the Chat catalog lists no drafts even for their builder or an admin (they
+open a draft's card, for its preview, but it is not in the list). The one
+left can't be caught: the employee check in `deps.py` repeats
+`listing.can_see`, which already hides drafts from everyone but admins and
+editors, and an employee is never an editor. It stays, as a second lock.
+
+### 8.2 The internal host
+
+**The hole.**
+- **The certificate needed the internet.** Caddy got its certificate by
+  the HTTP challenge, so ports 80 and 443 had to be open to the world, and
+  the operator guide said so. Plan D15 wants the server on the office
+  network and the VPN only.
+- **The obvious DNS fails on rollout day.** A public record pointing at a
+  private address is dropped by many routers and firewalls (DNS
+  rebinding protection), and phones on Tailscale resolve the name only
+  with split DNS. It looks like "the app is down".
+- **Nothing checked any of it.**
+
+**Now:**
+
+- **Certificates through DNS** (`deploy/proxy/Caddyfile`, `TLS_MODE`):
+  - `acmedns`: works with any DNS provider. One CNAME in the public zone
+    hands only the `_acme-challenge` record to an acme-dns account, so the
+    credentials on the server can change that one TXT record and nothing
+    else;
+  - `cloudflare`: a token limited to editing DNS on the one zone;
+  - `public` (Caddy's default challenge) and `local` (Caddy's own CA)
+    remain for internet-facing servers and trials;
+  - each a Caddyfile snippet, imported by name; `persist_config off`, so
+    the DNS credentials are never written to the proxy's volume.
+- **The proxy image with the plugins** (`deploy/proxy/caddy.Dockerfile`):
+  Caddy built with acme-dns and Cloudflare, checked at build time; a
+  monthly rebuild in OPERATIONS. CI builds it and runs `caddy validate`
+  on the Caddyfile in every `TLS_MODE`.
+- **One address** (`BIND_IP`): the proxy publishes its ports on the
+  server's office or Tailscale address. The DNS credentials are in the
+  proxy's environment alone; a test holds that no other service has them.
+- **The preflight reviews it** (`review_hosting`, and a `site name`
+  probe): a `public` or `local` `TLS_MODE` in production, a `BIND_IP`
+  that is every interface or a public address, and a site name that
+  resolves to a public address (private and Tailscale's `100.64.0.0/10`
+  are fine).
+- **OPERATIONS §2, "The internal host"**: one name everywhere; DNS answers
+  with the private address (office DNS, Tailscale split DNS), the public
+  zone only for the certificate's record; Android's Private DNS; the two
+  Tailscale layouts; a check from office Wi-Fi, home with Tailscale, and
+  phones. **§9, "Someone can't reach it"**, for rollout day.
+
+**Left for later:**
+
+- **Another DNS provider**: one `--with` line in the Dockerfile and a
+  snippet in the Caddyfile.
+- **Proving from outside** that 80 and 443 are closed: the preflight can
+  only see what the server sees.
+
+**Verified** at the end of Phase 8 (2026-10-11): `test_deploy.py` (51 with
+the cases) passes; the mutation check caught 9 of 9 changes. The image
+build and `caddy validate` run in CI on the first push.
+
+### 8.3 Google sign-in, done safely
+
+**The hole.** Plan D9: people sign in with the company's Google accounts,
+not another password to forget. The classic ways this goes wrong, and
+which the gap review listed: an account found by its address (a renamed
+mailbox, a rehire's recycled `it@`, or an account someone registered
+first with a password, would hand over someone else's account); a
+callback anyone can finish (login CSRF); tokens in a URL; the address's
+ending trusted as the domain; a Google-made account keeping a password
+around Google's own checks.
+
+**Now:**
+
+- **The protocol** (`services/google.py`): OpenID Connect's
+  authorization-code flow with PKCE and a nonce. The state, nonce and
+  PKCE verifier sit in a ten-minute, HttpOnly, SameSite=Lax cookie on
+  `/api/v1/auth/google` only, signed with the server's secret: the
+  callback must bring back the same state, so nobody else's sign-in can
+  be finished in this browser. Google's ID token is checked with PyJWT
+  (already a dependency; no new package): the signature against Google's
+  published keys, the issuer, the audience (this app), expiry, the nonce,
+  `email_verified`, and with `GOOGLE_ALLOWED_DOMAIN` the `hd` claim, never
+  the address's ending.
+- **The accounts** (`services/google_accounts.py`, `user_identities`):
+  - **found by Google's id** (`sub`), never by address;
+  - **an address that already has an account is refused**, with "sign in
+    with your password, then connect Google": connecting is done from
+    Your account, signed in, which proves the account is yours (a link
+    ticket carries that through the trip to Google);
+  - **a new account** only through an invite to that address (its org
+    and role, no personal org), or the owner's **auto-join** switch for
+    the allowed domain, as an Employee (`user.jit_provision`); auto-join
+    can't be switched on without `GOOGLE_ALLOWED_DOMAIN`;
+  - **no password** on a Google-made account (`password_hash` is now
+    nullable): password sign-in checks the decoy and opens nothing; a
+    reset request for it sends nothing;
+  - **a switched-off account is refused**; disconnecting Google is
+    refused where it is the only way in.
+- **The handoff**: the callback sends the browser to `/auth/google#code=...`
+  with a one-minute, one-use code (stored hashed, a `user_tokens`
+  purpose), and the page trades it for the tokens: they never travel in
+  an address, and the code only after `#`, which no server sees. `next`
+  is checked on both sides (no other origin, no backslash or control
+  characters).
+- **The web app**: "Continue with Google" on sign-in, "Join with Google" on
+  sign-up (carrying the invite), the handoff page, a Google section on
+  Your account (connect, or disconnect when there is a password), refusals
+  in words (`lib/google.ts`), and the auto-join switch in Members ›
+  Organisation.
+- **Audited**: `user.login` (`via: google`), `user.register` (`via:
+  google`), `user.jit_provision`, `user.identity.link`,
+  `user.identity.unlink`.
+- **The preflight**: one of the two client values without the other is a
+  failure; no domain in production, a warning.
+
+**Left for later:**
+
+- **"Google only"**: a switch that refuses password sign-in for people who
+  have Google, so Workspace's two-step verification can't be gone around
+  (with 8.4's two-factor sign-in).
+- **Ending sessions when Workspace suspends someone**: needs Google's
+  Directory API; today removing them here does it.
+- **Microsoft 365 or Zoho sign-in**: the identities table has room for it.
+
+**Verified** at the end of Phase 8 (2026-10-11): `test_google_signin.py` (25
+with the cases: the flow, refusals, linking, auto-join, and Google's token
+checked on tokens signed with a real RSA key) and web `google.test.ts` (4)
+pass. The mutation check caught 14 of 15 changes. The one left can't be
+caught: a Google-only account's password is checked against a decoy hash
+of a random value made for that one attempt, so no password can match it
+even without the extra `password_hash is None` check, which stays as a
+second lock.
+
+### 8.4 Two-step sign-in for the owner and admins; limits by person
+
+**The hole.**
+- **One password opened everything.** Admins read every conversation (with
+  a recorded reason) and decide every request; one phished admin password
+  did the same.
+- **Limits by address locked out offices.** Everyone behind one office or
+  VPN address shared the per-address sign-in bucket: a Monday wave, or
+  one person's typos, could stop everyone else signing in.
+
+**Now:**
+
+- **An authenticator app** (`security/totp.py`): RFC 6238 codes, written
+  with Python's own `hmac` (no package) and checked against the RFC's test
+  vectors. Each code works once (`last_step`, claimed in one conditional
+  update); a phone's clock may be one step off.
+- **Setting it up** (Your account, `routes/two_factor.py`): a new secret,
+  sealed with the KEK like every stored credential (its own table; the
+  key rotation now covers it), shown as a QR code (the web app's one new
+  package, `qrcode-generator`, pinned) and as a key to type. It does
+  nothing until a code from the app confirms it. Confirming gives **ten
+  recovery codes**, shown once, stored hashed, each good once; new ones
+  replace the old.
+- **Signing in**: a password sign-in to an account that has it answers
+  with a five-minute **challenge** instead of tokens (`LoginOut`); the
+  code, or a recovery code, finishes it. Wrong codes are recorded as failed
+  sign-ins and limited per person. A Google sign-in limited to the
+  company's Workspace domain counts as the second factor (Workspace's own
+  2-step verification); otherwise it asks for the code too.
+- **A session remembers it**: the access token carries `mfa`, and the
+  refresh token row `strong`, so a renewed session keeps it.
+- **Admins** (`REQUIRE_ADMIN_2FA`, on in the production compose): an owner
+  or admin whose session hasn't passed a second factor acts as a builder
+  (`security/access.member_of` hands every check a builder's copy of the
+  membership, unsaved). Every admin check refuses on its own; no route has
+  to remember it. A banner says so, and Your account sets it up, or
+  confirms a session from before with a code.
+- **Locked out**: `python -m scripts.reset_two_factor` on the server,
+  recorded.
+- **Limits by person** (`api/ratelimit.py`): signing in to one account
+  has its own ceiling, from any address (`login_account`); sign-up and
+  Google sign-in have their own bucket (`signup`), so a wave of new people
+  doesn't use up everyone's sign-ins; second-factor codes are limited per
+  person; and `TRUSTED_INTERNAL_NETS` gives office and VPN ranges much
+  higher per-address ceilings. (Refreshing was already per session, 7a.8.)
+- **Audited**: `user.two_factor.enable`, `.disable`, `.verify`,
+  `.recovery_codes`, `.reset`; `user.login` with how the second factor
+  was given.
+
+**Left for later:**
+
+- **Step-up**: asking for a code again before the riskiest admin actions
+  (opening someone's conversation, changing roles) after 15 minutes. A
+  stolen session token is still enough until then.
+- **"Google only"** for people who have Google, so a password can't go
+  around Workspace's 2-step verification.
+- **Passkeys.**
+
+**Verified** at the end of Phase 8 (2026-10-11): `test_two_factor.py` (19
+with the RFC vectors) passes. The mutation check caught 13 of 13 changes,
+after one more test: two requests that both read the factor before either
+claims the code; only the first gets through (the claim is a conditional
+update, so dropping its `last_step < step` let both in).
+
+### 8.5 Audiences, groups and the catalog
+
+**The hole.** Every approved assistant was for everyone (plan D3 wants
+everyone, groups or named people), there was no way to group people, and
+Chat's list was a flat list of names. And what the catalog showed (the
+name and description) was edited outside versions, so what people saw
+wasn't what an admin had reviewed (D16).
+
+**Now:**
+
+- **Groups** (`groups`, `group_members`, `routes/groups.py`): admins make
+  them and choose who is in them; anyone building sees their names, to
+  choose an audience. A group a live or waiting version is for can't be
+  deleted (`group_in_use`). Each change is audited (`group.*`).
+- **The listing** (`schemas/listing.py`, `services/listing.py`): a
+  category, up to four conversation starters, and the audience (everyone,
+  members of groups, or named people). The builder edits a draft on the
+  builder's **Listing** tab (`assistants.draft_listing`); submitting
+  freezes it into the version with the name and description
+  (`assistant_versions.listing`), and the admin sees it in History beside
+  what changed. Draft changes and renames reach nobody until the next
+  approval.
+- **Who sees it** (your choice: everyone but admins and its builders):
+  the live version's audience decides who sees an assistant in Chat and
+  may start a conversation with it; the owner, admins and its builders
+  always can. The Chat dependency answers "not found" to anyone else, so
+  the card, a new conversation, memories and citation links are all
+  closed. Group membership changes take effect at once (the version names
+  the group). Someone dropped keeps their history, and posting is refused
+  (`not_in_audience`).
+- **Upgrade**: every version already there is given a listing for everyone
+  (migration `c8a5d1e2f3a4`): nothing changes for anyone. New assistants
+  start as Everyone.
+- **The catalog** (`GET /chat/assistants`): the live version's name,
+  description, category and starters; **Official** first (an admin's
+  mark, `POST /assistants/{id}:official`, audited); `q` searches the name
+  and description, `category` narrows. Chat's landing has the search and
+  category buttons; a new conversation offers the starters.
+
+**Left for later:**
+
+- **Knowledge groups** (D6, 9.4): sources restricted to groups, and
+  retrieval trimmed to the asker. The audience decides who chats, not what
+  each person may read.
+- **Groups from Google** (Directory sync).
+
+**Verified** at the end of Phase 8 (2026-10-11): `test_audiences.py` (10) and
+web `listing.test.ts` (3) pass. The mutation check caught 13 of 14
+changes. The one left can't be caught: `can_see` lets an admin through
+first, but the editor check right after it lets every admin through too.
+
+### 8.6 The Chat app
+
+**The hole.** Chat worked at a desk on a steady connection. On a phone or
+over a VPN, things went wrong in several ways:
+
+- A dropped connection showed "stopped partway", although the answer
+  carried on on the server; sending again then got "still being written",
+  or paid twice.
+- A message that failed before the server kept it (busy, over a limit,
+  too fast) vanished from the box.
+- Employees read builders' errors, with dollar figures, "midnight UTC"
+  and panels to change.
+- A link from an email lost its page at sign-in.
+- An employee whose assistant was withdrawn couldn't open their own
+  history.
+- Signing in on a phone was blocked outright ("sign in from a computer").
+- There was no installable app, and no word when the VPN was off.
+
+**Now:**
+
+- **Answers survive a dropped connection.**
+  - A quiet turn sends a keep-alive every 5 seconds (an SSE comment,
+    `turns.KEEPALIVE`), so VPN, NAT and mobile networks don't close it
+    during a long tool call or a wait for an admin.
+  - The page keeps the id of the last event it saw. Twenty seconds of
+    silence counts as a drop (`STREAM_SILENCE_MS`); so does a stream that
+    ends without `done` or an error.
+  - After a drop it finds the turn and watches it again from that id
+    (`RECONNECT_DELAYS_MS`: 1, 2, then 5 seconds), shown as
+    "Reconnecting…". Nothing is missed or repeated, and the turn runs
+    once.
+  - After three tries it says the answer carries on on the server, and
+    offers **Reload conversation**, never "send again".
+- **Messages never lost.**
+  - The stream says when the message is saved: a new `accepted` event.
+    A failure before that puts the text back in the box (unless something
+    new was typed), and **Try again** sends the message that failed, not
+    the last one kept.
+  - `busy` is now worth trying again, with `retry_after_s`; a 429 shows
+    its wait too, as a countdown on **Try again**.
+  - Sending while an answer is still being written gives the text back
+    and watches that answer.
+  - The answer's text is added once per frame, not once per event.
+- **Failures in an employee's words** (`chat_view.EMPLOYEE_ERRORS`). No
+  money, settings or panels. A used-up budget carries `resets_at`, and the
+  page says "It will be back at 05:30" in the reader's own time. Builders
+  keep their own wording.
+- **Every state an employee can land in:**
+  - Signed out, the page they asked for comes back after sign-in
+    (`/login?next=`).
+  - A conversation has a stable link, `/chat/c/{id}`, which finds its
+    organisation and assistant.
+  - An assistant withdrawn, or no longer for them: their conversation
+    opens read-only, with a note.
+  - A newer version approved: a quiet note and **Start a new
+    conversation** (a conversation stays on its version).
+  - Not in the audience, with no conversation: "not found", as before.
+- **Employees have their own shell** (your choice): a slim bar with Chat,
+  Your account and Sign out, and no Studio rail. Their thread shows no
+  cost, and has no `/cost` command.
+- **On phones:**
+  - Sign-in and invites work at every width. The note now says only that
+    building needs a computer.
+  - An installable app: `app/manifest.ts` (opens on `/chat`) and icons
+    drawn from the brand mark (`app/icon.tsx`, `app/apple-icon.tsx`).
+  - A service worker (`public/sw.js`, production only) that answers only
+    page loads that fail, with `public/offline.html`. It caches nothing
+    else: no API calls, no conversations.
+- **The offline page's steps** (your choice). The owner writes the
+  organisation's own steps for getting on its network (`offline_help` in
+  settings). Chat hands them out (`GET /chat/help`) and the app keeps them
+  in the browser for when the server can't be reached.
+- **A code from another device** (your choice). This is the way into an
+  iPhone home-screen app, whose storage Safari (where Google sign-in can
+  end) doesn't share.
+  - Your account makes an 8-character code (`POST /auth/device-code`,
+    letters that can't be misread), good once for five minutes. A new
+    code voids the last.
+  - The sign-in page takes it (`/auth/device-code/redeem`), and opens
+    that form by itself in the installed app.
+  - It proves who you are, not a second factor: with an authenticator,
+    the device still asks for its code.
+  - Both steps are audited (`user.device_code.create`, `user.login` with
+    `method: device_code`) and rate-limited.
+
+**Left for later:**
+
+- The privacy notice before the first chat (8.7).
+- Alerts when Chat stops for everyone, and per-person caps (8.9).
+- Browser tests of these flows (8.11).
+- A real iPhone and a real Android, on the VPN, before the pilot.
+
+**Verified** at the end of Phase 8 (2026-10-11): `test_chat_app.py` (18) and
+web `turn-resume.test.ts` (6), `offline-help.test.ts` (3) and
+`standalone.test.ts` (2) pass; the mutation check caught 15 of 15 changes.
+The reconnect and the phone sign-in also pass in a browser (8.11). By hand,
+at phone width: sign-in, the code form, the offline page with an
+organisation's steps, the manifest and the icons.
+
+### 8.7 How Chat uses your data
+
+**The hole.** Nothing told people that admins can open their
+conversations (D5), that usage is recorded per person, or where their
+messages go (Anthropic, Voyage, Langfuse, email, web search: D18). There
+were no rules for using it (no passwords, no other people's personal
+details, check answers) and no record that anyone had read them. Memory
+could only be found through `/memory`, and nothing said what an assistant
+could do as you.
+
+**Now:**
+
+- **The notice, before the first message** (your choice: everyone in
+  Chat, not previews).
+  - Chat's pages show **How Chat uses your data** until the version in
+    force is accepted (`components/privacy/NoticeGate.tsx`).
+  - The server refuses a message in a live conversation without that
+    acceptance (`notice_required`), so the page can't skip it. Previews
+    and evals don't ask.
+  - Accepting records who, which version and when (`notice_acceptances`),
+    and an audit row, `privacy_notice.accept`.
+  - The text says what is kept, that admins can open conversations (each
+    opening recorded, with its reason), what an assistant may do as you,
+    and the rules. It also says why people are asked to accept: so the
+    rules can be applied; work use doesn't depend on it.
+- **Where messages go is never typed in.** It is read from the server's
+  settings (`privacy.processors`): Anthropic always, and Voyage, Langfuse,
+  Google and email only when set up. It can't fall behind the setup, and
+  it never shows a secret.
+- **The owner's text** (your choice: they choose).
+  - The built-in text is version 1. The owner edits it in **Members ›
+    How Chat uses your data**.
+  - Saving offers **Ask everyone to accept it again**: on, a new version
+    that everyone accepts before their next message; off, a fixed typo in
+    the same version.
+  - Every saved text is kept (`privacy_notices`, **Earlier texts**) and
+    audited (`privacy_notice.update`).
+  - A page still showing an older version can't accept it
+    (`notice_changed`).
+- **The privacy contact** (your choice). The `privacy_contact` setting, or
+  the owner when it's empty, is named in the notice. **Privacy & help**
+  offers to write to it.
+- **Privacy & help** (`/chat/privacy`, linked from the employee bar) shows:
+  - the notice and when you accepted it;
+  - your data: write to the contact (export and erase come in 8.10);
+  - **Access to your conversations** (your choice): each time an admin
+    opened one of yours, with who, when and the reason. It reuses the
+    reads 7b.2 records (`GET /chat/access`), and says that people reading
+    the database directly aren't in it.
+- **An assistant's card** (**About**, in the conversation's header and its
+  empty state; `GET /chat/assistants/{id}/about`). It is built from the
+  approved version only, so a draft change reaches nobody. It shows:
+  - who runs it, and the version, with when and by whom it was approved;
+  - the knowledge it answers from, and what it looks up (databases, web
+    search, the sites it reads, connected services);
+  - what it can do for you, and whether an admin approves each time;
+  - whether it keeps notes about you, with **See what it remembers about
+    you** and **Forget all of it** (the `/memory` command, findable at
+    last);
+  - what leaves the building for it.
+- **docs/DATA_FLOWS.md**: one row for each outside service, with what it
+  gets, when, and how to turn it off.
+- **`PRIVACY_NOTICE_REQUIRED`** is on by default. The test suite turns it
+  off for the tests that chat without it, and preflight warns if it is off
+  in production.
+
+**Left for later:**
+
+- Export and erase one person's data, and the retention rules (8.10). The
+  notice says nothing about how long things are kept until then.
+- A per-assistant "confidential" setting (the HR pack).
+- Knowledge groups: what each person may read (9.4). Until then, the card
+  lists the version's sources by name.
+
+**Verified** at the end of Phase 8 (2026-10-11): `test_privacy_notice.py`
+(10) and web `notice-text.test.ts` (4) pass; the mutation check caught 17
+of 17 changes.
+
+### 8.8 History and feedback
+
+**The hole.**
+
+- **Delete wasn't delete.** "Archive" kept everything, readable by admins,
+  with no way back. An employee who "deleted" a sensitive chat would
+  believe it gone.
+- **No search.** History was listed one assistant at a time, with no
+  search.
+- **No feedback at all.** No thumbs, no comment, no "Did this solve it?".
+  Nothing told a builder what went wrong, and nothing gave the analytics
+  (10.2) a number to stand on.
+
+**Now:**
+
+- **Remove from my history** (your choice: honest now, erasing in 8.10).
+  - The same `DELETE`, said as it is: out of your lists and search, kept
+    for the company, and admins can still open it (the read is flagged
+    `hidden_by_owner`).
+  - **Removed** in Chat lists them, and **Put back** restores one
+    (`POST /conversations/{id}:restore`, audited `conversation.restore`).
+  - Erasing for good comes with the retention rules (8.10), which have a
+    one-year floor for logs (DPDP Rule 8(3)).
+- **Search across assistants.** `GET /chat/conversations?q=` matches a
+  title or anything said in the conversation, your own conversations only,
+  with `%` and `_` taken literally. Chat's landing has the box and the
+  **In your history / Removed** switch.
+- **A thumbs on each answer** (`PUT
+  /conversations/{id}/messages/{message_id}/feedback`).
+  - Only the conversation's starter rates, and only answers. Pressing the
+    same thumbs again takes it back.
+  - A thumbs-down opens a comment box, which says where the comment goes:
+    the assistant's team, with that question and answer, without your
+    name. The notice says so too (a line added to the built-in text).
+  - Stored in `message_feedback`, with the version that answered, and
+    erased with the conversation.
+- **"Did this solve it?"** (your choice: once per conversation, under its
+  latest answer; `PUT /conversations/{id}/outcome`).
+  - Changeable.
+  - Stored in `conversation_outcomes` with no name, and `ON DELETE SET
+    NULL`, so it survives the conversation being erased: the analytics
+    still count it.
+- **The builder's Feedback tab** (your choice;
+  `GET /assistants/{id}/feedback`, for its builders and admins).
+  - Thumbs by version.
+  - The solved rate, always with how many answered (a rate from three
+    answers isn't a deflection rate).
+  - The latest comments with their question and answer, never who asked.
+  - An admin can also open the conversation: asked for a reason, recorded,
+    and visible to the person on their Privacy & help page.
+  - Previews and evals aren't counted.
+
+**Left for later:**
+
+- Erasing (8.10).
+- The Needs-review queue: a thumbs-down to an eval case, then "fixed in
+  v3" (10.2).
+- Unanswered questions, and abandonment (10.2).
+- A builder marking a comment as dealt with.
+
+**Verified** at the end of Phase 8 (2026-10-11): `test_history_feedback.py`
+(8) and web `feedback.test.ts` (2) pass; the mutation check caught 16 of
+16 changes.
+
+### 8.9 Per-person caps, the provider's limit, and alerts
+
+**The hole.**
+
+- **Budgets were for the organisation or one assistant only.** One
+  person's script, loop or long thread could use up the organisation's
+  budget and stop Chat for everyone.
+- **The ledger didn't say whose spend it was.**
+- **The provider's own spending limit looked like a minute's wait.**
+  Anthropic answers a 429 `enforced_spend_limit_reached` until the 1st of
+  the month; it read as "try again in a minute", for weeks.
+- **Nobody was told when Chat stopped.** Prometheus is optional and pages
+  no one.
+
+**Now:**
+
+- **Whose spend.** `usage_events.user_id` is the person in whose
+  conversation (previews included) or with whose AI helper the spend
+  happened. Evals and indexing are the organisation's. Migration
+  `c8a8a3b4c5d6` fills it in for the spend already there, from the
+  conversation's starter.
+- **Per-person caps** (your choice: a default per role, plus overrides).
+  - An admin sets a daily and/or monthly limit for each Employee, and
+    another for each builder, admin and the owner (`role:employee`,
+    `role:builder`).
+  - One person can get their own limit in place of their role's
+    (`person:<id>`; empty goes back to the role's).
+  - It counts everything with their name on it (your choice), and
+    reaching it stops only them (`person_limit`). No alert is raised: one
+    person isn't everyone.
+- **What people are told** (your choice: only when it's nearly gone).
+  - An Employee sees "You've used most of your allowance for today" at
+    80%, and "You've reached your limit for now. It will be back at 05:30"
+    at 100%, in their own time, never in money.
+  - Builders read the figure.
+- **Who sees the caps.** Only admins (`GET /orgs/{org}/budgets/people`:
+  each person's spend today and this month, against their limit). The
+  budgets everyone may see never include them.
+- **A smaller message rate for Employees** (`RATE_LIMIT_CHAT_EMPLOYEE`,
+  10 a minute), so a loop can't run up the spend.
+- **The provider's spending limit is its own failure**
+  (`provider_spend_cap`).
+  - It is not retryable, and the text says what it is.
+  - Employees read "a problem on the server; your admins can fix it".
+  - A limit the account set itself (a 400 "specified API usage limits")
+    is read the same way.
+- **Alerts** (your choice: admins and the owner, by email and banner;
+  `services/alerts.py`).
+  - What stops everyone is recorded: the provider's limit, billing or
+    credentials refused, the runtime missing or too old, the
+    organisation's or an assistant's budget used up, and five or more
+    turns turned away as busy within five minutes.
+  - One open alert per problem, counted each time.
+  - Emailed at most once an hour, with a banner for admins on every page,
+    and an **Alerts** page.
+  - The next answer that works clears it (a failed turn's own end doesn't
+    count), or an admin marks it handled (audited, `alert.resolve`).
+  - `assistant_studio_turns_rejected_total{reason}` counts busy and budget
+    refusals.
+
+**Left for later:**
+
+- Group budgets and chargeback reports (10.1).
+- Pseudonymising spend on erasure (10.3).
+- Alerting on outbox failures and waiting approvals by age.
+
+**Verified** at the end of Phase 8 (2026-10-11): `test_people_caps.py` (15)
+and web `people-limits.test.ts` (2) pass; the mutation check caught 19 of
+19 changes.
+
+### 8.10 One purge path, retention and legal holds
+
+**The hole.**
+
+- **Nothing was ever erased.** "Remove from my history" hides a
+  conversation, and that was all.
+- **There was no retention rule and no way to erase one person.**
+- **There was no legal hold.** A purge could have destroyed evidence in a
+  dispute.
+- **Content lived in several places:** the rows, memory notes (no foreign
+  key, so nothing cascades), the CLI's transcripts on disk, the session key
+  in Redis, and full copies in traces if tracing was on.
+- **A restore brought back what had been erased.**
+
+**Now:**
+
+- **One purge** (`services/retention.purge`), used by everything that
+  erases.
+  - Deleting the conversation row takes its messages, runs, tool calls and
+    their results, approvals and the feedback on it (ON DELETE CASCADE).
+  - It also deletes its memory notes (`conv:<id>`), its CLI transcript and
+    working directory, and its session key.
+  - The spend ledger and "Did this solve it?" stay, without it, so totals
+    don't change. The audit log stays: it holds no content.
+  - It skips anything held, or answering right now.
+- **The retention rule** (your choice: 365 days).
+  - `retention_days` in organisation settings. An admin changes it
+    (`PUT /orgs/{org}/retention`, 30 to 3650 days, audited), and below a
+    year the page warns about the DPDP one-year floor for logs.
+  - The worker erases conversations quiet for longer than that every night
+    at 02:30, 500 per transaction (at most 20 batches per organisation per
+    night), so nobody chatting waits on a lock.
+  - The privacy notice says how long, from the setting.
+- **Erasing one person** (your choice: the owner only;
+  `POST /orgs/{org}/members/{id}:erase`, their email typed to confirm).
+  - It erases their conversations, what this organisation's assistants
+    remember about them (`user:<id>`), and their feedback comments.
+  - Their account and the audit log stay, and their spend stays in the
+    totals without their name.
+  - Refused while they are held. Audited (`person.erase`, counts only).
+- **Legal holds** (your choice: set by the owner; `/orgs/{org}/holds`).
+  - A person, or one conversation, kept out of every purge, with a reason.
+    Lifting it lets the rules apply again.
+  - Both setting and lifting are audited; admins can see them.
+- **After a restore.**
+  - Each purge is recorded in `erasures`, with the conversation ids only.
+  - `restore.sh` saves that record before it replaces the database, and
+    prints the command to apply it again:
+    `scripts/reapply_erasures.py --load`, holds still respected.
+  - Backups themselves age out on their own rotation (14 days).
+- **Tracing** (your choice: metadata only in production). `TRACE_CONTENT`
+  is `metadata` by default in production: ids, model, tokens, cost, tool
+  names and timings, with no messages, answers or tool results. `full` is
+  a choice, and preflight warns that it is a copy erasure doesn't reach.
+
+**Left for later:**
+
+- Exporting one person's data.
+- A self-service request page.
+- An organisation timezone for "nightly".
+- Erasing traces in Langfuse itself when `full` is chosen.
+
+**Verified** at the end of Phase 8 (2026-10-11): `test_retention.py` (11)
+and web `retention.test.ts` (2) pass. The mutation check caught 18 of 18
+changes; one of them ("a saved record is loaded twice") was a real bug
+until the phase-end run: a file that listed an erasure twice inserted it
+twice.
+
+### 8.11 Browser tests for the employee flows
+
+**The hole.** The web app had unit tests only, and the role matrix was
+tested at the API. What matters most for employees only shows in a page:
+that they never see the Studio, that a link survives signing in, that the
+privacy notice comes first, that an answer survives a dropped connection,
+and that a phone can sign in at all. Phase 8.6 found that last one broken
+(sign-in was blocked on phones) by looking, not by a test.
+
+**Now:**
+
+- **Playwright** (`@playwright/test` 1.62.1, a dev dependency of the web
+  app; your choice). It uses the Chromium already on the machine
+  (`%LOCALAPPDATA%\ms-playwright`, build 1234), so nothing big is
+  downloaded; CI installs its own.
+- **Its own throwaway stack** (your choice), started by
+  `playwright.config.ts`:
+  - **The API on 8020** (`e2e/api-server.mjs`): a fresh SQLite file in a
+    temporary folder, its tables made from the models (the migrations are
+    written for Postgres: their `now()` defaults don't exist in SQLite),
+    `APP_ENV=test` (which forces the fake driver, so a test can never
+    spend), mail in memory, model keys blanked whatever the repo's `.env`
+    says. Running turns go through Redis as in production: database 15 of
+    the dev Redis, or `E2E_REDIS_URL` (CI starts a Redis service for the
+    job). Each answer takes 4 seconds (`AGENT_FAKE_DELAY_MS`), so a test
+    can drop the connection halfway through one.
+  - **The web app on 3020**, building into `.next-e2e` (`NEXT_DIST_DIR`) so
+    it runs beside the dev server.
+  - **A seed** (`e2e/global-setup.ts`, `e2e/seed.ts`), made through the API
+    as people would: an owner, an organisation, two employees who sign up
+    through their invites (at `example.com`: the address check refuses
+    reserved names such as `.test`), an assistant submitted and approved, one
+    employee who has read the notice and has a conversation. Passwords are
+    made fresh each run, in `e2e/.state.json` (ignored by git).
+  - Nothing touches the dev database, or ports 8000, 8010 or 3000.
+- **The tests** (`e2e/employee.spec.ts`, seven, in order):
+  - an employee lands in Chat, and the Studio's pages send them back;
+  - the privacy notice comes before the first message, then the assistant
+    answers, with a thumbs and "Did this solve it?";
+  - a link to a conversation survives signing in;
+  - a dropped connection shows "Reconnecting…" and the answer arrives
+    once (the test cuts the stream itself, after its first frames: the
+    browser's offline switch leaves an open stream running);
+  - on a phone, an employee signs in and chats;
+  - removing a conversation says admins can still open it, and it can be
+    put back;
+  - Privacy & help shows who opened your conversations.
+- **Where they run** (your choice): `npm run e2e -w web` (or `npm run e2e`
+  in `apps/web`), a step in `scripts/check.ps1`, and an `e2e` job in CI that
+  uploads the report when a test fails.
+
+**Left for later:**
+
+- The offline page and the installable app: the service worker runs in a
+  production build only (MANUAL 17.6.8, by hand on phones).
+- An action card that waits for an admin (Phase 9, with durable actions).
+- A real iPhone and Android: no browser test replaces that.
+
+**Verified** at the end of Phase 8 (2026-10-11): the seven tests pass (about
+a minute), on their own and as the last step of `scripts/check.ps1`.
+
+### What the Phase 8 check found
+
+The phase-end run (2026-10-11) was the first time Phase 8's tests ran
+together, and the first time its migrations met real data. All green in
+the end: ruff, mypy (Windows and Linux), the unit tier (1756 passed, 2
+skipped), the Postgres and Redis tier (84), `alembic check` on Postgres,
+the shared types, the web checks (304 unit tests), prettier, and the
+browser tests (7). The dev database (a copy saved first) upgraded through
+every Phase 8 migration. The mutation check caught 153 of 156 changes; the
+three left are second locks that can't be told apart from the first (8.1,
+8.3, 8.5).
+
+What it turned up:
+
+- **The audiences migration** (8.5) failed on SQLite, which hands back a
+  version's id as text: its backfill now makes it a UUID first (Postgres
+  was never affected).
+- **Loading saved erasures** after a restore (8.10) inserted a record
+  twice when the file listed it twice.
+- **Too many sign-ups** from one address (8.4's own limit) answered with
+  no message of its own; it now says "Too many sign-ups from this
+  address."
+- **Two tests added** where a change went unnoticed: the Chat catalog with
+  drafts (8.1), and two requests racing with one code (8.4).
+- **Tests behind the code:** about fifteen tests still expected what came
+  before Phase 8 (no `accepted` event first, no retry fields on an error,
+  a 403 where an unpublished assistant is now not found, one memory note
+  per turn, an address in a documentation range counted as public). They
+  now test what Phase 8 does.
+- **The browser suite's own setup:** the seed's addresses, the schema, a
+  Redis for running turns, and a stream that really drops (see 8.11).
+- **Next.js rewrote `apps/web/tsconfig.json`** to include the browser
+  build's types, in its own layout; it is formatted once and left alone
+  from then on.
+
+## 19. Phase 9: Actions, permissions and the pilot
+
+Phase 8 opened Chat to everyone with answers from the handbook. Phase 9
+lets the IT helpdesk do things: requests that wait for the right person
+hours later, tools that know who is asking, knowledge trimmed to the
+asker, hand-off to a ticket, and the helpdesk sample itself. It ends with
+the full pilot (plan section 5).
+
+### 9.1 Requests that wait safely, declared actions, and who decides
+
+**The hole.**
+
+- **A write waited inside its turn.** Up to five minutes
+  (`APPROVAL_TIMEOUT_S`), holding a turn slot, the CLI process and a
+  database connection. An admin who answered after lunch found nothing
+  to decide: it had been declined quietly. Only a redacted copy was
+  stored; the exact input lived in the waiting coroutine's memory.
+- **Every write went to a person, and none could be the asker's own.**
+  Risk was read from the SQL statement's kind, and the model wrote the
+  WHERE clause, so nothing could prove "only my own rows". Plan D7's tier
+  where the asker confirms a change to their own data couldn't exist.
+- **The asker approved their own write** (kept from 7b.3 under plan D17,
+  until an executor existed), and the only other deciders were admins:
+  IT staff who approve requests had to be admins, who read every
+  conversation (D5).
+- **Nobody was reminded, and nobody stood in** for an approver on
+  holiday.
+
+**Now** (your choices: SQL templates first; per-assistant approvers;
+a reminder, an expiry and stand-ins; the builder decides their own test
+writes in a preview):
+
+- **Declared actions** (`agent/actions.py`, plan D8). A database node
+  carries named statements the builder writes, with `:slots`:
+  - **parameters** the model fills, each typed (text, whole number,
+    number, yes or no, date), optional or required, with a length limit
+    and, optionally, the only values allowed;
+  - **the asker's slots**, `:asker_email`, `:asker_name` and `:asker_id`,
+    filled by the platform from the signed-in person; a parameter can't
+    be named `asker_*`, and a value the model sends for one is refused;
+  - **a tier**: `read` runs at once; `confirm` waits for the person
+    asking; `approver` waits for one of the assistant's approvers.
+  - **Checked when saved**, with the reason a builder can act on: one
+    statement, every slot declared and every parameter used, positional
+    `?` refused, the SQL guard's verdict on a sample rendering, no schema
+    changes, a read is `read` and a write isn't. `confirm` is only for a
+    statement provably about the asker: every inserted row carries an
+    asker slot (and no `ON CONFLICT`, which would change whichever row it
+    collides with), or the WHERE clause has `column = :asker_…` as one of
+    its AND-ed conditions (an OR around it would reach other rows).
+  - **Rendered without pasting text**: the template is parsed, each slot
+    becomes a literal node, the statement is generated for the
+    connection's dialect, then parsed again and must hold exactly the
+    values given. The SQL guard checks the result like any other
+    statement.
+  - **A write needs the connection's own write permission**, not
+    `expose_write` (which is about SQL the model writes). On a read-only
+    connection the canvas reports `action_without_write` and the version
+    can't be submitted; asked anyway, it is refused before anything is
+    stored.
+  - Actions are part of the version, so an admin approves them, and
+    their tiers, with everything else (7b.1). They show on each
+    assistant's **About** card (8.7).
+  - In the builder: **Actions** on the database node's drawer (add, edit,
+    remove), each checked by the server first
+    (`POST /assistants/{id}/actions:check`) before it goes on the canvas.
+- **Nothing waits inside a turn** (plan D17). When a call needs a person,
+  the router stores a request (`services/approvals.submit`):
+  - the exact input sealed under the KEK, with its sha256 over canonical
+    JSON; for an action, the rendered statement is what is sealed;
+  - a redacted copy to show (the statement used to be stored as it was,
+    credentials included), a title, and the assistant and version that
+    asked;
+  - who decides (`tier`), and an expiry.
+  - The page gets `approval_required` with the reference (`R-1A2B3C`),
+    the tier and the hash. The model is told the request is saved and
+    hasn't run, isn't interrupted, says so, and the turn ends. The call
+    is labelled `queued` in Run details and on the card ("Saved as a
+    request").
+- **Who decides** (`assert_can_decide`):
+  - the asker's own (`tier=asker`): only the person who asked. A
+    `confirm` action, and in a preview, every write (the builder testing
+    their own draft);
+  - an approver's (`tier=approver`): the assistant's **named approvers**
+    (groups or people, set by an admin outside versions:
+    `PUT /assistants/{id}/approvers`; empty means the admins), anyone
+    standing in for one of them, and admins and the owner. **Never the
+    asker**, unless nobody else at all can (the only owner, with 7b.3's
+    switch on, and a note). Being an approver doesn't make someone an
+    admin: they see and decide these requests, not every conversation.
+  - A decision **names the hash of what was shown**; if the request
+    changed in between, it is refused (`input_changed`). Declining
+    someone's request needs a note, which they are told.
+  - On their own card the asker may **correct a declared action's
+    values**; the statement is rendered and checked again, and that is
+    what runs. The asker may **withdraw** a request still waiting.
+- **The executor** (`services/executor.py`), the one place an approved
+  request runs:
+  1. it **claims** it (`approved → executing`, one conditional UPDATE): a
+     second delivery or hand-over finds nothing and stops;
+  2. it **checks everything again**, as the asker, never the approver:
+     the assistant exists and isn't paused; a live request's version is
+     still in service (approved, or replaced by a newer one); the asker's
+     account and membership are active and they are still in the
+     audience (or, in a preview, can still edit it); the tool or action
+     is still in that version;
+  3. it **runs the sealed input as it is** through the version's own tool
+     handler, so every guard applies again (SQL guard, connection
+     permissions, `expose_write`, the HTTP allowlist, the MCP server's
+     rules). The model is never asked again;
+  4. it **records** `succeeded` or `failed` with the output (redacted),
+     wipes the sealed input, writes `approval.executed` or
+     `approval.failed` with the hash, posts the outcome into the
+     conversation, and emails the asker when an approver decided.
+  - In production it runs on the mailer's worker (the interactive
+    queue, `ACTION_EXECUTOR=queue`), once, by the request's job id; in
+    development and the tests, in the API process.
+- **What people read of the outcome.** One line in the conversation
+  ("R-1A2B3C (Close a ticket) was done."), then what it did, for
+  builders. An employee gets the first line only (`chat_view.message`):
+  never the statement or rows (D19). The next turn is told how each
+  request ended since the last one, before the new message, marked as
+  coming from the platform (`chat._request_notes`).
+- **How long it waits.** A day for the asker's own; the organisation's
+  `action_expiry_hours` (72) for an approver's, with one reminder at
+  `action_reminder_hours` (24; 0 for none). Both are owner settings
+  (Members › Organisation). The worker's minute sweep expires what
+  nobody decided (the asker is told), reminds the approvers once, marks
+  a request left `executing` for ten minutes as failed (never retried:
+  a write may have half happened, and only a person can check), and
+  hands over again one approved but not picked up for two minutes.
+- **Standing in** (Your account › While you're away): hand your requests
+  to someone, by email, until a date (at most 90 days); end it early.
+  The stand-in decides what you could as a named approver. An admin's
+  own powers never pass on.
+- **The queue** (`/approvals`, `GET /approvals/decidable`): what the
+  person may decide (all approver requests for an admin; an assistant's
+  for its approvers and their stand-ins), each with the exact statement,
+  the values, who asked and in which assistant. The conversation itself
+  is not there: opening it is a read, recorded with a reason (7b.2). An
+  employee who is an approver reaches it from the Chat bar.
+- **Records.** `approvals.conversation_id` is SET NULL: erasing a
+  conversation keeps the record of a write. Retention keeps a
+  conversation with a request still open. Pausing an assistant expires
+  what waits on it; a leaver's waiting requests are cancelled; both wipe
+  the sealed input. A KEK rotation re-wraps the sealed inputs of
+  requests still open. The audit log has `approval.submitted`,
+  `.approved`, `.denied`, `.withdrawn`, `.expired`, `.executed`,
+  `.failed`, `assistant.approvers.update` and `approval.delegate(_end)`.
+- **Gone:** the in-memory wait (`approval_registry`) and its Redis
+  listener, `APPROVAL_TIMEOUT_S`, and `GET /orgs/{org}/approvals` (now
+  `GET /approvals/decidable`).
+- **Migration `c9a1b2c3d4e5`**: the request columns, `assistants.
+  action_approvers`, `approval_delegations`. Rows from before: an
+  `approved` one ran in its turn, so it is `succeeded`; a `pending` one
+  belonged to a wait that is gone, so it is `expired`.
+- The fake driver can call an action: `act: request_access {"app": "Figma"}`.
+
+**Left for later:**
+
+- HTTP and MCP action templates, with stored credentials (9.3), and
+  named read queries with row-level security and the mapping from a
+  person to the external system's id (9.3).
+- The inbox's own page for one request, email links straight to it, and
+  My requests (9.2).
+- An admin retrying a failed request by hand; escalation chains and
+  manager approval (only if the pilot asks).
+
+**Verified:** the tests are written (`test_actions.py` 37 with the cases,
+`test_requests.py` 12; reworked `test_chat_approvals.py` 9,
+`test_approval_races.py` 13, `test_approval_contract.py` 5,
+`test_approvals.py` 44; the role matrix, tenant walk and audit table know
+the new routes; web `approvals.test.ts` 9 and `actions.test.ts` 2). They
+run, with the mutation check (`scratchpad/mutate_91.py`, 32 changes), at
+the end of Phase 9. In a browser on the dev stack, on a scratch SQLite
+helpdesk: a preview's confirm card with its values, corrected and
+confirmed, the row written with the asker's address and the outcome in
+the thread; a live approver request in the queue with its statement,
+decided by the only owner with a reason, the ticket closed; the actions
+editor refusing an unpinned `confirm` and saving the pinned one; the
+away section and the approvers section. Found and fixed there: the
+outcome line carried the statement to an employee, a stored call read as
+"Didn't finish", the only owner's own request was missing from their
+queue, and a free-form write was titled "Looked up data".
+
+### 9.2 The approvals inbox, emails that only link, and My requests
+
+**The hole.** After 9.1 a request could wait for days, but finding it was
+hard. The queue showed only what waited for you now: nothing you had
+decided, and no view of the organisation's requests for its admins. An
+email linked to the queue, not to the request. An approver got one email
+per request, so a burst of ten was ten emails. And an employee had no
+list of their own requests: each card lived in its conversation.
+
+**Now** (your choices: three views and a page per request; one email per
+request, batched; My requests as a Chat page; a waiting count in the
+navigation):
+
+- **One request's page** (`/approvals/{id}`, `GET /approvals/{id}`),
+  where every email links. Whoever may decide it gets the decision card;
+  anyone else allowed (the person who asked, whoever decided it, admins
+  and the owner) sees where it stands: who asked and when, who decided,
+  their note, when it ran and what happened, the values and, for those
+  who may see it, the statement. An employee who only asked sees it as
+  Chat shows it (no statement). Anyone else in the organisation is
+  refused (`not_your_request`); outside it, not found. Opening it isn't a
+  read of the conversation, which it doesn't include.
+- **The inbox's views** (Approvals): **Waiting** (the 9.1 queue, with a
+  count), **Decided by you** (`GET /approvals/decided`), and for admins
+  **All requests** (`GET /orgs/{org}/approvals`), by state and by
+  assistant, newest first, paged.
+- **My requests** (`/chat/requests`, `GET /approvals/mine`): everything a
+  person asked for, newest first, with where each stands; each opens its
+  page, with Withdraw while it waits and a link back to its conversation.
+  Chat home links to it, with how many are still open.
+- **Counts** (`GET /approvals/summary`, read every minute): Approvals in
+  the sidebar shows how many wait for you to decide; the Chat bar does
+  for an employee who is an approver.
+- **Emails that only link, and fewer of them.** An approver gets the first
+  request at once; more within 15 minutes wait (`approver_notices`), and
+  the minute sweep sends one "N requests wait for you" email when the
+  window has passed. Reminders always go. Each single email links to the
+  request's page, the batch to Approvals, the outcome email to the
+  request's page; nothing is decided by opening a link (sign-in first,
+  then a click in the app), and none carries what the request would do.
+- **Migration `c9a2b3c4d5e6`** adds `approver_notices`.
+- Removed the unused `list_waiting_in_org`.
+
+**Left for later:**
+
+- Push notifications on phones (the installable app has none yet).
+- A per-person choice of email frequency.
+
+**Verified:** the tests are written (`test_inbox.py`, 5; the role matrix
+knows the new routes, now 183; web `format.test.ts` gains
+`formatDateTime`). They run, with the mutation check
+(`scratchpad/mutate_92.py`, 12 changes), at the end of Phase 9. In a
+browser on the dev stack: the three views with their counts and the
+sidebar badge, the state filter, a finished request's page with its
+decision, note, run and result, My requests, and the Chat home link.
+
+### 9.3 Data scoped to the asker, company systems over HTTP, and internal destinations
+
+**The hole.** 9.1 let an assistant act as the person asking, but only
+through SQL actions with `:asker_email` written into each statement. Three
+things were still missing:
+
+- **Free-form SQL ran as the connection.** On an HR database, `sql_query`
+  could read everyone's leave, because nothing tied a statement to the
+  person asking.
+- **No company system could be reached at all.** Ticketing, the wiki and
+  inventory APIs sit on the office network or VPN, and the SSRF guard
+  refuses every private address. That is right for the internet, and it
+  also shut out every internal system.
+- **The HTTP tool could only take the model's word.** `http_request` sends
+  whatever URL and headers the model writes. An API key would have to go
+  in the prompt, and nothing could say "this call, with these values,
+  confirmed by the person it is about".
+
+**Now** (your choices: row-level security on Postgres; HTTP connections
+and declared calls; an owner-edited allowlist; identity by email):
+
+- **A Postgres connection can answer only for the person asking**
+  (`permissions.scope_to_asker`):
+  - **How it works.** Every statement, the model's or a declared
+    action's, runs in a transaction that first sets `app.asker_email` to
+    the signed-in person's email: `set_config(..., true)`, a bound
+    parameter, local to the transaction, so the pooled connection goes
+    back without it. The database's own row-level security policies read
+    it with `current_setting('app.asker_email', true)`.
+  - **It fails closed.** With nobody signed in (an eval, a dry run), the
+    query is refused rather than run unscoped. The guard already refuses
+    `SET`, `set_config` and `current_setting`, so the model can't change
+    who it is.
+  - **Testing a scoped connection checks the role.** A superuser, a role
+    with `BYPASSRLS`, or one that owns tables without `FORCE ROW LEVEL
+    SECURITY` fails the test, since row-level security wouldn't bind it.
+    Tables with no policy are listed as a warning ("everyone who asks
+    sees all of their rows").
+  - **Only Postgres.** Other engines are refused (`scope_needs_postgres`),
+    and their adapters refuse a scoped run too. For them, per-person rows
+    go through read actions with `:asker_email`.
+- **HTTP connections** (`/assistants/{id}/http-connections`, table
+  `http_connections`, migration `c9a3b4c5d6e7`):
+  - **What one holds.** A company system's base URL, the headers it needs
+    (sealed in `secrets` as one object; only their names come back), and
+    whether to **say who is asking**.
+  - **The base URL** is https, or plain http only if an internal
+    destination allows it. It carries no credentials, query or fragment.
+  - **Headers the platform owns can't be stored:** `Host`, the framing
+    headers, `Content-Type` and `X-Asker-*`.
+  - Create, change and delete are audited (`http_connection.*`), with
+    the header names but never their values.
+- **Declared calls on the HTTP request tool** (`tools.http_request.actions`,
+  edited in its node's drawer):
+  - **Like SQL actions.** A call names a connection, a method and a path
+    with `{slots}`, its parameters, a tier, and optionally the fields of
+    the answer the model reads. It is `act_<name>`, and names are unique
+    across SQL and HTTP actions.
+  - **Checked when saved:**
+    - the path stays under the base: no `//`, `..` or `://`, and no query
+      or fragment;
+    - each slot is a declared parameter or `asker_email`, `asker_name` or
+      `asker_id`, and a path slot is required;
+    - a GET is `read`, anything else is `confirm` or `approver`.
+  - **Rendering.** Each path value is URL-quoted into one segment (`.` and
+    `..` are refused). The other values become the query of a GET or
+    DELETE, and the JSON body otherwise.
+  - **Sending:**
+    - the connection's sealed headers, plus `X-Asker-Email`,
+      `X-Asker-Name` and `X-Asker-Id` when the connection says who asks;
+    - to that host only (`allowed_domains=[host]`);
+    - redirects never followed, since they would carry the headers
+      elsewhere.
+  - **Confirm needs identity.** A `confirm` call needs a connection that
+    says who is asking: the person confirms as themselves, so the system
+    has to know who that is. It is refused when saved, at submit, when the
+    graph is checked (`confirm_without_asker`), and by the executor.
+  - **What is sealed.** A stored request seals the rendered call with the
+    base URL it was asked for. The decider reads `POST https://…/tickets`
+    and the body. If the connection has moved since, the executor refuses
+    it rather than following.
+  - **No dead tool.** With calls and no allowed sites, the free-form
+    `http_request` tool isn't offered, and the "no allowed sites" warning
+    (which blocks approval) doesn't apply.
+  - **Frozen with the version.** The manifest fingerprints each called
+    connection (base URL, header names, which secret, `send_asker`). A
+    change drops its calls from the approved version until the next
+    approval, and reviewers see it in the version diff.
+- **Internal destinations** (organisation settings, the owner edits them,
+  audited with before and after):
+  - **Each entry** is a host (an exact name, a `.suffix`, or an address),
+    the address range it must resolve into, its ports (443 by default),
+    and whether plain http is allowed.
+  - **Where they apply.** The SSRF guard consults them for HTTP calls,
+    the HTTP request tool, URL sources and remote MCP servers. Every
+    resolved address must be public or inside the entry's range.
+  - **Always refused:** this machine, link-local (cloud metadata),
+    unspecified and multicast addresses. So are the platform's own
+    networks: `PLATFORM_NETWORKS`, which the prod compose sets from fixed
+    subnets (`EDGE_SUBNET`, `DATA_SUBNET`, `MCP_SUBNET`), and whatever
+    `APP_BASE_URL` resolves to. So `.corp.example.com` can never reach the
+    Studio's own database.
+- **The privacy card** lists each call and each system it reaches, saying
+  when the system is told your name and email. `DATA_FLOWS.md` has the
+  row.
+
+**Left for later:**
+
+- Identity beyond email, such as signed tokens (OIDC on-behalf-of) for
+  systems that verify it themselves.
+- Row-level security for MySQL. It has no equivalent, so read actions
+  with `:asker_email` cover it.
+- A "test this call" button in the drawer. That would send a real request
+  from the builder.
+
+**Verified:** the tests are written and run, with the mutation check
+(`scratchpad/mutate_93.py`, 27 changes), at the end of Phase 9:
+
+- `test_http_actions.py`: the recorder sees exactly what would be sent;
+- `test_sql_scope.py`: includes an RLS test against the dev Postgres;
+- `test_destinations.py`;
+- the role matrix and tenant walk know the new routes, now 187;
+- `test_deploy.py` checks the pinned subnets;
+- web: `manifest-diff` and `InternalDestinations` vitest.
+
+Static checks pass (ruff, mypy on both platforms, tsc, eslint, vitest,
+prettier, `gen:check`, the migration up and down on SQLite).
+
+### 9.4 Knowledge groups, revocation, the ingest scan, and share links
+
+**The hole.** Plan D6 says answers are trimmed to who is asking. Before
+this task, three things got in the way:
+
+- **Retrieval knew nothing about the asker.** Every source of an assistant
+  answered everyone who could chat with it, so an HR handbook with
+  salaries had to be its own assistant, and nothing stopped a builder from
+  adding it to a general one.
+- **Losing access changed nothing.** A conversation resumed its session
+  and replayed its summary, so the model still had what it read before.
+- **Nothing looked at what was uploaded.** A wiki export with API keys, or
+  a spreadsheet of PAN numbers, went straight into a source everyone could
+  read.
+
+The plan also held share links back until knowledge was filtered.
+
+**Now** (your choices: groups on each assistant's sources, with the
+library decided for later; filter and offer only to readers; an access
+epoch with a fresh start; read-only links re-checked at each opening; a
+warn-and-confirm scan):
+
+- **The library decision.** Sources stay per assistant for the pilot, and
+  groups go on each source (`data_sources.everyone`, `group_ids`). An org
+  knowledge library (one HR handbook attached to several assistants, its
+  chunking settings on the source) comes later. When it does, its
+  migration moves each source's readers with it.
+- **Who may read a source.** It is either everyone's, or readable by
+  groups (Sources › a source › **Who can read it**). It is deny by
+  default: no groups and not everyone means nobody, and a deleted group's
+  id simply matches no one (deleting a group says which sources named it).
+  Sources from before this task stay everyone's. Every change is audited
+  (`data_source.access`, before and after).
+- **Retrieval and citations** use only the sources the asker may read. The
+  turn's config is narrowed for them (`knowledge_access.for_turn`), so the
+  search tools, the subagents and the source list all agree. If nothing is
+  left, the knowledge base is off for that turn, never an empty list (which
+  means every source). The people who edit the assistant read all of its
+  sources.
+- **Only readers are offered it.** `listing.can_see` now also requires
+  reading every restricted source the live version answers from. In Chat,
+  the filter is therefore a second wall, not a thinner answer.
+- **Revocation by access epoch.** The organisation's `access_epoch` goes up
+  whenever someone may read less: a member removed from a group, a group
+  deleted, or a source's readers changed. A conversation on restricted
+  knowledge last answered at an older epoch starts fresh at its next
+  message:
+  - no resumed session;
+  - no summary or earlier messages replayed;
+  - no carried-over citations.
+  
+  Earlier answers stay visible to their asker, but citations of sources
+  they can no longer read are hidden. The memory tool is off on assistants
+  with restricted knowledge, since a note can outlive its reader's access.
+- **The scan at ingest** (`rag/sensitivity.py`, using the chat guardrails'
+  detectors and the secret patterns):
+  - **What holds a source back.** A source open to everyone is held
+    (`held`, "Waiting for you") when it contains one credential, or three or
+    more Aadhaar, PAN or card numbers. Phone numbers and emails are counted
+    but never hold anything back.
+  - **Before anything is embedded.** The check runs first, so a held source
+    costs nothing to scan, and an earlier index of the same source stays as
+    it was.
+  - **The builder's choice.** The builder sees the counts and masked
+    examples, then either chooses groups (it is indexed at once) or
+    confirms everyone may read it (`data_source.sensitive_confirmed`,
+    audited with what was found). A confirmation covers that content's
+    checksum, so new content is asked about again.
+  - **Restricted sources** are scanned and reported, never held.
+- **Share links** (`conversation_shares`; `POST/GET
+  /conversations/{id}/shares`, `DELETE .../shares/{share_id}`, `GET
+  /shared/{token}`):
+  - **Who shares.** The person who started a conversation can share it.
+    Only a hash of the token is kept, and the link is shown once.
+  - **When it opens.** It opens read-only for a signed-in member when the
+    sharer is still a member and the reader may use the assistant and read
+    every source the conversation cites. It must also be a live
+    conversation, never a preview.
+  - **A refusal** says no more than it must: `share_gone`, or
+    `share_not_for_you`.
+  - **What it shows** is what Chat shows an employee: the messages and
+    their citations. Tool calls, statements and results stay out, since
+    they were the asker's own data.
+  - **Recorded.** Each opening is audited (`conversation.share_opened`) and
+    counted. Revoking, and deleting or erasing the conversation, end it.
+- **Migration `c9a4b5c6d7e8`.**
+
+**Left for later:**
+
+- The org knowledge library (decided above).
+- "View as": a builder seeing what one person would get.
+- Hiding an earlier answer's text, not only its citations, after access is
+  lost.
+- Drive and SharePoint permissions mapped onto groups.
+- A scan for names and salaries, which have no shape.
+
+**Verified:** the tests are written and run, with the mutation check
+(`scratchpad/mutate_94.py`, 25 changes), at the end of Phase 9:
+
+- `test_knowledge_groups.py`, 12 tests;
+- the role matrix and tenant walk know the new routes and share ids, now
+  193.
+
+Static checks pass, and the migration goes up and down on SQLite. In a
+browser on dev: a source holding a fake key was held, with its masked
+examples; the groups editor; "Everyone may read it" queued it and was
+audited; a link was made, shown once, opened read-only and audited. The
+check also found that one key was counted twice (the Anthropic and
+generic patterns both match), now fixed.
+
+### 9.8 The IT helpdesk sample and the demo helpdesk database
+
+**The hole.** The pilot is an IT helpdesk, but the samples were a shop
+desk, a notebook and a research desk. A builder had no starting point for
+the pilot's own assistant, and nothing to try declared actions against.
+
+**Now:**
+
+- **The IT helpdesk sample** comes first in the gallery
+  (`app/samples/it-helpdesk.json`).
+  - **Documents:** five short ones covering VPN, passwords and two-factor,
+    laptops, software and access requests, and desk hours and escalation.
+  - **Guardrails:** the assistant never asks for a password, and never
+    promises access.
+  - **Evals:** a suite of nine cases with personas (a new joiner, a remote
+    employee, a designer, someone testing the limits). Two cases must
+    decline: one shares a password, one asks for an admin password.
+- **The demo helpdesk database** (`python -m scripts.demo_helpdesk`).
+  - **What it holds:** a SQLite file with tickets, access requests and
+    laptops for the people you name. It is written to `DB_SQLITE_DIR` when
+    set, so production can open it.
+  - **What it prints:** the three declared actions to paste, one per tier:
+    *Look up my tickets* (read), *Request access to an app* (the asker
+    confirms), *Close a ticket* (an approver decides).
+- Samples still never ship a database connection; the database is the one
+  optional step, named under the sample's "needs".
+
+**Left for later:** multi-turn eval cases (the runner asks one question per
+case), and an eval check that "an approval was requested and nothing was
+written" if 10.4 doesn't add one.
+
+**Verified:** `test_demo_helpdesk.py` (3, passing); `test_samples.py` now
+expects the helpdesk first. Its other checks (compiles, validates, no
+connection) cover the new file.
+
+### 9.5 Hand-off to a person, with a summary
+
+**The hole.** When the assistant couldn't help, the person was on their
+own: no ticket, and nobody told.
+
+**Now:**
+
+- **Where it is set.** Hand-off is per assistant (Settings › Hand-off;
+  `AssistantConfig.handoff`, round-tripped through the agent node). It
+  names a contact email and, optionally, a declared HTTP action (9.3)
+  that opens a ticket. An action that waits for an approver is refused
+  when the version is submitted (`handoff_approver_action`), and so is
+  one with a required parameter other than title, summary or note.
+- **Who triggers it.** The person (**Get help from a person** in Chat) or
+  the assistant (the `hand_off` tool) hands off.
+  - **The summary** is built without a model call: the title, the last
+    questions, the last answer, and the person's note, with secrets
+    stripped. It is stored with the hand-off and sent to the ticket action.
+  - **The email** to the contact carries only who, which assistant and a
+    link to the conversation, where an admin's read is recorded. No
+    question, no answer, no note.
+  - **A `confirm` ticket action** runs only from the person's own click,
+    which is their confirmation. From the tool, the email goes instead.
+- **Limits.** At most one successful hand-off per conversation per 10
+  minutes. A failed one is recorded and can be retried at once. Each
+  hand-off is audited (`conversation.handoff`), and previews and evals
+  never send anything.
+- **Migration `c9a5b6c7d8e9`** (`handoffs`).
+
+**Left for later:** a model-written summary; an admin view of hand-offs;
+the contact must be an admin to open the conversation.
+
+### 9.6 Screenshots in chat; secrets typed into chat masked
+
+**The hole.** The most common helpdesk input, a screenshot of the error,
+couldn't be sent. A password pasted into chat went to the model, the
+transcript and the trace.
+
+**Now:**
+
+- **Typed secrets.** A message's credentials are masked before anything
+  stores or uses it (`redact.mask_typed_secrets`, run in
+  `chat._keep_message`). That covers key shapes, bearer tokens, URI
+  passwords, and "password: Hunter2!"-style values that look like a
+  credential. The person sees "A password or key in your message was
+  hidden before it was sent. Change it if it was real." (a guardrail
+  finding, kept on the answer). The composer warns before sending.
+- **Screenshots.**
+  - **What is accepted.** **Attach screenshot**, or paste an image: PNG,
+    JPEG, WebP or GIF up to 5 MB, judged by the file's bytes. SVG is
+    refused.
+  - **Where they go.** They are stored per conversation, up to 4 per
+    message, linked to the message, and shown through 5-minute presigned
+    links.
+  - **To the model.** The real driver sends them as image blocks with the
+    text; a replayed history mentions them without resending.
+  - **When they're removed.** Purges and assistant deletion remove the
+    files.
+- **Migration `c9a6b7c8d9e0`** (`attachments`).
+
+**Left for later:** cleaning up screenshots uploaded and never sent, and
+a live run of the real image path (only the fake driver is tested).
+
+### 9.7 Builder testing spends from its own budget
+
+**The hole.** A builder's previews and eval runs spent the pilot's
+budget, so testing could stop Chat for everyone.
+
+**Now:**
+
+- **Builder spend is told apart.** Spend in preview conversations and eval
+  runs (told apart through the conversation) is builder spend.
+- **The pilot's budgets** (org and assistant) now count live spend only.
+- **A builder budget.** An optional monthly builder budget (Members ›
+  Organisation, `builder_monthly_usd`) caps previews and evals. When it
+  runs out they stop with "Builder testing has used this month's $X…",
+  and Chat goes on.
+- **What stays as it was.** A person's own cap still applies to their
+  previews.
+- **On the Usage page:** a "Builder testing this month" line.
+
+### 9.9 The second security pass
+
+One reviewer per new wall read the code as an attacker would. All twelve
+findings are fixed; THREAT_MODEL §5.3 lists them. The fixes:
+
+- **Accounts:** Google linking needs the same email (and the
+  authenticator, for people who have one).
+- **Knowledge:**
+  - source files open only for their readers;
+  - eval suites and runs are editors' only;
+  - someone who loses access sees earlier answers written from that
+    knowledge hidden, with their citations and search results;
+  - a share also checks the knowledge its conversation's version used.
+- **Identity:** the model can't send `X-Asker-*` itself; a connection
+  pointed somewhere else needs its credential again; a display name no
+  longer pins a write to someone.
+- **Prompts:** another system's answer, or an approver's note, reaches the
+  model fenced as untrusted data.
+- **Typed secrets:** masked in feedback comments, hand-off notes and
+  titles too.
+- **Evals and previews:** eval conversations can't be replied in; in a
+  preview a schema change the model wrote goes to an approver.
+
+The last round also closed what the first builds left:
+
+- **Hand-off:** the contact must be an admin who can open the
+  conversation, and two clicks at once send one hand-off.
+- **Screenshots:** served through the API, so the object store needs no
+  CORS setting, and unsent ones are deleted after a day.
+- **Chat:** a resumed message with a masked password is recognised as
+  sent; the builder-budget message says when it is back.
+- **Traces:** run traces place declared actions on their node.
+- **Evals:** multi-turn cases (**Then asks**: up to five follow-ups in one
+  conversation, graded on the last answer, with tools counted across all
+  turns).
+
+### 10.1 Analytics per assistant, with a baseline; reports for managers
+
+**What it counts.** Live conversations only.
+
+- **Resolved:** the person said "Did this solve it?" yes.
+- **Not resolved:** they said no, or gave a thumbs down without a later
+  yes.
+- **No verdict:** neither.
+
+The resolution rate is over those who said, and cost per resolved is the
+period's live spend divided by resolved conversations. Each figure is
+compared with the previous period of equal length.
+
+- **The assistant's Analytics tab:** 7, 30 or 90 days, four figures, the
+  verdicts, and a daily chart, with "How these are counted".
+- **The Usage page (admins):** a per-assistant report with the previous
+  period's figures, and a CSV download (audited, `analytics.export`).
+
+### 10.2 Traffic on the canvas
+
+A **Traffic** toggle on the canvas shows the last 24 hours on the diagram:
+
+- calls on each station (errors in the destructive colour, approvals in
+  the warning colour);
+- messages on the agent;
+- busy lines drawn heavier, with a moving dash (no motion under reduced
+  motion).
+
+Calls are placed by tool: declared actions go to the database or HTTP
+node that declares them, and calls whose station is gone are counted as
+unplaced. Counts only, polled every 15 seconds while the canvas shows.
+
+### 10.3 The needs-review queue; the person is told when it is fixed
+
+**What lands in it.** Thumbs-down answers and "Did this solve it?" = no
+land in a queue on the Feedback tab. A failed turn adds a badge but is
+never listed on its own, since the person didn't send it. Builders see
+the question, answer and comment without a name, the rule the privacy
+notice states (now naming "Did this solve it?" too).
+
+- **Each item becomes a test case** in a suite, or is dismissed with a
+  reason (both audited).
+- **Telling the person.** A five-minute sweep emails them once when the
+  live version's latest eval run passes their case: the assistant name,
+  the version and a link, no content.
+- **Migration `ca03b4c5d6e7`** (`review_items`, `erasures.details`).
+
+### 10.4 Approve on evidence
+
+The approval card (History, a submitted version) shows three things:
+
+- **The eval scorecard:** each suite's latest run on that version (or a
+  draft run since submission, marked), with regressions against the
+  version it would replace.
+- **"No unapproved write":** writes that ran without an approval in those
+  runs, which should be 0.
+- **A cost forecast:** average cost per eval conversation × expected
+  conversations a month, shown as ±30% and labelled an estimate.
+
+Eval cases can now require **It must wait for approval**
+(`expects_approval`): the case passes when an approval was requested and
+nothing was written.
+
+### 10.5 Erasure coverage and conversation export
+
+- **Erasure.** Erasing a person, and the retention purge, already took
+  their notes, summaries, traces, tool calls, links and feedback. Each
+  erasure now records the counts of what went with it ("With them: …" in
+  What was erased). A person's own memory notes go only when the person
+  is erased.
+- **Export.** **Export** in Chat downloads the conversation as Markdown,
+  or JSON through the API: messages and sources, shaped as Chat shows
+  them, without citations the reader can't read. An admin's export is a
+  recorded read, and every export is audited (`conversation.export`).
+
+**Verified (9.5 to 10.5):** each has its own test file, all run at the
+end of Phase 9/10 with the rest of the suite (see the phase-end note
+below).

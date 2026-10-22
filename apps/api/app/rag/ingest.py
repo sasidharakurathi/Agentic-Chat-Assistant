@@ -7,13 +7,16 @@ running worker.
 Re-running this for a source that already has a ``Document`` (a "reindex")
 deletes that document first — its chunks cascade-delete via the FK, so a
 transaction never has both old and new chunks for the same source at once.
+Unless a version still uses it (Phase 7b.1): then the old document is kept,
+marked superseded, and Chat goes on answering from it until a version with
+the new one is approved. Previews search only current documents.
 
 Plan §5.1, points this module is responsible for:
 
-- **Stable ids.** The document id derives from the source, and a chunk id
-  from ``(document_id, ordinal, content)``. A reindex of unchanged content
-  writes the same ids back, so a citation saved in an old answer still
-  resolves to its chunk.
+- **Stable ids.** The document id derives from the source and its content,
+  and a chunk id from ``(document_id, ordinal, content)``. A reindex of
+  unchanged content writes the same ids back, so a citation saved in an old
+  answer still resolves to its chunk.
 - **Nothing paid for twice.** Before the old chunks are dropped, their context
   lines and vectors are kept by ``(ordinal, content)``. A context line is
   reused when the document's checksum is unchanged (it describes the chunk's
@@ -42,7 +45,7 @@ from app.config import settings
 from app.models.assistant import Assistant
 from app.models.rag import Chunk, DataSource, DataSourceStatus, DataSourceType, Document
 from app.models.usage import UsageEvent, UsageKind
-from app.rag import progress, usage
+from app.rag import progress, sensitivity, usage
 from app.rag.chunking import ChunkSpan, chunk_document
 from app.rag.contextualize import ContextResult, apply_prefix, get_contextualizer
 from app.rag.embedders import Embedder, get_embedder
@@ -52,7 +55,7 @@ from app.rag.parsers import ParsedDocument, parse_by_mime, parse_text
 from app.rag.usage import Meter
 from app.rag.vectorstore import ChunkRecord, PgVectorStore
 from app.schemas.assistant_config import AssistantConfig, RagConfig
-from app.services import budgets
+from app.services import budgets, manifest
 from app.storage import get_object
 
 #: Texts per embedding step (and progress report).
@@ -88,6 +91,8 @@ class IngestReport:
     #: Why contextual retrieval did not run although the assistant asked for it.
     context_skipped: str | None = None
     cost_usd: float = 0.0
+    #: What the scan found (Phase 9.4, `rag.sensitivity`).
+    sensitive: dict[str, Any] | None = None
 
 
 @dataclass
@@ -102,9 +107,13 @@ def _sha(text: str | bytes) -> str:
     return hashlib.sha256(text.encode("utf-8") if isinstance(text, str) else text).hexdigest()
 
 
-def document_id_for(data_source_id: uuid.UUID) -> uuid.UUID:
-    """One source produces one document, and always the same id."""
-    return uuid.uuid5(_ID_NAMESPACE, f"document:{data_source_id}")
+def document_id_for(data_source_id: uuid.UUID, checksum: str | None = None) -> uuid.UUID:
+    """One source produces one current document. Its id follows the content
+    (Phase 7b.1), so a new copy kept beside an approved one has its own;
+    unchanged content keeps the id it has, whichever form that takes."""
+    if checksum is None:
+        return uuid.uuid5(_ID_NAMESPACE, f"document:{data_source_id}")
+    return uuid.uuid5(_ID_NAMESPACE, f"document:{data_source_id}:{checksum}")
 
 
 def chunk_id_for(document_id: uuid.UUID, ordinal: int, content: str) -> uuid.UUID:
@@ -129,7 +138,11 @@ async def _fetch(source: DataSource) -> Fetched:
         if not source.uri:
             raise IngestError("url data source has no uri")
         try:
-            text = await fetch_url_text(source.uri)
+            from app.services import destinations
+
+            text = await fetch_url_text(
+                source.uri, internal=await destinations.for_org(source.org_id)
+            )
         except UrlFetchError as exc:
             raise IngestError(str(exc)) from exc
         if not text.strip():
@@ -219,26 +232,42 @@ async def _load_cache(
 
 
 async def _drop_previous_index(
-    session: AsyncSession, source: DataSource
-) -> dict[tuple[int, str], _Cached]:
-    """Reindex safety: drop any document(s) this source produced before, so
-    their chunks are gone before the fresh ones are written (in the same
-    transaction). What they cost to make is kept first, and returned."""
+    session: AsyncSession, source: DataSource, checksum: str
+) -> tuple[uuid.UUID, dict[tuple[int, str], _Cached]]:
+    """Reindex safety: drop the document this source produced before, so its
+    chunks are gone before the fresh ones are written (in the same
+    transaction). What they cost to make is kept first, and returned, with
+    the id the new document takes.
+
+    A document a submitted or approved version names is kept instead,
+    marked superseded (Phase 7b.1): Chat answers from the copy an admin
+    approved until a version with the new one is approved."""
     existing = list(
         await session.scalars(select(Document).where(Document.data_source_id == source.id))
     )
-    cache = await _load_cache(session, existing)
+    current = [d for d in existing if d.superseded_at is None]
+    same = next((d for d in current if d.checksum == checksum), None)
+    new_id = same.id if same is not None else document_id_for(source.id, checksum)
+    cache = await _load_cache(session, current)
+    kept = await manifest.kept_documents(session, source.assistant_id)
+    gone: set[uuid.UUID] = set()
     for doc in existing:
-        await session.delete(doc)
+        if doc.id == new_id or (doc.id not in kept and doc.superseded_at is None):
+            # Rewritten below with the same ids, or nobody needs it.
+            await session.delete(doc)
+            gone.add(doc.id)
+        elif doc.superseded_at is None:
+            doc.superseded_at = datetime.now(UTC)
     await session.flush()
     # The database cascades the old chunks away; any this session had loaded
     # would still sit in its identity map under the ids the new chunks are
     # about to reuse.
-    gone = {doc.id for doc in existing}
     for obj in list(session.identity_map.values()):
         if isinstance(obj, Chunk) and obj.document_id in gone:
             session.expunge(obj)
-    return cache
+    # Superseded copies of this source that no version needs any more.
+    await manifest.sweep_superseded(session, source.assistant_id)
+    return new_id, cache
 
 
 async def _context_prefixes(
@@ -350,18 +379,35 @@ async def ingest_data_source(session: AsyncSession, data_source_id: uuid.UUID) -
     usage.activate(used)
     try:
         fetched = await _fetch(source)
+        scanned = sensitivity.scan(fetched.parsed.text, fetched.checksum)
+        if (
+            scanned.flagged
+            and source.everyone
+            and source.sensitive_confirmed_checksum != fetched.checksum
+        ):
+            # Held back (Phase 9.4): its builder gives it to groups or
+            # confirms everyone may read it. Nothing is embedded meanwhile;
+            # an earlier index of it stays as it was.
+            source.status = DataSourceStatus.held
+            source.ingest_report = _report_json(IngestReport(sensitive=scanned.as_json()))
+            await session.commit()
+            return
         rag = await _rag_settings(session, source.assistant_id)
         await progress.report(source.id, "chunking")
         spans = chunk_document(
             fetched.parsed, max_tokens=rag.chunking.max_tokens, overlap=rag.chunking.overlap
         )
         embedder = get_embedder()
-        report = IngestReport(chunks=len(spans), embedding_model=_model_of(embedder))
+        report = IngestReport(
+            chunks=len(spans),
+            embedding_model=_model_of(embedder),
+            sensitive=scanned.as_json() if scanned.counts else None,
+        )
 
-        cache = await _drop_previous_index(session, source)
+        document_id, cache = await _drop_previous_index(session, source, fetched.checksum)
 
         document = Document(
-            id=document_id_for(source.id),
+            id=document_id,
             data_source_id=source.id,
             assistant_id=source.assistant_id,
             org_id=source.org_id,

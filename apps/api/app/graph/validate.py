@@ -273,9 +273,14 @@ def _http_tool_warnings(graph: Graph, res: ValidationResult) -> None:
     for n in graph.nodes:
         if n.type != "tool" or getattr(n.data, "key", None) != "http_request":
             continue
-        raw = (getattr(n.data, "config", None) or {}).get("allowed_domains") or []
+        cfg = getattr(n.data, "config", None) or {}
+        raw = cfg.get("allowed_domains") or []
         domains = [str(d) for d in raw] if isinstance(raw, list) else []
         if not [d for d in domains if d.strip()]:
+            if cfg.get("actions"):
+                # Declared calls and no sites (Phase 9.3): the calls are all
+                # it sends, and the free-form tool isn't offered at all.
+                continue
             res.warnings.append(
                 GraphIssue(
                     code="http_no_allowed_sites",

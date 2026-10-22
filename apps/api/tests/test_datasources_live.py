@@ -28,6 +28,7 @@ from app.datasources import ConnectionInfo, DbError, get_mongo_adapter, get_sql_
 from app.datasources.mongodb import MongoBlocked
 from app.datasources.pool import close_all
 from app.datasources.sql_guard import Permissions, guard
+from tests.infra import unavailable
 
 pytestmark = pytest.mark.integration
 
@@ -67,7 +68,7 @@ async def _skip_unless_reachable(info: ConnectionInfo) -> None:
     try:
         await adapter.test(info)
     except DbError as exc:  # pragma: no cover - environment-dependent
-        pytest.skip(f"{info.engine} not reachable: {exc}")
+        unavailable(info.engine, f"{info.engine} not reachable: {exc}")
 
 
 # ── postgres ─────────────────────────────────────────────────

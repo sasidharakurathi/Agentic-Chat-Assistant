@@ -153,3 +153,7 @@ With `just` installed: `just setup`, `just up`, `just migrate`, `just seed`, `ju
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). Version control is managed by the core team;
 this repo ships no git automation.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).

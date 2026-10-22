@@ -14,6 +14,7 @@ from app.schemas.assistant_config import (
     AssistantConfig,
     DatabaseRef,
     Guardrails,
+    HttpAction,
     HttpRequestTool,
     McpServerRef,
     MemoryConfig,
@@ -181,6 +182,7 @@ def compile_graph(graph: Graph) -> AssistantConfig:
                 connection_id=n.data.connection_id,
                 nl2sql=n.data.nl2sql,
                 expose_write=n.data.expose_write,
+                actions=[a.model_copy(deep=True) for a in n.data.actions],
                 **scope(n.id) or {},
             )
             for n in graph.nodes
@@ -204,10 +206,16 @@ def compile_graph(graph: Graph) -> AssistantConfig:
                 **who,
             )
         elif key == "http_request":
+            raw_actions = cfg.get("actions")
             tools.http_request = HttpRequestTool(
                 enabled=True,
                 allowed_domains=_as_str_list(cfg.get("allowed_domains")),
                 approval=n.data.approval,
+                # Declared calls (Phase 9.3), checked as the config is.
+                actions=[
+                    HttpAction.model_validate(a)
+                    for a in (raw_actions if isinstance(raw_actions, list) else [])
+                ],
                 **who,
             )
         elif key == "calculator":
@@ -248,6 +256,7 @@ def compile_graph(graph: Graph) -> AssistantConfig:
         memory=memory,
         approval_policy=agent_node.data.approval_policy.model_copy(deep=True),
         router=RouterConfig(enabled=bool(router_nodes)),
+        handoff=agent_node.data.handoff.model_copy(deep=True),
     )
 
 

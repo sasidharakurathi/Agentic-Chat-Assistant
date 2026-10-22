@@ -23,6 +23,7 @@ from httpx import AsyncClient
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from tests.infra import unavailable
 
 pytestmark = pytest.mark.anyio
 
@@ -212,7 +213,7 @@ async def pg() -> AsyncIterator[AsyncConnection]:
             )
     except Exception as exc:  # pragma: no cover - environment-dependent
         await engine.dispose()
-        pytest.skip(f"Postgres not reachable at {POSTGRES_URL}: {exc}")
+        unavailable("postgres", f"Postgres not reachable at {POSTGRES_URL}: {exc}")
     if not found:
         await engine.dispose()
         pytest.fail("the audit_log trigger is missing: run `alembic upgrade head`")
@@ -260,3 +261,61 @@ async def test_an_audit_row_cannot_be_changed_or_deleted(pg: AsyncConnection) ->
         await pg.execute(text("SELECT org_id, action FROM audit_log WHERE id = :id"), {"id": row})
     ).one()
     assert (left.org_id, left.action) == (None, "member.role_change")
+
+
+async def _audit_row(pg: AsyncConnection, **extra: Any) -> uuid.UUID:
+    row = uuid.uuid4()
+    await pg.execute(
+        text(
+            "INSERT INTO audit_log (id, action, meta, created_at, actor_label) "
+            "VALUES (:id, 'member.role_change', '{}', now(), :label)"
+        ),
+        {"id": row, "label": extra.get("label")},
+    )
+    return row
+
+
+async def _refused(pg: AsyncConnection, statement: str, row: uuid.UUID) -> None:
+    savepoint = await pg.begin_nested()
+    with pytest.raises(DBAPIError, match="cannot be changed"):
+        await pg.execute(text(statement), {"id": row})
+    await savepoint.rollback()
+
+
+@pytest.mark.integration
+async def test_a_row_is_sealed_once_and_then_nothing_changes(pg: AsyncConnection) -> None:
+    """Phase 7b.7's trigger: the seal is the one write, once."""
+    row = await _audit_row(pg, label="old@example.com")
+    # Before the seal, the label can still be filled in (the backfill).
+    await pg.execute(
+        text("UPDATE audit_log SET actor_label = 'who@example.com' WHERE id = :id"), {"id": row}
+    )
+    await pg.execute(
+        text("UPDATE audit_log SET seq = 999999999, prev_hash = :p, row_hash = :h WHERE id = :id"),
+        {"id": row, "p": "0" * 64, "h": "a" * 64},
+    )
+    for statement in (
+        "UPDATE audit_log SET row_hash = repeat('b', 64) WHERE id = :id",
+        "UPDATE audit_log SET seq = 1 WHERE id = :id",
+        "UPDATE audit_log SET prev_hash = repeat('c', 64) WHERE id = :id",
+        "UPDATE audit_log SET actor_label = 'someone@else.example' WHERE id = :id",
+        "UPDATE audit_log SET action = 'nothing.happened' WHERE id = :id",
+    ):
+        await _refused(pg, statement, row)
+
+
+@pytest.mark.integration
+async def test_one_sealer_at_a_time(pg: AsyncConnection) -> None:
+    """The advisory lock the worker's sealer takes: a second one is told no."""
+    from app.services import audit_chain
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    first = AsyncSession(bind=pg)
+    assert await audit_chain._locked(first)
+    other = create_async_engine(POSTGRES_URL)
+    try:
+        async with AsyncSession(other) as second:
+            assert not await audit_chain._locked(second)
+            await second.rollback()
+    finally:
+        await other.dispose()

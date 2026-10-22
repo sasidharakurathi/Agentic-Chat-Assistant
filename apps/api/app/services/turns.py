@@ -72,6 +72,14 @@ LOST = sse_frame(
 )
 
 
+#: Said to a watcher while the turn is quiet (Phase 8.6): an SSE comment,
+#: which pages ignore. A long tool call or a wait for an admin otherwise
+#: sends nothing for minutes, and VPN, NAT and mobile networks close a
+#: connection that idle. Yielded with no event id: there is nothing to
+#: resume from.
+KEEPALIVE = ": ping\n\n"
+
+
 class TurnInProgress(Exception):
     """A turn is already running in this conversation."""
 
@@ -170,8 +178,10 @@ class MemoryLog:
             # would otherwise wait for the next one.
             if position < len(turn.events) or turn.ended_at is not None:
                 continue
-            with contextlib.suppress(TimeoutError):
+            try:
                 await asyncio.wait_for(turn.changed.wait(), BLOCK_S)
+            except TimeoutError:
+                yield "", KEEPALIVE
 
 
 # ── in Redis ────────────────────────────────────────────────
@@ -261,6 +271,7 @@ class RedisLog:
                     ):
                         yield "lost", LOST
                         return
+                    yield "", KEEPALIVE
                     continue
                 for _key, entries in found:
                     for event_id, fields in entries:
@@ -345,9 +356,12 @@ async def live_anywhere(conversation_ids: list[uuid.UUID]) -> set[uuid.UUID] | N
 _tasks: set[asyncio.Task[None]] = set()
 
 
-async def start(conversation_id: uuid.UUID, text: str) -> str:
+async def start(
+    conversation_id: uuid.UUID, text: str, *, attachment_ids: list[uuid.UUID] | None = None
+) -> str:
     """Start a turn and return its id. It runs whether or not anyone
-    watches. Raises `TurnInProgress` if one is already running here."""
+    watches. Raises `TurnInProgress` if one is already running here.
+    `attachment_ids`: screenshots sent with the message (Phase 9.6)."""
     cid = str(conversation_id)
     turn_id = uuid.uuid4().hex
     turn_log = _primary()
@@ -363,13 +377,21 @@ async def start(conversation_id: uuid.UUID, text: str) -> str:
     if turn_log is _memory and _primary() is not _memory:
         _in_memory.add(turn_id)
 
-    task = asyncio.create_task(_drive(turn_log, cid, turn_id, text), name=f"turn:{turn_id}")
+    task = asyncio.create_task(
+        _drive(turn_log, cid, turn_id, text, list(attachment_ids or [])), name=f"turn:{turn_id}"
+    )
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
     return turn_id
 
 
-async def _drive(turn_log: TurnLog, cid: str, turn_id: str, text: str) -> None:
+async def _drive(
+    turn_log: TurnLog,
+    cid: str,
+    turn_id: str,
+    text: str,
+    attachment_ids: list[uuid.UUID] | None = None,
+) -> None:
     """Run one turn to its end, appending every event to its log."""
     failed_append = False
 
@@ -394,7 +416,12 @@ async def _drive(turn_log: TurnLog, cid: str, turn_id: str, text: str) -> None:
         async with (
             get_sessionmaker()() as session,
             contextlib.aclosing(
-                chat.run_message(session, conversation_id=uuid.UUID(cid), text=text)
+                chat.run_message(
+                    session,
+                    conversation_id=uuid.UUID(cid),
+                    text=text,
+                    attachment_ids=attachment_ids,
+                )
             ) as events,
         ):
             async for event in events:
@@ -431,7 +458,8 @@ async def follow(
     conversation_id: uuid.UUID | str, turn_id: str, after: str | None = None
 ) -> AsyncIterator[tuple[str, str]]:
     """Every event of the turn after `after` (all of them without it), then
-    whatever it produces next, until it ends. Yields (event id, frame)."""
+    whatever it produces next, until it ends. Yields (event id, frame); a
+    keep-alive while it is quiet has no id (`KEEPALIVE`)."""
     turn_log = _log_for(turn_id)
     async for item in turn_log.follow(str(conversation_id), turn_id, after):
         yield item
@@ -461,6 +489,7 @@ def running_here() -> int:
 
 
 __all__ = [
+    "KEEPALIVE",
     "KEEP_S",
     "LOST",
     "MemoryLog",

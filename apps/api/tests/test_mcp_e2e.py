@@ -28,7 +28,7 @@ from typing import Any
 import httpx
 import pytest
 from app.agent import driver as driver_mod
-from app.agent.approvals import ApprovalRequest, build_can_use_tool
+from app.agent.approvals import ApprovalRequest, RequestOutcome, build_can_use_tool
 from app.agent.caps_mcp import build_mcp_toolset
 from app.agent.driver import ClaudeSDKDriver
 from app.agent.events import ToolCallEvent, ToolResultEvent
@@ -157,9 +157,11 @@ async def test_an_mcp_tool_runs_through_the_real_sdk_client_with_approvals(
 
     asked: list[str] = []
 
-    async def requester(tool_name: str, _input: dict, _risk: str, _why: str, **_: Any) -> str:
+    async def requester(
+        tool_name: str, _input: dict, _risk: str, _why: str, **_: Any
+    ) -> RequestOutcome:
         asked.append(tool_name)
-        return "denied"
+        return RequestOutcome("refused", "declined")
 
     permissions: dict[str, str] = {}
     can_use_tool = build_can_use_tool(
@@ -209,7 +211,7 @@ async def test_an_mcp_tool_runs_through_the_real_sdk_client_with_approvals(
     # environment reached a person, who declined; it did not run.
     assert SEEN["environment_permission"]["behavior"] == "deny"
     assert asked == ["mcp__echo__environment"]
-    assert permissions == {"toolu_1": "auto", "toolu_2": "declined"}
+    assert permissions == {"toolu_1": "auto", "toolu_2": "refused"}
 
     calls = [e.name for e in events if isinstance(e, ToolCallEvent)]
     results = {e.id: e.status for e in events if isinstance(e, ToolResultEvent)}

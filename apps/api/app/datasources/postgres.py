@@ -121,6 +121,7 @@ class PostgresAdapter:
         max_rows: int,
         mutating: bool = False,
         returns_rows: bool = False,
+        asker_email: str | None = None,
     ) -> QueryResult:
         import time
 
@@ -142,6 +143,14 @@ class PostgresAdapter:
             # so the pooled connection goes back without it.
             async with acquire_postgres(info) as conn, conn.transaction():
                 await conn.execute(f"SET LOCAL statement_timeout = {int(timeout_ms)}")
+                if asker_email is not None:
+                    # For row-level security (Phase 9.3): a real bound
+                    # parameter, local to this transaction, so the pooled
+                    # connection goes back without it. The model can't
+                    # change it: the guard refuses SET and set_config.
+                    await conn.execute(
+                        "SELECT set_config('app.asker_email', $1, true)", asker_email
+                    )
                 if count_via_tag:
                     tag = await conn.execute(statement, timeout=client_timeout)
                     affected = _affected_from_tag(tag)
@@ -185,4 +194,50 @@ def _affected_from_tag(tag: str) -> int | None:
         return None
 
 
-__all__ = ["SYSTEM_SCHEMAS", "PostgresAdapter"]
+_ROLE_SQL = """
+SELECT rolname, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user
+"""
+
+_TABLES_SQL = """
+SELECT n.nspname AS schema, c.relname AS name, c.relrowsecurity AS rls,
+       c.relforcerowsecurity AS forced, pg_get_userbyid(c.relowner) = current_user AS owned
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+  AND has_table_privilege(c.oid, 'SELECT')
+ORDER BY 1, 2
+"""
+
+
+async def rls_report(info: ConnectionInfo) -> tuple[list[str], list[str]]:
+    """For a connection scoped to the asker (Phase 9.3): (problems that mean
+    nothing is filtered, tables shared with everyone). Row-level security
+    doesn't apply to a superuser, a role with BYPASSRLS, or a table's owner
+    unless the table forces it."""
+    problems: list[str] = []
+    shared: list[str] = []
+    try:
+        async with acquire_postgres(info) as conn:
+            role = await conn.fetchrow(_ROLE_SQL)
+            tables = await conn.fetch(_TABLES_SQL)
+    except Exception as exc:
+        raise DbError(str(exc)) from exc
+    if role is not None and (role["rolsuper"] or role["rolbypassrls"]):
+        problems.append(
+            f"The role {role['rolname']} bypasses row-level security, so every row is "
+            "returned to everyone. Use a role without SUPERUSER or BYPASSRLS."
+        )
+    for t in tables:
+        name = f"{t['schema']}.{t['name']}"
+        if t["owned"] and t["rls"] and not t["forced"]:
+            problems.append(
+                f"{name} belongs to this role, so its row-level security doesn't apply "
+                "unless the table has FORCE ROW LEVEL SECURITY, or another role owns it."
+            )
+        elif not t["rls"]:
+            shared.append(name)
+    return problems, shared
+
+
+__all__ = ["SYSTEM_SCHEMAS", "PostgresAdapter", "rls_report"]

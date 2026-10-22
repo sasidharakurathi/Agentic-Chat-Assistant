@@ -21,6 +21,8 @@ from app.security import ratelimit
 from app.security.ratelimit import Limit, _Memory
 from httpx import AsyncClient
 from redis.exceptions import ConnectionError as RedisConnectionError
+from tests.infra import unavailable
+from tests.versions import go_live
 
 from test_orgs import _register  # type: ignore[import-not-found]
 
@@ -130,14 +132,15 @@ async def test_sign_in_is_limited_per_address_and_per_account(
     other = {"email": "RL-Other@example.com", "password": "x" * 10}
     assert (await client.post("/api/v1/auth/login", json=other)).status_code == 401
 
-    limits(auth="1/60")
+    # Creating an account has its own limit since Phase 8.4 (`signup`).
+    limits(signup="1/60")
     ratelimit.memory.buckets.clear()
     body = {"email": "rl-new@example.com", "password": "supersecret", "name": "N"}
     assert (await client.post("/api/v1/auth/register", json=body)).status_code == 201
     again = {**body, "email": "rl-new2@example.com"}
     r = await client.post("/api/v1/auth/register", json=again)
     assert r.status_code == 429
-    assert r.json()["error"]["message"].startswith("Too many sign-in attempts from this address.")
+    assert r.json()["error"]["message"].startswith("Too many sign-ups from this address.")
 
 
 async def test_each_user_has_their_own_allowance(client: AsyncClient, limits: Any) -> None:
@@ -150,7 +153,9 @@ async def test_each_user_has_their_own_allowance(client: AsyncClient, limits: An
 
 
 async def _conversation(client: AsyncClient, headers: dict[str, str], aid: str) -> str:
+    # The approved version, which both people may chat with (Phase 7b.1).
     r = await client.post(f"/api/v1/assistants/{aid}/conversations", json={}, headers=headers)
+    assert r.status_code == 201, r.text
     return str(r.json()["id"])
 
 
@@ -176,6 +181,7 @@ async def test_chat_is_limited_per_person_and_per_org(client: AsyncClient, limit
     o = {**owner.headers, "X-Org-Id": org["id"]}
     m = {**member.headers, "X-Org-Id": org["id"]}
     aid = (await client.post("/api/v1/assistants", json={"name": "RL"}, headers=o)).json()["id"]
+    await go_live(client, aid, o)
     co, cm = await _conversation(client, o, aid), await _conversation(client, m, aid)
 
     limits(chat_user="1/60", chat_org="3/60")
@@ -248,7 +254,7 @@ async def real_redis(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
     try:
         await get_redis().ping()
     except Exception:
-        pytest.skip(f"Redis not reachable at {settings.redis_url}")
+        unavailable("redis", f"Redis not reachable at {settings.redis_url}")
     monkeypatch.setattr(ratelimit, "_use_redis", lambda: True)
     yield
     get_redis.cache_clear()

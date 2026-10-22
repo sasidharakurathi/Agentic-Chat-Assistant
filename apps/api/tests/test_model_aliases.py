@@ -32,6 +32,7 @@ from app.config import settings
 from app.schemas.assistant_config import AssistantConfig
 from httpx import AsyncClient
 from pydantic import ValidationError
+from tests.versions import go_live
 
 pytestmark = pytest.mark.anyio
 
@@ -205,7 +206,7 @@ async def test_the_preflight_names_versions_on_a_model_that_is_going(
     cfg["models"]["main"]["model"] = "claude-sonnet-5"
     put = await client.put(f"{API}/assistants/{aid}/draft-config", json=cfg, headers=org_headers)
     assert put.status_code == 200, put.text
-    await client.post(f"{API}/assistants/{aid}/versions", json={"note": "v1"}, headers=org_headers)
+    await go_live(client, aid, org_headers, "v1")
 
     assert await preflight._models_in_use() == "", "nothing deprecated: nothing to say"
     monkeypatch.setattr(models, "DEPRECATED_MODELS", {"claude-sonnet-5": "June 30, 2027"})
@@ -223,7 +224,7 @@ async def test_a_turn_records_the_model_it_ran_as_not_the_alias(
     aid = (await client.post(f"{API}/assistants", json={"name": "A"}, headers=org_headers)).json()[
         "id"
     ]
-    await client.post(f"{API}/assistants/{aid}/versions", json={"note": "v1"}, headers=org_headers)
+    await go_live(client, aid, org_headers, "v1")
     cid = (
         await client.post(f"{API}/assistants/{aid}/conversations", json={}, headers=org_headers)
     ).json()["id"]

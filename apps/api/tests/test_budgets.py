@@ -26,6 +26,7 @@ from app.services.budgets import BudgetStatus, Gate, narrower, period_bounds
 from httpx import AsyncClient
 from sqlalchemy import select
 from tests import claude_stub
+from tests.versions import go_live
 
 from test_orgs import _register  # type: ignore[import-not-found]
 
@@ -198,7 +199,7 @@ async def test_only_admins_change_budgets_and_every_change_is_logged(
     denied = await client.put(mine, json={"daily_usd": 5}, headers=m)
     assert denied.status_code == 403, "even on an assistant they created"
     seen = (await client.get(base, headers=m)).json()
-    assert seen == {"budgets": [], "can_edit": False}, "members can see, not change"
+    assert seen["budgets"] == [] and seen["can_edit"] is False, "members can see, not change"
 
     await _put(client, o, base, daily_usd=5, monthly_usd=50)
     await _put(client, o, base, daily_usd=7, monthly_usd=None)
@@ -230,7 +231,11 @@ async def test_only_admins_change_budgets_and_every_change_is_logged(
 
 
 async def _chat(client: AsyncClient, headers: dict[str, str], aid: str, text: str) -> list[Any]:
+    """A live turn: previews spend from the builder budget, not these
+    (Phase 9.7, `test_builder_budget.py`)."""
+    await go_live(client, aid, headers)
     r = await client.post(f"/api/v1/assistants/{aid}/conversations", json={}, headers=headers)
+    assert r.status_code == 201, r.text
     cid = r.json()["id"]
     events: list[Any] = []
     async with client.stream(

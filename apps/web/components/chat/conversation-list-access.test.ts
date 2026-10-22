@@ -45,17 +45,18 @@ function render(userId: string | null): string {
 }
 
 describe("the conversation list", () => {
-  it("offers Rename and Archive on the user's own conversation", () => {
+  it("offers Rename and Remove on the user's own conversation", () => {
     const html = render("me");
     expect(html).toContain('aria-label="Rename Mine"');
-    expect(html).toContain('aria-label="Archive Mine"');
+    // "Remove from your history" since Phase 8.8: honest about what it does.
+    expect(html).toContain('aria-label="Remove Mine from your history"');
   });
 
   it("offers neither on someone else's, even the open one, or on one whose starter is gone", () => {
     const html = render("me");
     for (const title of ["Asha&#x27;s", "Orphan"]) {
       expect(html).not.toContain(`aria-label="Rename ${title}"`);
-      expect(html).not.toContain(`aria-label="Archive ${title}"`);
+      expect(html).not.toContain(`aria-label="Remove ${title} from your history"`);
     }
     // Still listed, so it can be read.
     expect(html).toContain("Asha&#x27;s");

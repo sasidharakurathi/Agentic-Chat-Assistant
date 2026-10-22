@@ -24,6 +24,8 @@ from app.agent.caps import CAPS_SERVER_NAME
 from app.schemas.assistant_config import AssistantConfig, Scoped, SubagentRole
 
 WEB_SEARCH = "WebSearch"
+#: `agent.actions.TOOL_PREFIX`, repeated to keep this module import-light.
+ACTION_PREFIX = "act_"
 _KB = ("kb_search", "kb_list_sources")
 _DB = ("sql_list_schemas", "sql_introspect", "sql_query", "mongo_find", "mongo_aggregate")
 _TOOLS = ("http_request", "calculator", "datetime")
@@ -46,6 +48,15 @@ def _platform(
         return (db, "database") if db else None
     if name in _TOOLS:
         return getattr(config.tools, name), name.replace("_", " ")
+    if name.startswith(ACTION_PREFIX):
+        # A declared action (Phase 9.1) belongs to its database's node; an
+        # HTTP action (Phase 9.3), to the HTTP request tool's.
+        for db in config.databases:
+            if any(f"{ACTION_PREFIX}{a.name}" == name for a in db.actions):
+                return db, "database"
+        http = config.tools.http_request
+        if any(f"{ACTION_PREFIX}{a.name}" == name for a in http.actions):
+            return http, "http request"
     return None
 
 

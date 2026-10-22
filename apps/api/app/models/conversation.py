@@ -18,6 +18,16 @@ class ConversationStatus(enum.StrEnum):
     archived = "archived"
 
 
+class ConversationMode(enum.StrEnum):
+    """Who a conversation is for (Phase 7b.1)."""
+
+    #: Chat: answers from the approved version it started on.
+    live = "live"
+    #: A builder's or reviewing admin's test: answers from the draft, or
+    #: from the one version it was opened on. Never listed in Chat.
+    preview = "preview"
+
+
 class MessageRole(enum.StrEnum):
     user = "user"
     assistant = "assistant"
@@ -39,8 +49,16 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     assistant_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("assistants.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    # Null = ran against the assistant's draft (unpublished).
+    # The version this conversation answers from, fixed when it starts
+    # (Phase 7b.1): a newer approval reaches new conversations only. Null =
+    # a preview of the draft.
     assistant_version_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    mode: Mapped[ConversationMode] = mapped_column(
+        SAEnum(ConversationMode, name="conversation_mode", native_enum=False, length=20),
+        nullable=False,
+        default=ConversationMode.live,
+        server_default=ConversationMode.live.value,
+    )
     org_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -84,6 +102,10 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: is behind `summary_version`, the next turn starts a fresh session from
     #: the summary instead of resuming the long one.
     session_summary_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    #: The organisation's access epoch at its last turn (Phase 9.4).
+    access_epoch: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
 
@@ -156,6 +178,9 @@ class Run(UUIDPrimaryKeyMixin, Base):
     trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
     #: The published version that answered; None when the draft did.
     version_number: Mapped[int | None] = mapped_column(Integer)
+    #: The manifest of the version that answered (Phase 7b.1): exactly what
+    #: knowledge, connections and tools it was approved with.
+    manifest_hash: Mapped[str | None] = mapped_column(String(64))
     # Microseconds from Python, like Message: runs are listed newest-first,
     # and SQLite's CURRENT_TIMESTAMP (one-second resolution) left two turns in
     # the same second ordered by their random UUIDs.
@@ -208,3 +233,29 @@ class ToolCall(UUIDPrimaryKeyMixin, Base):
         server_default=func.now(),
         nullable=False,
     )
+
+
+class ConversationShare(UUIDPrimaryKeyMixin, Base):
+    """A read-only link to a conversation, inside the organisation (Phase
+    9.4). Only a hash of the token is kept. It opens for a member who may
+    use the assistant and read every source the conversation cites, while
+    the person who shared it is still a member; each opening is audited."""
+
+    __tablename__ = "conversation_shares"
+
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime(), server_default=func.now(), nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    last_opened_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    open_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")

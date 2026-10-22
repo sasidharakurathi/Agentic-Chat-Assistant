@@ -13,6 +13,10 @@
 #      APP_KEK against the restored credentials: if it is not the key the
 #      backup was made under, the API refuses to start and says so.
 #
+# Before replacing the database it saves the record of erasures (Phase
+# 8.10) to erasures-<when>.jsonl here, and at the end prints the command
+# that erases again what was erased after the backup was taken.
+#
 # The stack's datastores (postgres, minio) must be running. On a new
 # machine: fill in .env.production WITH THE ORIGINAL APP_KEK, then
 #   docker compose --env-file .env.production -f docker-compose.prod.yml up -d postgres redis minio
@@ -34,6 +38,16 @@ if [ "${RESTORE_CONFIRM:-}" != "$DB_NAME" ]; then
   printf '[backup] type the database name (%s) to go on: ' "$DB_NAME"
   read -r answer
   [ "$answer" = "$DB_NAME" ] || die "not confirmed; nothing was changed"
+fi
+
+# What was erased for good since the backup (Phase 8.10): the restore
+# would roll the record back with everything else.
+ERASURES="$(pwd)/erasures-$(date -u +%Y-%m-%dT%H-%M-%SZ).jsonl"
+if psql_in -d "$DB_NAME" -Atc "SELECT to_regclass('public.erasures')" 2>/dev/null | grep -q erasures; then
+  psql_in -d "$DB_NAME" -Atc "SELECT row_to_json(e) FROM erasures e ORDER BY created_at" > "$ERASURES"
+  say "saved the record of erasures to $ERASURES"
+else
+  : > "$ERASURES"
 fi
 
 if [ "${SKIP_SERVICES:-0}" != "1" ]; then
@@ -60,3 +74,9 @@ if [ "${SKIP_SERVICES:-0}" != "1" ]; then
   say "watch the preflight: $COMPOSE logs -f api"
 fi
 say "restored: $SRC"
+if [ -s "$ERASURES" ]; then
+  say "once the api is up, erase again what was erased after this backup:"
+  say "  $COMPOSE exec -T api python -m scripts.reapply_erasures --load - < $ERASURES"
+else
+  rm -f "$ERASURES"
+fi

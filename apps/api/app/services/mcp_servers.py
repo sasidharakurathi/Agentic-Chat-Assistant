@@ -42,7 +42,7 @@ def to_summary(server: McpServer) -> McpServerSummary:
 # ── sealed maps ──────────────────────────────────────────────
 
 
-async def _seal_map(
+async def seal_map(
     session: AsyncSession, *, org_id: uuid.UUID, values: dict[str, str], kind: SecretKind
 ) -> uuid.UUID | None:
     """One sealed row for the whole map; none at all for an empty one."""
@@ -61,7 +61,7 @@ async def _seal_map(
     return row.id
 
 
-async def _drop_secret(session: AsyncSession, secret_ref: uuid.UUID | None) -> None:
+async def drop_secret(session: AsyncSession, secret_ref: uuid.UUID | None) -> None:
     if secret_ref is None:
         return
     row = await session.get(Secret, secret_ref)
@@ -69,7 +69,7 @@ async def _drop_secret(session: AsyncSession, secret_ref: uuid.UUID | None) -> N
         await session.delete(row)
 
 
-async def _open_map(session: AsyncSession, secret_ref: uuid.UUID | None) -> dict[str, str]:
+async def open_map(session: AsyncSession, secret_ref: uuid.UUID | None) -> dict[str, str]:
     if secret_ref is None:
         return {}
     row = await session.get(Secret, secret_ref)
@@ -92,12 +92,12 @@ async def _open_map(session: AsyncSession, secret_ref: uuid.UUID | None) -> dict
 
 async def open_headers(session: AsyncSession, server: McpServer) -> dict[str, str]:
     """The decrypted headers, for the connection being opened right now."""
-    return await _open_map(session, server.headers_secret_ref)
+    return await open_map(session, server.headers_secret_ref)
 
 
 async def open_env(session: AsyncSession, server: McpServer) -> dict[str, str]:
     """The decrypted environment, for the process being started right now."""
-    return await _open_map(session, server.env_secret_ref)
+    return await open_map(session, server.env_secret_ref)
 
 
 # ── CRUD ─────────────────────────────────────────────────────
@@ -138,11 +138,11 @@ async def create(
         command=body.command,
         args=list(body.args),
         url=body.url,
-        headers_secret_ref=await _seal_map(
+        headers_secret_ref=await seal_map(
             session, org_id=assistant.org_id, values=body.headers, kind=SecretKind.mcp_headers
         ),
         header_names=sorted(body.headers),
-        env_secret_ref=await _seal_map(
+        env_secret_ref=await seal_map(
             session, org_id=assistant.org_id, values=body.env, kind=SecretKind.mcp_env
         ),
         env_keys=sorted(body.env),
@@ -267,18 +267,18 @@ async def update(
         server.sandbox = {**(server.sandbox or {}), **sandbox}
     if headers is not None:
         old = server.headers_secret_ref
-        server.headers_secret_ref = await _seal_map(
+        server.headers_secret_ref = await seal_map(
             session, org_id=server.org_id, values=headers, kind=SecretKind.mcp_headers
         )
         server.header_names = sorted(headers)
-        await _drop_secret(session, old)
+        await drop_secret(session, old)
     if env is not None:
         old = server.env_secret_ref
-        server.env_secret_ref = await _seal_map(
+        server.env_secret_ref = await seal_map(
             session, org_id=server.org_id, values=env, kind=SecretKind.mcp_env
         )
         server.env_keys = sorted(env)
-        await _drop_secret(session, old)
+        await drop_secret(session, old)
 
     if moved:
         server.tools = []
@@ -319,8 +319,8 @@ async def delete(
         meta={"name": server.name},
         ip=ip,
     )
-    await _drop_secret(session, server.headers_secret_ref)
-    await _drop_secret(session, server.env_secret_ref)
+    await drop_secret(session, server.headers_secret_ref)
+    await drop_secret(session, server.env_secret_ref)
     await session.delete(server)
     await session.commit()
 
@@ -328,11 +328,14 @@ async def delete(
 __all__ = [
     "create",
     "delete",
+    "drop_secret",
     "get",
     "list_for_assistant",
     "open_env",
     "open_headers",
+    "open_map",
     "page_for_assistant",
+    "seal_map",
     "to_summary",
     "update",
 ]

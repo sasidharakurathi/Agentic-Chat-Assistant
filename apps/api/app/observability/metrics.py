@@ -192,9 +192,15 @@ RETRIEVAL_DURATION = Histogram(
 )
 APPROVAL_WAIT = Histogram(
     "assistant_studio_approval_wait_seconds",
-    "How long a tool call waited for a person, by what they decided.",
+    "How long a request waited for a person, by what they decided.",
     ("decision",),
-    buckets=(1, 5, 15, 30, 60, 120, 300, 600),
+    # Requests wait for hours now (Phase 9.1), not minutes.
+    buckets=(5, 30, 60, 300, 900, 3600, 4 * 3600, 24 * 3600, 72 * 3600),
+)
+REQUESTS_RUN = Counter(
+    "assistant_studio_requests_run_total",
+    "Approved requests the executor ran (Phase 9.1), by how they ended.",
+    ("status",),
 )
 
 QUERY_CACHE = Counter(
@@ -203,7 +209,15 @@ QUERY_CACHE = Counter(
     ("result",),
 )
 
+TURNS_REJECTED = Counter(
+    "assistant_studio_turns_rejected_total",
+    "Turns turned away before they ran (Phase 8.9): busy, or a budget used up.",
+    ("reason",),
+)
+
 OBSERVED: tuple[Counter | Histogram, ...] = (
+    REQUESTS_RUN,
+    TURNS_REJECTED,
     QUERY_CACHE,
     HTTP_REQUESTS,
     HTTP_DURATION,
@@ -250,6 +264,7 @@ __all__ = [
     "HTTP_REQUESTS",
     "OBSERVED",
     "QUERY_CACHE",
+    "REQUESTS_RUN",
     "RETRIEVAL_DURATION",
     "STREAM_DURATION",
     "TOOL_DURATION",

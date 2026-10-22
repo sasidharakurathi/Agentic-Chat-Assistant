@@ -105,7 +105,11 @@ class MysqlAdapter:
         max_rows: int,
         mutating: bool = False,
         returns_rows: bool = False,
+        asker_email: str | None = None,
     ) -> QueryResult:
+        if asker_email is not None:
+            # Only Postgres can scope a statement to the asker (Phase 9.3).
+            raise DbError("MySQL connections can't be scoped to the person asking")
         import aiomysql
 
         started = time.perf_counter()

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import uuid
 from typing import Any
 
 from app.agent.caps import CapabilityTool
@@ -151,10 +152,14 @@ def render(result: FetchResult) -> str:
 
 
 def build_http_tool(
-    cfg: HttpRequestTool, *, limits: FetchLimits = DEFAULT_LIMITS
+    cfg: HttpRequestTool,
+    *,
+    limits: FetchLimits = DEFAULT_LIMITS,
+    org_id: uuid.UUID | None = None,
 ) -> CapabilityTool:
     """The tool for one assistant: it closes over that assistant's allowlist,
-    so a model cannot widen it by asking."""
+    so a model cannot widen it by asking. `org_id`: whose internal
+    destinations it may also reach (Phase 9.3), read at each call."""
     allowed = [d for d in (normalize_domain(d) for d in cfg.allowed_domains) if d]
 
     async def refuse(_args: dict[str, Any]) -> dict[str, Any]:
@@ -176,14 +181,23 @@ def build_http_tool(
             body = json.dumps(body)
         if body is not None and len(body) > MAX_REQUEST_BODY:
             return _err(f"error: request body is larger than {MAX_REQUEST_BODY:,} characters")
+        from app.services import destinations
+
         try:
             result = await safe_request(
                 method,
                 url,
-                headers={str(k): str(v) for k, v in headers.items()},
+                # Who is asking comes from the session, through a connection
+                # (Phase 9.3), never from the model (Phase 9.9).
+                headers={
+                    str(k): str(v)
+                    for k, v in headers.items()
+                    if not str(k).strip().lower().startswith("x-asker-")
+                },
                 body=body,
                 allowed_domains=allowed,
                 limits=limits,
+                internal=await destinations.for_org(org_id),
             )
         except SsrfBlocked as exc:
             log.info("http_request_blocked", reason=str(exc))

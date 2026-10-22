@@ -26,9 +26,10 @@ from app.config import settings
 from app.db.session import get_sessionmaker
 from app.models.approval import Approval, ApprovalStatus
 from app.models.conversation import Message, MessageRole, Run, RunStatus
-from app.services import turns
+from app.services import executor, turns
 from httpx import AsyncClient
 from sqlalchemy import select
+from tests.pending import decide
 
 from test_chat_approvals import (  # type: ignore[import-not-found]
     _assistant_with_db,
@@ -53,7 +54,9 @@ async def _conversation(
     if aid is None:
         a = (await client.post(f"{API}/assistants", json={"name": "Shop"}, headers=headers)).json()
         aid = a["id"]
-    conv = await client.post(f"{API}/assistants/{aid}/conversations", json={}, headers=headers)
+    conv = await client.post(
+        f"{API}/assistants/{aid}/conversations", json={"mode": "preview"}, headers=headers
+    )
     return str(conv.json()["id"])
 
 
@@ -125,7 +128,9 @@ async def test_sending_still_streams_the_whole_answer_with_event_ids(
     assert r.status_code == 200
     turn_id = r.headers["x-turn-id"]
     events = _events(r.text)
-    assert events[0]["type"] == "token" and events[-1]["type"] == "done"
+    # The message is kept first (Phase 8.6), then the answer.
+    assert [e["type"] for e in events[:2]] == ["accepted", "token"]
+    assert events[-1]["type"] == "done"
     # Every event carries an id, to watch again from where one left off.
     ids = _ids(r.text)
     assert len(ids) == len(events) and len(set(ids)) == len(ids)
@@ -149,7 +154,8 @@ async def test_a_page_finds_the_running_turn_and_watches_it_from_the_start(
     assert detail["turn_id"] == turn_id and detail["running"] is True
     listed = (
         await client.get(
-            f"{API}/assistants/{detail['assistant_id']}/conversations", headers=org_headers
+            f"{API}/assistants/{detail['assistant_id']}/conversations?mode=preview",
+            headers=org_headers,
         )
     ).json()["items"]
     assert [c["running"] for c in listed if c["id"] == cid] == [True]
@@ -160,7 +166,9 @@ async def test_a_page_finds_the_running_turn_and_watches_it_from_the_start(
     )
     assert watched.status_code == 200
     events = _events(watched.text)
-    assert events[0]["type"] == "token" and events[-1]["type"] == "done"
+    # The message is kept first (Phase 8.6), then the answer.
+    assert [e["type"] for e in events[:2]] == ["accepted", "token"]
+    assert events[-1]["type"] == "done"
     await _finish()
 
     assert (await client.get(f"{API}/conversations/{cid}/turn", headers=org_headers)).json() == {
@@ -168,7 +176,8 @@ async def test_a_page_finds_the_running_turn_and_watches_it_from_the_start(
     }
     listed = (
         await client.get(
-            f"{API}/assistants/{detail['assistant_id']}/conversations", headers=org_headers
+            f"{API}/assistants/{detail['assistant_id']}/conversations?mode=preview",
+            headers=org_headers,
         )
     ).json()["items"]
     assert [c["running"] for c in listed if c["id"] == cid] == [False]
@@ -247,32 +256,25 @@ async def test_stop_reaches_a_turn_nobody_is_watching(
     assert run.duration_ms < 2500
 
 
-async def test_an_approval_waits_for_its_decision_with_nobody_watching(
+async def test_a_request_is_stored_with_nobody_watching(
     client: AsyncClient,
     org_headers: dict[str, str],
     fake_sql: dict[str, Any],  # noqa: F811 - the fixture
 ) -> None:
+    """Since Phase 9.1 the turn doesn't wait for it: it ends, and the
+    request is there to be found and decided afterwards."""
     aid = await _assistant_with_db(client, org_headers)
     cid = await _conversation(client, org_headers, aid)
     turn_id = await turns.start(uuid.UUID(cid), "sql: DELETE FROM sessions WHERE expired")
-
-    # Nobody attached. The approval is there to be found and decided.
-    pending: list[dict[str, Any]] = []
-    for _ in range(100):
-        pending = (
-            await client.get(f"{API}/conversations/{cid}/approvals", headers=org_headers)
-        ).json()["items"]
-        if pending:
-            break
-        await asyncio.sleep(0.05)
-    assert len(pending) == 1 and fake_sql["ran"] == []
-    decided = await client.post(
-        f"{API}/approvals/{pending[0]['id']}:resolve",
-        json={"decision": "approved"},
-        headers=org_headers,
-    )
-    assert decided.status_code == 200
     await _finish()
+
+    pending = (
+        await client.get(f"{API}/conversations/{cid}/approvals", headers=org_headers)
+    ).json()["items"]
+    assert len(pending) == 1 and fake_sql["ran"] == []
+    decided = await decide(client, org_headers, pending[0]["id"], "approved")
+    assert decided.status_code == 200
+    await executor.drain()
     assert fake_sql["ran"] == ["DELETE FROM sessions WHERE expired"]
     # And whoever watches afterwards sees the whole turn, the card included.
     events = _events(
@@ -286,7 +288,7 @@ async def test_an_approval_waits_for_its_decision_with_nobody_watching(
     assert "approval_required" in kinds and kinds[-1] == "done"
     async with get_sessionmaker()() as s:
         (row,) = (await s.scalars(select(Approval))).all()
-    assert row.status is ApprovalStatus.approved
+    assert row.status is ApprovalStatus.succeeded
 
 
 # ── whose turn it is ─────────────────────────────────────────
@@ -395,5 +397,8 @@ def test_the_lost_message_is_an_ordinary_retryable_error() -> None:
         "code": "turn_lost",
         "message": event["message"],
         "retryable": True,
+        # Phase 8.6: for a wait, or a used-up limit; neither here.
+        "retry_after_s": None,
+        "resets_at": None,
     }
     assert turns.LOST.startswith("data: ")

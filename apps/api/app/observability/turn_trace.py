@@ -29,6 +29,7 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from app.config import settings
 from app.guardrails.pii import redact as redact_pii
 from app.logging import get_logger
 from app.models.conversation import RunStatus
@@ -53,6 +54,18 @@ def _text(value: Any, pii: bool = False) -> str:
     if pii:
         raw = redact_pii(raw)[0]
     return raw[:SPAN_TEXT_CHARS]
+
+
+#: In place of content when tracing carries metadata only (Phase 8.10).
+WITHHELD = "[not sent: TRACE_CONTENT=metadata]"
+
+
+def _content(value: Any, pii: bool = False) -> str:
+    """A message, answer or tool's input or output, for a span: only when
+    tracing may carry content (`settings.trace_full`). Otherwise a marker:
+    the trace keeps its ids, timings and costs, and no second copy of what
+    people wrote exists for erasure to miss."""
+    return _text(value, pii) if settings.trace_full else WITHHELD
 
 
 def _tracer() -> Any | None:
@@ -102,8 +115,8 @@ class TurnTrace:
             attributes: dict[str, Any] = {
                 "langfuse.trace.name": "chat turn",
                 "langfuse.session.id": str(conversation_id),
-                "langfuse.trace.input": _text(prompt, pii_redaction),
-                "langfuse.observation.input": _text(prompt, pii_redaction),
+                "langfuse.trace.input": _content(prompt, pii_redaction),
+                "langfuse.observation.input": _content(prompt, pii_redaction),
                 "langfuse.trace.metadata.assistant_id": str(assistant_id),
                 "langfuse.trace.metadata.org_id": str(org_id),
                 "assistant_studio.conversation_id": str(conversation_id),
@@ -166,7 +179,7 @@ class TurnTrace:
         assert turn_span is not None and tracer is not None
         parent = trace.set_span_in_context(turn_span)
         end_ns = time.time_ns()
-        answer = _text(outcome.text.strip(), self._pii)
+        answer = _content(outcome.text.strip(), self._pii)
 
         generation = tracer.start_span(
             "claude",
@@ -195,8 +208,8 @@ class TurnTrace:
                 context=parent,
                 start_time=start,
                 attributes={
-                    "langfuse.observation.input": _text(call.get("input") or {}, self._pii),
-                    "langfuse.observation.output": _text(call.get("output") or "", self._pii),
+                    "langfuse.observation.input": _content(call.get("input") or {}, self._pii),
+                    "langfuse.observation.output": _content(call.get("output") or "", self._pii),
                     "assistant_studio.tool.name": str(call.get("name", "")),
                     "assistant_studio.tool.status": str(call.get("status") or "pending"),
                 },
@@ -213,11 +226,13 @@ class TurnTrace:
             level = "ERROR" if outcome.status == RunStatus.error else "WARNING"
             turn_span.set_attribute("langfuse.observation.level", level)
             turn_span.set_attribute(
-                "langfuse.observation.status_message", _text(outcome.error or "", self._pii)
+                "langfuse.observation.status_message", _content(outcome.error or "", self._pii)
             )
         if outcome.status == RunStatus.error:
             turn_span.set_status(
-                Status(StatusCode.ERROR, _text(outcome.error, self._pii) if outcome.error else None)
+                Status(
+                    StatusCode.ERROR, _content(outcome.error, self._pii) if outcome.error else None
+                )
             )
         turn_span.end(end_time=end_ns)
         self._span = None

@@ -139,7 +139,9 @@ async def test_chat_and_rag_tables_are_scoped_too(client: AsyncClient) -> None:
     alice, org_a, aid_a, bob, org_b, aid_b = await _two_orgs(client)
     for actor, org, aid in ((alice, org_a, aid_a), (bob, org_b, aid_b)):
         h = {**actor.headers, "X-Org-Id": org}
-        conv = await client.post(f"/api/v1/assistants/{aid}/conversations", json={}, headers=h)
+        conv = await client.post(
+            f"/api/v1/assistants/{aid}/conversations", json={"mode": "preview"}, headers=h
+        )
         assert conv.status_code == 201
     async with get_sessionmaker()() as s:
         bind_org(s, uuid.UUID(org_a))

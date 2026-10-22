@@ -82,6 +82,8 @@ async def test_a_disconnect_gives_the_slot_back(
     a, b = await _setup(client, org_headers, monkeypatch, gate)
     async with get_sessionmaker()() as session:
         stream = chat_svc.run_message(session, conversation_id=a, text="x")
+        # The message is kept first (`accepted`, Phase 8.6), then the turn.
+        assert (await stream.__anext__()).type == "accepted"
         waiting = asyncio.create_task(stream.__anext__())
         await asyncio.wait_for(gate.started.wait(), 5)
         waiting.cancel()  # what a dropped SSE connection does to the turn

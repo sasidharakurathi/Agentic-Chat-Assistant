@@ -92,7 +92,9 @@ async def _populated(client: AsyncClient, headers: dict[str, str]) -> dict[str, 
     )
     conv = uuid.UUID(
         (
-            await client.post(f"/api/v1/assistants/{aid}/conversations", json={}, headers=headers)
+            await client.post(
+                f"/api/v1/assistants/{aid}/conversations", json={"mode": "preview"}, headers=headers
+            )
         ).json()["id"]
     )
     async with get_sessionmaker()() as session:

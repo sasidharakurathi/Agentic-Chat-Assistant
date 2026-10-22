@@ -26,7 +26,9 @@ async def _new_conversation(
     client: AsyncClient, org_headers: dict[str, str], assistant_id: str
 ) -> str:
     r = await client.post(
-        f"/api/v1/assistants/{assistant_id}/conversations", json={}, headers=org_headers
+        f"/api/v1/assistants/{assistant_id}/conversations",
+        json={"mode": "preview"},
+        headers=org_headers,
     )
     assert r.status_code == 201, r.text
     return r.json()["id"]

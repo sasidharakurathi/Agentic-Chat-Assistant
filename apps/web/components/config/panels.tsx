@@ -1,5 +1,6 @@
 "use client";
 
+import { ActionsEditor } from "@/components/config/ActionsEditor";
 import { cloneElement, isValidElement, useId, type ReactElement, type ReactNode } from "react";
 
 import { Alert } from "@/components/ui/alert";
@@ -10,7 +11,7 @@ import { SectionHeading } from "@/components/ui/section-heading";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import type { AssistantConfig, DbPermissions, EffortLevel } from "@/lib/api";
+import type { AssistantConfig, DbPermissions, DeclaredAction, EffortLevel } from "@/lib/api";
 import { useOfflineMode } from "@/lib/instance";
 import { carryShared, modelName, pickModel, selectedModel, setTurns } from "@/lib/subagent-models";
 import { cn } from "@/lib/utils";
@@ -787,9 +788,12 @@ export function RouterPanel({
 export function DatabasePanel({
   data,
   connections,
+  assistantId,
   onChange,
 }: {
   data: Data;
+  /** For checking a declared action before it goes on the canvas (9.1). */
+  assistantId?: string;
   connections: {
     id: string;
     name: string;
@@ -849,10 +853,19 @@ export function DatabasePanel({
               ? exposed
                 ? "This connection is read-only, so these changes can never run. Publishing is blocked until you switch this off, or allow writes on the connection in the Databases tab."
                 : "This connection is read-only. Allow writes on the connection in the Databases tab first."
-              : "Each change still needs a person's approval in chat, with the exact statement shown."
+              : "Each change waits for an approver, with the exact statement shown."
           }
         />
       </div>
+      {assistantId && (
+        <ActionsEditor
+          assistantId={assistantId}
+          connectionId={current}
+          actions={(data.actions as DeclaredAction[] | undefined) ?? []}
+          canWrite={Boolean(conn?.write)}
+          onChange={(actions) => onChange({ actions })}
+        />
+      )}
     </Panel>
   );
 }

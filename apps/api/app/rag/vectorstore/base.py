@@ -56,9 +56,11 @@ class VectorStore(Protocol):
         embedding: list[float],
         top_k: int,
         source_ids: list[uuid.UUID] | None = None,
+        document_ids: list[uuid.UUID] | None = None,
     ) -> list[ScoredChunk]:
         """Dense kNN search (cosine distance) scoped to one assistant's chunks,
-        optionally narrowed to specific data sources."""
+        optionally narrowed to specific data sources, and to specific
+        documents (the copies a version was approved with, Phase 7b.1)."""
         ...
 
     async def query_sparse(
@@ -69,6 +71,7 @@ class VectorStore(Protocol):
         query_text: str,
         top_k: int,
         source_ids: list[uuid.UUID] | None = None,
+        document_ids: list[uuid.UUID] | None = None,
     ) -> list[ScoredChunk]:
         """Full-text search (Postgres ``tsvector``/``websearch_to_tsquery``) —
         the sparse half of hybrid retrieval. Only returns chunks that

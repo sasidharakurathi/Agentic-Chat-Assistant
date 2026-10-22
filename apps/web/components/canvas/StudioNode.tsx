@@ -6,8 +6,10 @@ import { memo } from "react";
 import { useCanvasView } from "@/components/canvas/canvas-view";
 import type { StationData } from "@/components/canvas/graph-sync";
 import { plural, problemSummary, stationDetail, stationName } from "@/components/canvas/station";
+import { useTrafficView } from "@/components/canvas/traffic-context";
 import { Lamp } from "@/components/ui/lamp";
 import { LineBullet, nodeFamily } from "@/components/ui/line-bullet";
+import { trafficChips } from "@/lib/analytics";
 import { formatMs } from "@/lib/run-trace";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +27,15 @@ const DIFF = {
     plate: "border-destructive border-dashed",
   },
   changed: { word: "Changed", tag: "bg-warning text-warning-foreground", plate: "border-warning" },
+} as const;
+
+/** Traffic counts on a station's bottom edge (Phase 10.2): calls on a
+ *  plain plate, errors in the destructive colour, approvals in the
+ *  warning colour. The word carries the meaning; the colour repeats it. */
+const CHIP = {
+  plain: "border-border bg-card text-foreground border",
+  destructive: "bg-destructive text-destructive-foreground",
+  warning: "bg-warning text-warning-foreground",
 } as const;
 
 /** A station on the canvas (docs/DESIGN.md section 6). A 52px plate, so
@@ -45,6 +56,8 @@ export const StudioNode = memo(function StudioNode({
 }: NodeProps<Node<StationData>>) {
   const { node, issues, sourceLabel, trace, stop, off = false, time, diff, diffCount } = data;
   const { keyFocus } = useCanvasView();
+  const traffic = useTrafficView();
+  const chips = traffic ? trafficChips(node.type, traffic.nodes[node.id]) : [];
   const showDetail = useStore((s) => s.transform[2] >= DETAIL_ZOOM);
   const t = node.type;
   const errors = issues?.errors ?? [];
@@ -153,6 +166,28 @@ export const StudioNode = memo(function StudioNode({
           label={problemSummary(errors.length, warnings.length)}
           className="absolute -top-2.5 -right-2.5"
         />
+      )}
+
+      {chips.length > 0 && (
+        <span
+          className={cn(
+            "pointer-events-none absolute -bottom-2.5 flex gap-1",
+            // Clear of the Agent's bottom input, where capability lines join.
+            agent ? "left-[calc(50%+12px)]" : "left-2",
+          )}
+        >
+          {chips.map((c) => (
+            <span
+              key={c.tone}
+              className={cn(
+                "text-small num rounded-sm px-1.5 leading-4 font-medium whitespace-nowrap",
+                CHIP[c.tone],
+              )}
+            >
+              {c.text}
+            </span>
+          ))}
+        </span>
       )}
 
       {t !== "output" && (

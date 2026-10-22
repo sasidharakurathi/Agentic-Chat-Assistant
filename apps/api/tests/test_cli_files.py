@@ -26,6 +26,7 @@ from app.models.conversation import Conversation
 from app.schemas.assistant_config import AssistantConfig
 from app.services import chat, conversation_memory
 from httpx import AsyncClient
+from tests.versions import PREVIEW, go_live
 
 pytestmark = pytest.mark.anyio
 
@@ -114,7 +115,7 @@ async def test_a_turn_after_a_lost_transcript_replays_the_stored_messages(
     aid = (await client.post(f"{API}/assistants", json={"name": "A"}, headers=org_headers)).json()[
         "id"
     ]
-    await client.post(f"{API}/assistants/{aid}/versions", json={"note": "v1"}, headers=org_headers)
+    await go_live(client, aid, org_headers, "v1")
     cid = (
         await client.post(f"{API}/assistants/{aid}/conversations", json={}, headers=org_headers)
     ).json()["id"]
@@ -161,7 +162,9 @@ async def test_archiving_a_conversation_removes_its_cli_files(
         "id"
     ]
     cid = (
-        await client.post(f"{API}/assistants/{aid}/conversations", json={}, headers=org_headers)
+        await client.post(
+            f"{API}/assistants/{aid}/conversations", json=PREVIEW, headers=org_headers
+        )
     ).json()["id"]
     t = _transcript(uuid.UUID(cid), "s1")
     scratch = t.parents[3] / "scratch" / cid
@@ -177,7 +180,9 @@ async def test_deleting_an_assistant_removes_its_conversations_cli_files(
         "id"
     ]
     cid = (
-        await client.post(f"{API}/assistants/{aid}/conversations", json={}, headers=org_headers)
+        await client.post(
+            f"{API}/assistants/{aid}/conversations", json=PREVIEW, headers=org_headers
+        )
     ).json()["id"]
     t = _transcript(uuid.UUID(cid), "s1")
     assert (await client.delete(f"{API}/assistants/{aid}", headers=org_headers)).is_success
@@ -217,7 +222,9 @@ async def test_the_worker_sweep_clears_archived_and_deleted_conversations(
     ]
 
     async def conversation() -> uuid.UUID:
-        r = await client.post(f"{API}/assistants/{aid}/conversations", json={}, headers=org_headers)
+        r = await client.post(
+            f"{API}/assistants/{aid}/conversations", json=PREVIEW, headers=org_headers
+        )
         return uuid.UUID(r.json()["id"])
 
     live, archived = await conversation(), await conversation()

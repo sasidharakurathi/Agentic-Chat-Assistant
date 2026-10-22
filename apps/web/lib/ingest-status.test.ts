@@ -11,6 +11,7 @@ const report = {
   reused_context: 40,
   context_failed: 0,
   context_skipped: null,
+  sensitive: null,
   cost_usd: 0.0012,
 };
 

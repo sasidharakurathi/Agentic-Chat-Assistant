@@ -9,8 +9,9 @@ export type ToolCallView = {
   output?: string;
   parent_id?: string | null;
   subagent_text?: string;
-  /** How it was permitted (task 4.7): auto, approved, declined, expired,
-   *  interrupted or refused. Absent for calls that never ask. */
+  /** How it was permitted (task 4.7): auto, refused, queued (Phase 9.1),
+   *  unattended, or, before Phase 9.1, approved, declined, expired or
+   *  interrupted. Absent for calls that never ask. */
   permission?: string | null;
   /** How long the call took, when known: saved calls carry it, live ones
    *  are timed in the browser from call to result. */
@@ -24,6 +25,9 @@ const PERMISSION_TEXT: Record<string, string> = {
   expired: "Declined: nobody answered in time",
   interrupted: "Stopped before anyone answered",
   refused: "Not allowed by this assistant's rules",
+  // Phase 9.1: stored as a request, decided and run afterwards.
+  queued: "Saved as a request: it runs once someone decides",
+  unattended: "Declined: nobody to ask in a test run",
 };
 
 /** The audit line a tool card shows, or null. */

@@ -57,6 +57,15 @@ export function formatDate(iso: string, now: Date = new Date()): string {
   });
 }
 
+/** "12 Sep, 14:05", with the year when it is not this year: when a
+ *  request was asked, decided or run (Phase 9.2). */
+export function formatDateTime(iso: string, now: Date = new Date()): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const time = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  return `${formatDate(iso, now)}, ${time}`;
+}
+
 /** An error in the order the design asks for: what failed, why (the
  *  server's own message, or that it could not be reached), then what to
  *  do. `reason` is the ApiError message, or null for a network failure. */

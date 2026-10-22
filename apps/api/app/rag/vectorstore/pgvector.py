@@ -100,6 +100,7 @@ class PgVectorStore:
         embedding: list[float],
         top_k: int,
         source_ids: list[uuid.UUID] | None = None,
+        document_ids: list[uuid.UUID] | None = None,
     ) -> list[ScoredChunk]:
         distance = Chunk.embedding.cosine_distance(embedding)
         stmt = (
@@ -108,6 +109,8 @@ class PgVectorStore:
             .order_by(distance)
             .limit(top_k)
         )
+        if document_ids is not None:
+            stmt = stmt.where(Chunk.document_id.in_(document_ids))
         if source_ids:
             stmt = stmt.join(Document, Document.id == Chunk.document_id).where(
                 Document.data_source_id.in_(source_ids)
@@ -138,6 +141,7 @@ class PgVectorStore:
         query_text: str,
         top_k: int,
         source_ids: list[uuid.UUID] | None = None,
+        document_ids: list[uuid.UUID] | None = None,
     ) -> list[ScoredChunk]:
         tsquery = func.websearch_to_tsquery("english", query_text)
         rank = func.ts_rank_cd(Chunk.tsv, tsquery)
@@ -147,6 +151,8 @@ class PgVectorStore:
             .order_by(rank.desc())
             .limit(top_k)
         )
+        if document_ids is not None:
+            stmt = stmt.where(Chunk.document_id.in_(document_ids))
         if source_ids:
             stmt = stmt.join(Document, Document.id == Chunk.document_id).where(
                 Document.data_source_id.in_(source_ids)

@@ -26,7 +26,16 @@ export function loadFailure(err: unknown): LoadFailure {
  *  for something in another org, on purpose, so as not to confirm it
  *  exists. The page says the same, rather than letting the rejection escape
  *  (which Next shows as a crash overlay in development). */
-export function LoadFailed({ failure, what }: { failure: LoadFailure; what: string }) {
+export function LoadFailed({
+  failure,
+  what,
+  back = { href: "/assistants", label: "Back to assistants" },
+}: {
+  failure: LoadFailure;
+  what: string;
+  /** Where to go instead: Chat, for an employee (Phase 8.6). */
+  back?: { href: string; label: string };
+}) {
   return (
     <div className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6 md:px-8">
       <PageHeader
@@ -39,8 +48,8 @@ export function LoadFailed({ failure, what }: { failure: LoadFailure; what: stri
               : `${sentence(failure.message)} Reload the page, and if it keeps happening, try again later.`
         }
       />
-      <Link href="/assistants" className={buttonVariants({ variant: "outline" })}>
-        Back to assistants
+      <Link href={back.href} className={buttonVariants({ variant: "outline" })}>
+        {back.label}
       </Link>
     </div>
   );

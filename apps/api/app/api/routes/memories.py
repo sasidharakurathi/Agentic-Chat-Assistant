@@ -15,10 +15,11 @@ from fastapi import APIRouter, Query
 from sqlalchemy import delete, select
 
 from app.agent.caps_memory import normalize_path, owner_key
-from app.api.deps import AssistantContext, AssistantCtx, SessionDep
+from app.api.deps import AssistantContext, ChatAssistantCtx, SessionDep
 from app.api.errors import BadRequest, Forbidden
 from app.models.memory import MemoryFile
 from app.schemas.memory import MemoryCleared, MemoryFileOut
+from app.services import audit
 
 router = APIRouter(tags=["memory"])
 
@@ -43,7 +44,7 @@ def _owner(ctx: AssistantContext, external_user_ref: str | None) -> str:
 
 @router.get("/assistants/{assistant_id}/memories", response_model=list[MemoryFileOut])
 async def list_memories(
-    ctx: AssistantCtx, session: SessionDep, external_user_ref: ExternalRef = None
+    ctx: ChatAssistantCtx, session: SessionDep, external_user_ref: ExternalRef = None
 ) -> list[MemoryFileOut]:
     rows = await session.scalars(
         select(MemoryFile)
@@ -58,7 +59,7 @@ async def list_memories(
 
 @router.delete("/assistants/{assistant_id}/memories", response_model=MemoryCleared)
 async def clear_memories(
-    ctx: AssistantCtx,
+    ctx: ChatAssistantCtx,
     session: SessionDep,
     external_user_ref: ExternalRef = None,
     path: Annotated[str | None, Query(max_length=255)] = None,
@@ -74,8 +75,23 @@ async def clear_memories(
         except ValueError as exc:
             raise BadRequest(str(exc), code="invalid_memory_path") from None
     result = await session.execute(stmt)
+    deleted = int(result.rowcount or 0)  # type: ignore[attr-defined]
+    await audit.record(
+        session,
+        action="memory.clear",
+        org_id=ctx.assistant.org_id,
+        actor_user_id=ctx.membership.user_id,
+        target_type="assistant",
+        target_id=ctx.assistant.id,
+        # Which memory, by kind; never what it held.
+        meta={
+            "end_user": external_user_ref is not None,
+            "one_file": path is not None,
+            "deleted": deleted,
+        },
+    )
     await session.commit()
-    return MemoryCleared(deleted=int(result.rowcount or 0))  # type: ignore[attr-defined]
+    return MemoryCleared(deleted=deleted)
 
 
 __all__ = ["router"]

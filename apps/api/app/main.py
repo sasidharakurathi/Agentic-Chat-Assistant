@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.agent import approval_registry, interrupts
+from app.agent import interrupts
 from app.api.errors import register_exception_handlers
 from app.api.middleware import RequestContextMiddleware
 from app.api.ratelimit import RateLimitMiddleware
@@ -30,18 +30,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         env=settings.app_env,
         database=settings.database_url.rsplit("@", 1)[-1],
     )
-    # The cross-worker halves of approvals and interrupts: a decision or a
-    # "stop" that lands on a different worker from the turn it is for. The
-    # approvals listener existed from task 3.8 but was never started, so that
-    # fallback had never actually run.
-    await approval_registry.start_listener()
+    # The cross-worker half of interrupts: a "stop" that lands on a
+    # different worker from the turn it is for. (Approvals had one too, until
+    # Phase 9.1: no turn waits for a decision any more.)
     await interrupts.start_listener()
     yield
     # Turns running on this process (QOS-01) are stopped properly, each
     # recorded as aborted, rather than dropped with the process.
     await turns.shutdown()
     await interrupts.stop_listener()
-    await approval_registry.stop_listener()
+    # Requests this process was running in development (`ACTION_EXECUTOR=
+    # inline`) finish first; in production they run on the worker.
+    from app.services import executor
+
+    await executor.drain()
     # Close pooled connections to tenant databases. `close_all` was defined
     # for this and never called, so a shutdown just dropped live sessions on
     # the tenants' servers for them to time out.
@@ -72,7 +74,9 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
         # Retry-After: so the web app can read how long a 429 asks it to wait.
-        expose_headers=["x-request-id", "retry-after"],
+        # X-Turn-Id: the turn to watch again after a dropped stream (8.6).
+        # Content-Disposition: the name an export is saved under (10.5).
+        expose_headers=["x-request-id", "retry-after", "x-turn-id", "content-disposition"],
     )
 
     register_exception_handlers(app)

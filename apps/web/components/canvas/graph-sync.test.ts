@@ -223,8 +223,8 @@ describe("station words", () => {
     expect(problemSummary(1, 0)).toBe("1 problem");
     expect(problemSummary(0, 1)).toBe("1 thing to check");
     expect(problemSummary(0, 3)).toBe("3 things to check");
-    expect(publishBlockedReason(2)).toBe("Fix 2 problems to publish");
-    expect(publishBlockedReason(1)).toBe("Fix 1 problem to publish");
+    expect(publishBlockedReason(2)).toBe("Fix 2 problems to submit");
+    expect(publishBlockedReason(1)).toBe("Fix 1 problem to submit");
   });
 });
 

@@ -30,6 +30,8 @@ class SecretKind(enum.StrEnum):
     mcp_headers = "mcp_headers"
     #: Environment variables for a stdio MCP server, sealed as one JSON object.
     mcp_env = "mcp_env"
+    #: Headers an HTTP connection sends (Phase 9.3), sealed as one JSON object.
+    http_headers = "http_headers"
     api_key = "api_key"
 
 

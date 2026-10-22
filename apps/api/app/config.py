@@ -48,6 +48,48 @@ class Settings(BaseSettings):
     #: their address. Every account can use the model key, so an
     #: internet-facing server wants `invite`.
     registration: Literal["open", "invite"] = "open"
+    #: One company organisation, or many (Phase 7b.8). `single`, for an
+    #: internal install: the first account creates the organisation, nobody
+    #: creates another, and sign-up is by invite whatever `registration`
+    #: says. `multi`: anyone signed in may create one, and an uninvited
+    #: sign-up gets a personal one.
+    org_mode: Literal["single", "multi"] = "multi"
+    #: How the proxy gets its certificate, and the address it listens on
+    #: (Phase 8.2, deploy/proxy/Caddyfile). The proxy acts on them; the API
+    #: reads them only for the preflight's hosting review.
+    tls_mode: Literal["public", "local", "cloudflare", "acmedns"] = "public"
+    bind_ip: str = ""
+    #: Google sign-in (Phase 8.3): an OAuth client of the company's Google
+    #: Cloud project (consent screen type Internal). Both empty: off.
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    #: The Google Workspace domain whose accounts may sign in, checked on
+    #: Google's `hd` claim. Empty: any Google account, but only through an
+    #: invite or a link made while signed in; auto-join needs it.
+    google_allowed_domain: str = ""
+    #: Where Google sends the browser back. Empty: APP_BASE_URL plus
+    #: /api/v1/auth/google/callback (the proxy's one origin).
+    google_redirect_uri: str = ""
+    #: The owner and admins act as admins only in a session that passed a
+    #: second factor (Phase 8.4): an authenticator code, or a Google sign-in
+    #: limited to GOOGLE_ALLOWED_DOMAIN. Without one they act as builders
+    #: until they set one up. On in the production compose; off in
+    #: development and tests.
+    require_admin_2fa: bool = False
+    #: Chat waits for the privacy notice to be accepted before someone's
+    #: first message in a live conversation (Phase 8.7). Off only in the
+    #: test suite, whose other tests chat without it; preflight warns if it
+    #: is off in production.
+    privacy_notice_required: bool = True
+    #: Office and VPN address ranges (comma-separated CIDRs) whose per-address
+    #: limits are much higher (Phase 8.4): everyone behind one office or VPN
+    #: address must not share one small bucket. Per-person limits still apply.
+    trusted_internal_nets: str = ""
+    #: How long an invite link stays open (Phase 7b.4).
+    invite_ttl_days: int = Field(default=7, ge=1, le=60)
+    #: How long a password-reset link works, and an address-check link (7b.6).
+    password_reset_ttl_minutes: int = Field(default=60, ge=5, le=1440)
+    verify_email_ttl_hours: int = Field(default=48, ge=1, le=336)
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     log_level: str = "INFO"
@@ -145,7 +187,15 @@ class Settings(BaseSettings):
     #: Times the platform restarts a turn whose runtime failed to start or
     #: died before saying anything (`agent/errors.PROCESS_LEVEL`).
     agent_turn_retries: int = 1
-    approval_timeout_s: int = 300
+    #: The server's own networks, as CIDRs separated by commas (Phase 9.3):
+    #: no internal destination may reach into them. Production pins the
+    #: compose networks and lists them here.
+    platform_networks: str = ""
+    #: Where an approved request runs (Phase 9.1): `queue` hands it to the
+    #: mail worker's queue (production: it survives an API restart, and
+    #: runs once by its job id); `inline` runs it in the API process, as
+    #: development and the tests do. Unset: `queue` in production.
+    action_executor: Literal["queue", "inline"] | None = None
     #: How old a cached database schema may get before the agent's next
     #: introspection refreshes it (plan 6.2: "auto-refresh TTL configurable").
     schema_cache_ttl_s: int = 86_400
@@ -191,14 +241,33 @@ class Settings(BaseSettings):
     rate_limit_refresh: str = "10/60"
     rate_limit_refresh_ip: str = "600/60"
     rate_limit_login: str = "10/300"
+    #: Signing in to one account, from anywhere (Phase 8.4): the person's
+    #: own limit, so an office address isn't what runs out.
+    rate_limit_login_account: str = "30/300"
+    #: Sign-up and Google sign-in, per address: their own bucket, so a
+    #: Monday wave of new people doesn't use up everyone's sign-ins.
+    rate_limit_signup: str = "30/60"
+    #: Second-factor codes, per account: six digits must not be guessable.
+    rate_limit_two_factor: str = "5/300"
+    #: From TRUSTED_INTERNAL_NETS, the per-address ceilings instead.
+    rate_limit_auth_internal: str = "600/60"
+    rate_limit_ip_internal: str = "6000/60"
     #: Sending a chat message: per user, and per org across its members.
     rate_limit_chat_user: str = "30/60"
+    #: An Employee's own (Phase 8.9): lower, since a script or a loop in
+    #: Chat would otherwise run up the organisation's spend.
+    rate_limit_chat_employee: str = "10/60"
     rate_limit_chat_org: str = "300/60"
     #: The AI helpers (writing a prompt, recommending a pipeline), per user.
     rate_limit_assist: str = "10/60"
     #: Work that reaches other systems or starts jobs (uploads, reindexing,
     #: connection tests, MCP checks), per user.
     rate_limit_heavy: str = "30/60"
+    #: Test emails an admin sends themselves (Phase 7b.5).
+    rate_limit_mail_test: str = "3/3600"
+    #: Reset and address-check emails, per address and per IP (Phase 7b.6).
+    rate_limit_account_mail: str = "5/3600"
+    rate_limit_account_mail_ip: str = "20/3600"
 
     # ── MCP servers (Phase 4) ────────────────────────────────
     #: Accept plain-http MCP URLs. Off by default: headers usually carry a
@@ -212,11 +281,37 @@ class Settings(BaseSettings):
     #: How long one MCP tool call may take before the model is told it failed.
     mcp_call_timeout_s: float = 120.0
 
+    # ── Email (Phase 7b.5) ───────────────────────────────────
+    # Environment only, never editable in the app: whoever could change the
+    # server could point it at their own and collect the password.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    #: `starttls` (port 587, Gmail's), `ssl` (port 465) or `none` (a relay on
+    #: the same network only).
+    smtp_security: Literal["starttls", "ssl", "none"] = "starttls"
+    mail_from: str = ""
+    mail_from_name: str = "Assistant Studio"
+    #: `smtp` sends; `console` logs each message (development); `memory`
+    #: keeps them in the process (tests); `off` sends nothing. Unset: `smtp`
+    #: when SMTP_HOST is set, otherwise `console` in development and `off`
+    #: in production.
+    mail_backend: Literal["smtp", "console", "memory", "off"] | None = None
+    #: Attempts per message before it is recorded as failed.
+    mail_max_tries: int = Field(default=5, ge=1, le=20)
+
     # ── Observability ────────────────────────────────────────
     otel_exporter_otlp_endpoint: str = ""
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = ""
+    #: What tracing (Langfuse, any OpenTelemetry collector) receives (Phase
+    #: 8.10): "metadata" (ids, model, tokens, cost, tool names, timings) or
+    #: "full" (messages, answers, tool input and output too). Empty: metadata
+    #: in production, full elsewhere. Full content is a second copy that
+    #: erasure and retention don't reach.
+    trace_content: Literal["", "metadata", "full"] = ""
 
     # ── Seed ─────────────────────────────────────────────────
     seed_admin_email: str = "admin@example.com"
@@ -225,8 +320,31 @@ class Settings(BaseSettings):
 
     # ── Derived / helpers ────────────────────────────────────
     @property
+    def trace_full(self) -> bool:
+        """Whether traces carry content (Phase 8.10)."""
+        if self.trace_content:
+            return self.trace_content == "full"
+        return not self.is_production
+
+    @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+    @property
+    def executor_mode(self) -> Literal["queue", "inline"]:
+        """Where approved requests run (Phase 9.1), with the unset case decided."""
+        if self.action_executor is not None:
+            return self.action_executor
+        return "queue" if self.is_production else "inline"
+
+    @property
+    def mail_transport(self) -> Literal["smtp", "console", "memory", "off"]:
+        """Where mail goes (Phase 7b.5), with the unset case decided."""
+        if self.mail_backend is not None:
+            return self.mail_backend
+        if self.smtp_host:
+            return "smtp"
+        return "off" if self.is_production else "console"
 
     @property
     def mcp_runner_token_effective(self) -> str:

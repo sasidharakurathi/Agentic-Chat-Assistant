@@ -26,6 +26,7 @@ import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -34,9 +35,13 @@ from app import queue
 from app.db.session import get_sessionmaker
 from app.evals import runner
 from app.main import app
-from app.models.integration import McpServer, McpTransport
-from app.services import approvals as approvals_svc
+from app.models.approval import ApprovalDelegation
+from app.models.attachment import Attachment
+from app.models.conversation import ConversationShare
+from app.models.integration import HttpConnection, McpServer, McpTransport
 from httpx import AsyncClient
+from tests.pending import waiting_request
+from tests.versions import go_live
 
 from test_orgs import Actor, _register  # type: ignore[import-not-found]
 
@@ -52,8 +57,28 @@ NOT_OWNED = {"token"}
 #: the object exists; with a valid one they must still say "not found".
 BODIES: dict[tuple[str, str], dict[str, Any]] = {
     ("POST", "/api/v1/approvals/{approval_id}:resolve"): {"decision": "approved"},
+    ("PUT", "/api/v1/assistants/{assistant_id}/data-sources/{data_source_id}/access"): {
+        "everyone": True
+    },
+    ("POST", "/api/v1/assistants/{assistant_id}/review-queue/{item_id}:dismiss"): {
+        "reason": "not mine"
+    },
+    ("POST", "/api/v1/assistants/{assistant_id}/review-queue/{item_id}:to-case"): {
+        "suite_id": "00000000-0000-0000-0000-000000000000",
+        "expected": {},
+    },
     ("PUT", "/api/v1/eval-suites/{suite_id}/cases/{case_id}"): {"input": "rewritten"},
     ("PATCH", "/api/v1/orgs/{org_id}/members/{user_id}"): {"role": "admin"},
+    # Phase 8.5 to 8.10: well-formed, so what is tested is whose they are.
+    ("POST", "/api/v1/orgs/{org_id}/groups/{group_id}/members"): {
+        "user_id": "00000000-0000-0000-0000-000000000000"
+    },
+    ("PUT", "/api/v1/conversations/{conversation_id}/messages/{message_id}/feedback"): {
+        "rating": "up"
+    },
+    ("POST", "/api/v1/orgs/{org_id}/members/{user_id}:erase"): {
+        "confirm_email": "someone@example.com"
+    },
 }
 
 
@@ -82,7 +107,7 @@ async def _world(client: AsyncClient, email: str, tmp: Path) -> World:
 
     a = await made("POST", "/assistants", json={"name": f"Owned by {email}"})
     aid = a["id"]
-    await made("POST", f"/assistants/{aid}/versions", json={"note": "v1"})
+    await go_live(client, aid, h, "v1")
 
     conv = await made("POST", f"/assistants/{aid}/conversations", json={})
     async with client.stream(
@@ -107,6 +132,15 @@ async def _world(client: AsyncClient, email: str, tmp: Path) -> World:
         json={"name": "Shop", "engine": "sqlite", "database": str(shop)},
     )
 
+    # An invite still open (Phase 7b.4: it can be withdrawn by id).
+    invite = await made(
+        "POST",
+        f"/orgs/{org}/invites",
+        json={"email": f"guest-{aid[:8]}@example.com", "role": "member"},
+    )
+
+    group = await made("POST", f"/orgs/{org}/groups", json={"name": f"G-{aid[:8]}"})
+
     suite = await made("POST", f"/assistants/{aid}/eval-suites", json={"name": "Basics"})
     detail = await made(
         "POST", f"/eval-suites/{suite['id']}/cases:bulk", json={"cases": [{"input": "hello"}]}
@@ -123,17 +157,53 @@ async def _world(client: AsyncClient, email: str, tmp: Path) -> World:
             url="https://mcp.example.com/mcp",
         )
         s.add(server)
+        http_conn = HttpConnection(
+            assistant_id=uuid.UUID(aid),
+            org_id=uuid.UUID(org),
+            name="Tickets",
+            base_url="https://tickets.example.com/api",
+            header_names=[],
+        )
+        s.add(http_conn)
+        share = ConversationShare(
+            org_id=uuid.UUID(org),
+            conversation_id=uuid.UUID(conv["id"]),
+            created_by=uuid.UUID(actor.user_id),
+            token_hash=uuid.uuid4().hex,
+        )
+        s.add(share)
+        attachment = Attachment(
+            org_id=uuid.UUID(org),
+            conversation_id=uuid.UUID(conv["id"]),
+            uploaded_by=uuid.UUID(actor.user_id),
+            object_key="attachments/test.png",
+            content_type="image/png",
+            bytes=8,
+        )
+        s.add(attachment)
         await s.commit()
-        approval = await approvals_svc.create(
+        http_connection_id = str(http_conn.id)
+        share_id = str(share.id)
+        attachment_id = str(attachment.id)
+        approval = await waiting_request(
             s,
             conversation_id=uuid.UUID(conv["id"]),
-            org_id=uuid.UUID(org),
             tool_name="mcp__caps__sql_query",
             tool_input={"sql": "DELETE FROM orders"},
             risk="high",
             rationale="writes",
         )
         server_id, approval_id = str(server.id), str(approval.id)
+        # A hand-over of the victim's own (Phase 9.1), for its route.
+        handed = ApprovalDelegation(
+            org_id=uuid.UUID(org),
+            user_id=uuid.UUID(actor.user_id),
+            delegate_id=uuid.UUID(actor.user_id),
+            until=datetime.now(UTC) + timedelta(days=1),
+        )
+        s.add(handed)
+        await s.commit()
+        delegation_id = str(handed.id)
 
     return World(
         actor=actor,
@@ -145,15 +215,23 @@ async def _world(client: AsyncClient, email: str, tmp: Path) -> World:
             "number": "1",
             "conversation_id": conv["id"],
             "run_id": run["id"],
+            "message_id": run["message_id"],
             "data_source_id": source["id"],
             "connection_id": conn["id"],
             "server_id": server_id,
+            "http_connection_id": http_connection_id,
+            "share_id": share_id,
+            "attachment_id": attachment_id,
+            "item_id": run["message_id"],
             "approval_id": approval_id,
+            "invite_id": invite["id"],
+            "group_id": group["id"],
             "suite_id": suite["id"],
             "case_id": detail["cases"][0]["id"],
             "user_id": actor.user_id,
             # A turn of the victim's conversation, still readable (QOS-01).
             "turn_id": turn_id,
+            "delegation_id": delegation_id,
         },
     )
 
@@ -189,14 +267,22 @@ def test_every_path_parameter_is_one_this_walk_knows() -> None:
         "number",
         "conversation_id",
         "run_id",
+        "message_id",
         "data_source_id",
         "connection_id",
         "server_id",
+        "http_connection_id",
+        "share_id",
+        "attachment_id",
+        "item_id",
         "approval_id",
+        "invite_id",
+        "group_id",
         "suite_id",
         "case_id",
         "user_id",
         "turn_id",
+        "delegation_id",
     } | NOT_OWNED
     seen = {p for _, _, params in _routes() for p in params}
     assert seen <= known, f"new path parameters: {sorted(seen - known)}"
@@ -212,6 +298,12 @@ async def worlds(
 
     monkeypatch.setattr(queue, "enqueue_eval", enqueue)
     monkeypatch.setattr(queue, "enqueue_ingest", enqueue)
+
+    async def stored(_key: str) -> bytes:
+        return b"\x89PNG\r\n\x1a\n"
+
+    # A screenshot's bytes, without object storage (Phase 9.6).
+    monkeypatch.setattr("app.services.attachments.get_object", stored)
     victim = await _world(client, "victim@example.com", tmp_path)
     attacker = await _world(client, "attacker@example.com", tmp_path)
     return victim, attacker
@@ -304,5 +396,13 @@ async def test_nothing_of_the_victims_changed(
     assert (await client.get(f"{API}/assistants/{v['assistant_id']}", headers=h)).json()[
         "name"
     ] == "Owned by victim@example.com"
+    http = await client.get(f"{API}/assistants/{v['assistant_id']}/http-connections", headers=h)
+    assert [(c["id"], c["base_url"]) for c in http.json()] == [
+        (v["http_connection_id"], "https://tickets.example.com/api")
+    ], "still there, unchanged"
+    links = await client.get(f"{API}/conversations/{v['conversation_id']}/shares", headers=h)
+    assert [(s["id"], s["revoked_at"]) for s in links.json()] == [(v["share_id"], None)]
     pending = await client.get(f"{API}/conversations/{v['conversation_id']}/approvals", headers=h)
     assert [a["id"] for a in pending.json()["items"]] == [v["approval_id"]], "still undecided"
+    invites = await client.get(f"{API}/orgs/{v['org_id']}/invites", headers=h)
+    assert v["invite_id"] in [i["id"] for i in invites.json()], "still open"

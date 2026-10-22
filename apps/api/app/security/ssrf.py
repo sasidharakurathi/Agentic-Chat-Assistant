@@ -13,10 +13,14 @@ What this module enforces, on every hop of every request:
 - **No credentials in the URL** (`user:pass@host`).
 - **Domain allowlist** when one is configured: the host must be an allowed
   domain or a subdomain of one.
-- **Public addresses only.** The host is resolved and *every* address it
-  resolves to must be globally routable: no loopback, private ranges,
-  link-local (which is where metadata services live), CGNAT, multicast,
-  reserved or unspecified addresses, and no IPv6 wrapper around one of those.
+- **Public addresses only**, unless the organisation lists the host as an
+  internal destination (Phase 9.3). The host is resolved and *every*
+  address it resolves to must be globally routable (no loopback, private
+  ranges, link-local, which is where metadata services live, CGNAT,
+  multicast, reserved or unspecified addresses, and no IPv6 wrapper around
+  one of those), or, for a listed host, inside the address range its entry
+  names. Loopback, link-local, the server's own networks and its own
+  addresses are refused whatever any entry says.
 - **The connection goes to the address that was checked.** Resolving, checking
   and then letting the HTTP client resolve again would allow DNS rebinding:
   a hostname that answers with a public address for the check and a private
@@ -35,10 +39,12 @@ What this module enforces, on every hop of every request:
 from __future__ import annotations
 
 import asyncio
+import functools
 import ipaddress
 import socket
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import httpx
 
@@ -146,6 +152,90 @@ def is_public_ip(ip: IpAddress) -> bool:
     return ip.is_global and not ip.is_multicast
 
 
+@dataclass(frozen=True)
+class InternalDestination:
+    """One of an organisation's internal destinations (Phase 9.3): a system
+    on the office network or VPN that its assistants may reach.
+
+    `host` is an exact name (`glpi.corp.example.com`), a suffix with a
+    leading dot (`.corp.example.com`, any name under it), or an address.
+    Every address the host resolves to must be inside `cidr`; `ports` are
+    the only ports; `http` lets it be reached without TLS."""
+
+    host: str
+    cidr: str
+    ports: tuple[int, ...] = (443,)
+    http: bool = False
+
+    def covers(self, host: str) -> bool:
+        h = host.lower().rstrip(".").strip("[]")
+        entry = self.host.lower().rstrip(".").strip("[]")
+        if entry.startswith("."):
+            return h.endswith(entry) and len(h) > len(entry)
+        return h == entry
+
+    @property
+    def network(self) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
+        return ipaddress.ip_network(self.cidr, strict=False)
+
+
+#: Refused whatever an internal destination says: this machine, link-local
+#: (where metadata services live), unspecified and multicast.
+ALWAYS_DENIED = tuple(
+    ipaddress.ip_network(n)
+    for n in (
+        "127.0.0.0/8",
+        "::1/128",
+        "169.254.0.0/16",
+        "fe80::/10",
+        "0.0.0.0/8",
+        "::/128",
+        "224.0.0.0/4",
+        "ff00::/8",
+        "255.255.255.255/32",
+    )
+)
+
+
+@functools.cache
+def platform_denied() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """The server's own networks (`PLATFORM_NETWORKS`: the compose networks
+    its datastores and runner sit on) and its own addresses (what
+    `APP_BASE_URL`'s host resolves to). The company name may point at the
+    Studio itself, so `.corp.example.com` must never include it."""
+    from app.config import settings
+
+    nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for raw in (settings.platform_networks or "").split(","):
+        if raw.strip():
+            try:
+                nets.append(ipaddress.ip_network(raw.strip(), strict=False))
+            except ValueError:
+                continue
+    host = urlparse(settings.app_base_url).hostname
+    if host:
+        try:
+            for info in socket.getaddrinfo(host, None):
+                nets.append(ipaddress.ip_network(str(info[4][0]).split("%", 1)[0]))
+        except (OSError, UnicodeError, ValueError):
+            pass
+    return tuple(nets)
+
+
+def always_denied(ip: IpAddress) -> bool:
+    return any(ip in net for net in ALWAYS_DENIED) or any(ip in net for net in platform_denied())
+
+
+def matching_destination(
+    internal: Sequence[InternalDestination], host: str, port: int, scheme: str
+) -> InternalDestination | None:
+    """The entry that lets this host, port and scheme be reached, if any."""
+    for entry in internal:
+        if entry.covers(host) and port in entry.ports and (scheme == "https" or entry.http):
+            return entry
+    return None
+
+
 async def system_resolver(host: str, port: int) -> list[str]:
     loop = asyncio.get_running_loop()
     infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -154,23 +244,46 @@ async def system_resolver(host: str, port: int) -> list[str]:
 
 #: The same words whether the name doesn't exist or points inside: two
 #: different answers would tell the asker which internal names resolve.
-_NOT_REACHABLE = "{host} can't be reached: it has no public address"
+_NOT_REACHABLE = (
+    "{host} can't be reached: it has no public address, and it isn't one of this "
+    "organisation's internal destinations"
+)
 
 
-async def resolve_public(host: str, port: int, resolver: Resolver = system_resolver) -> IpAddress:
+def _allowed(ip: IpAddress, entry: InternalDestination | None) -> bool:
+    if entry is None:
+        return is_public_ip(ip)
+    if always_denied(ip):
+        return False
+    return is_public_ip(ip) or ip in entry.network
+
+
+async def resolve_public(
+    host: str,
+    port: int,
+    resolver: Resolver = system_resolver,
+    *,
+    internal: Sequence[InternalDestination] = (),
+    scheme: str = "https",
+) -> IpAddress:
     """The address to connect to, or `SsrfBlocked`.
 
     Every resolved address must be public, not just the first: a name that
     returns one public and one private address is refused rather than
-    gambled on.
+    gambled on. A host the organisation lists (`internal`) may resolve into
+    its entry's range instead (Phase 9.3), never into `always_denied`.
     """
+    entry = matching_destination(internal, host, port, scheme)
     try:
         literal: IpAddress | None = ipaddress.ip_address(host.strip("[]"))
     except ValueError:
         literal = None
     if literal is not None:
-        if not is_public_ip(literal):
-            raise SsrfBlocked(f"{host} is not a public address")
+        if not _allowed(literal, entry):
+            raise SsrfBlocked(
+                f"{host} is not a public address, nor one of this organisation's internal "
+                "destinations"
+            )
         return literal
 
     try:
@@ -183,7 +296,7 @@ async def resolve_public(host: str, port: int, resolver: Resolver = system_resol
             ips.append(ipaddress.ip_address(a.split("%", 1)[0]))
         except ValueError:
             continue
-    if not ips or not all(is_public_ip(ip) for ip in ips):
+    if not ips or not all(_allowed(ip, entry) for ip in ips):
         raise SsrfBlocked(_NOT_REACHABLE.format(host=host))
     return ips[0]
 
@@ -279,9 +392,11 @@ async def safe_request(
     limits: FetchLimits = DEFAULT_LIMITS,
     resolver: Resolver = system_resolver,
     transport: httpx.AsyncBaseTransport | None = None,
+    internal: Sequence[InternalDestination] = (),
 ) -> FetchResult:
     """Send one request under the rules in the module docstring.
 
+    `internal`: the organisation's internal destinations (Phase 9.3).
     `resolver` and `transport` exist for tests; production uses the system
     resolver and a real connection.
     """
@@ -305,7 +420,13 @@ async def safe_request(
             async with asyncio.timeout(limits.timeout_s):
                 for _ in range(limits.max_redirects + 1):
                     _check_url(hop.target, allowed)
-                    ip = await resolve_public(hop.target.host, _port(hop.target), resolver)
+                    ip = await resolve_public(
+                        hop.target.host,
+                        _port(hop.target),
+                        resolver,
+                        internal=internal,
+                        scheme=hop.target.scheme,
+                    )
                     response = await _send(client, hop, ip)
                     try:
                         location = response.headers.get("location")
@@ -351,14 +472,19 @@ async def _read_capped(response: httpx.Response, max_bytes: int) -> tuple[bytes,
 
 
 __all__ = [
+    "ALWAYS_DENIED",
     "DEFAULT_LIMITS",
     "FetchLimits",
     "FetchResult",
+    "InternalDestination",
     "SsrfBlocked",
+    "always_denied",
     "host_allowed",
     "is_compressed",
     "is_public_ip",
+    "matching_destination",
     "normalize_domain",
+    "platform_denied",
     "resolve_public",
     "safe_request",
 ]

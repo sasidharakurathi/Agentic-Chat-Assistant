@@ -29,7 +29,7 @@ from app.schemas.mcp_server import (
     McpServerSummary,
     McpServerUpdate,
 )
-from app.services import mcp_discovery, mcp_runner
+from app.services import audit, mcp_discovery, mcp_runner
 from app.services import mcp_servers as svc
 
 router = APIRouter(tags=["mcp-servers"])
@@ -129,12 +129,26 @@ async def check_server(
     response_model=McpCheckResult,
 )
 async def discover_tools(
-    ctx: EditableAssistantCtx, session: SessionDep, server_id: uuid.UUID
+    ctx: EditableAssistantCtx, session: SessionDep, server_id: uuid.UUID, ip: ClientIP
 ) -> McpCheckResult:
-    """Connect, list the server's tools, and store them on the server."""
+    """Connect, list the server's tools, and store them on the server.
+    Audited (Phase 7b.7): the tools a server offers, and whether they ask
+    first, come from here."""
     server = await svc.get(session, assistant_id=ctx.assistant.id, server_id=server_id)
     _commands_are_for_admins(ctx, server.transport.value)
-    return await mcp_discovery.discover(session, server)
+    result = await mcp_discovery.discover(session, server)
+    await audit.record(
+        session,
+        action="mcp_server.discover",
+        org_id=ctx.assistant.org_id,
+        actor_user_id=ctx.membership.user_id,
+        target_type="mcp_server",
+        target_id=server.id,
+        meta={"ok": result.ok, "tools": len(server.tools or [])},
+        ip=ip,
+    )
+    await session.commit()
+    return result
 
 
 @router.get("/mcp-presets", response_model=list[McpPresetOut])

@@ -15,7 +15,9 @@ async def _chat_once(
     client: AsyncClient, org_headers: dict[str, str], assistant_id: str, text: str
 ) -> None:
     conv = await client.post(
-        f"/api/v1/assistants/{assistant_id}/conversations", json={}, headers=org_headers
+        f"/api/v1/assistants/{assistant_id}/conversations",
+        json={"mode": "preview"},
+        headers=org_headers,
     )
     cid = conv.json()["id"]
     async with client.stream(

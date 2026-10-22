@@ -24,16 +24,11 @@ import pytest
 from app.agent import interrupts
 from app.agent.events import TokenEvent, UsageEvent
 from app.db.session import get_sessionmaker
-from app.models.approval import Approval, ApprovalStatus
 from app.models.conversation import Message, MessageRole, Run, RunStatus
 from app.services import chat as chat_svc
 from httpx import AsyncClient
 from sqlalchemy import select
-from tests.test_chat_approvals import _assistant_with_db, _await_prompt, _run_turn, fake_sql
-from tests.test_chat_approvals import _conversation as _approval_conversation
 from tests.test_rbac_escalation import _conversation_of, _team
-
-__all__ = ["fake_sql"]  # a fixture, imported for use by name
 
 pytestmark = pytest.mark.anyio
 
@@ -57,7 +52,9 @@ class _SlowDriver:
 
 async def _conversation(client: AsyncClient, headers: dict[str, str]) -> uuid.UUID:
     a = (await client.post("/api/v1/assistants", json={"name": "Echo"}, headers=headers)).json()
-    r = await client.post(f"/api/v1/assistants/{a['id']}/conversations", json={}, headers=headers)
+    r = await client.post(
+        f"/api/v1/assistants/{a['id']}/conversations", json={"mode": "preview"}, headers=headers
+    )
     return uuid.UUID(r.json()["id"])
 
 
@@ -68,7 +65,8 @@ async def _run_and_interrupt(cid: uuid.UUID) -> list[Any]:
     async with get_sessionmaker()() as session:
         async for event in chat_svc.run_message(session, conversation_id=cid, text="go"):
             events.append(event)
-            if event.type == "token" and len(events) == 1:
+            # The first token (after `accepted`, Phase 8.6).
+            if event.type == "token" and [e.type for e in events].count("token") == 1:
                 assert interrupts.interrupt_local(cid) == 1
     return events
 
@@ -150,41 +148,6 @@ async def test_the_fake_driver_honours_an_interrupt() -> None:
         )
     ]
     assert [e.type for e in events] == ["usage"], "no tokens, but usage is still reported"
-
-
-async def test_stop_while_an_approval_is_pending_is_immediate(
-    client: AsyncClient,
-    org_headers: dict[str, str],
-    fake_sql: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The driver is parked *inside* the approval wait, so it cannot notice
-    an interrupt itself. Found live: Stop on a pending approval took exactly
-    the grace period (5 s) and ended by force-cancel. The grace is raised
-    here so that only the approval wait noticing Stop can pass this."""
-    monkeypatch.setattr("app.agent.runtime.INTERRUPT_GRACE_S", 30.0)
-    aid = await _assistant_with_db(client, org_headers)
-    cid = uuid.UUID(await _approval_conversation(client, org_headers, aid))
-
-    events: list[Any] = []
-    turn = asyncio.create_task(_run_turn(str(cid), "sql: DELETE FROM t WHERE id = 1", events))
-    prompt = await _await_prompt(events)
-    loop = asyncio.get_running_loop()
-    stopped_at = loop.time()
-    assert interrupts.interrupt_local(cid) == 1
-    await asyncio.wait_for(turn, timeout=10)
-
-    assert loop.time() - stopped_at < 2, "Stop waited for the grace period"
-    assert fake_sql["ran"] == [], "a statement stopped before approval never runs"
-    assert events[-1].type == "done"
-    (result,) = [e for e in events if e.type == "tool_result"]
-    assert "stopped" in result.output
-    run, _ = await _records(cid)
-    assert (run.status, run.error) == (RunStatus.aborted, "interrupted")
-    async with get_sessionmaker()() as s:
-        row = await s.get(Approval, uuid.UUID(prompt.approval_id))
-        assert row is not None
-        assert row.status is ApprovalStatus.expired, "it leaves the pending list"
 
 
 # ── the endpoint ─────────────────────────────────────────────

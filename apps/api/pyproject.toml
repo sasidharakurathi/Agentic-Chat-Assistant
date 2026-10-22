@@ -8,7 +8,7 @@ version = "1.0.0"
 description = "Assistant Studio backend — FastAPI + Anthropic Agent SDK."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
+license = { text = "MIT" }
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
@@ -123,4 +123,5 @@ testpaths = ["tests"]
 addopts = "-ra"
 markers = [
     "integration: tests that need real infra not always available locally — Postgres/Redis, MinIO, or a large local-model download (deselect with -m 'not integration')",
+    "local_models: integration tests that load the local embedder or reranker (a multi-GB download the first time); CI runs them in their own job",
 ]

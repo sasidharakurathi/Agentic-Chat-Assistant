@@ -15,10 +15,17 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+from collections.abc import Sequence
 
 import trafilatura
 
-from app.security.ssrf import FetchLimits, SsrfBlocked, is_compressed, safe_request
+from app.security.ssrf import (
+    FetchLimits,
+    InternalDestination,
+    SsrfBlocked,
+    is_compressed,
+    safe_request,
+)
 
 HTTP_ERROR_FROM = 400
 #: A web page, not a download: 5 MB of HTML is already far past normal.
@@ -30,9 +37,11 @@ class UrlFetchError(Exception):
     error field."""
 
 
-async def fetch_url_text(url: str) -> str:
+async def fetch_url_text(url: str, *, internal: Sequence[InternalDestination] = ()) -> str:
+    """A page's readable text. `internal`: the organisation's internal
+    destinations (Phase 9.3), so an intranet page can be a source."""
     try:
-        result = await safe_request("GET", url, limits=PAGE_LIMITS)
+        result = await safe_request("GET", url, limits=PAGE_LIMITS, internal=internal)
     except SsrfBlocked as exc:
         raise UrlFetchError(f"can't fetch {url}: {exc}") from exc
     if result.status >= HTTP_ERROR_FROM:

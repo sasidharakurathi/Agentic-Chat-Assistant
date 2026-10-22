@@ -23,7 +23,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "Rename this conversation",
     needsArg: true,
   },
-  { name: "archive", description: "Archive this conversation" },
+  { name: "archive", description: "Remove this conversation from your history" },
   { name: "retry", description: "Send your last message again" },
   { name: "stop", description: "Stop the answer that is running" },
   { name: "cost", description: "Show what this conversation has cost" },

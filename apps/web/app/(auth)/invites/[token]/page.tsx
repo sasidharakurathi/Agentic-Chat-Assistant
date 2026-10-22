@@ -85,7 +85,9 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
 
         {invite?.status === "accepted" && (
           <p className="text-muted-foreground">
-            This invite has already been used.{" "}
+            {user && user.email.toLowerCase() === invite.email.toLowerCase()
+              ? `You've joined ${invite.org_name}.`
+              : "This invite has already been used."}{" "}
             {user ? (
               <Link href="/assistants" className={LINK}>
                 Go to your assistants
@@ -100,6 +102,12 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
         {invite?.status === "expired" && (
           <p className="text-muted-foreground">
             This invite has expired. Ask whoever sent it for a new one.
+          </p>
+        )}
+        {invite?.status === "revoked" && (
+          <p className="text-muted-foreground">
+            This invite was withdrawn or replaced by a newer one. Ask an admin of the organization
+            for a new link.
           </p>
         )}
 

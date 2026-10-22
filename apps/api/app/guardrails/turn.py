@@ -20,7 +20,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-Check = Literal["injection", "exfiltration", "pii", "schema", "budget"]
+Check = Literal["injection", "exfiltration", "pii", "schema", "budget", "secret"]
 Where = Literal["user_message", "tool_input", "tool_result"]
 
 

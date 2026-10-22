@@ -73,7 +73,10 @@ def build_kb_search_tool(
     assistant_id: uuid.UUID,
     rag: RagConfig,
     registry: CitationRegistry | None = None,
+    documents: frozenset[uuid.UUID] | None = None,
 ) -> CapabilityTool:
+    """`documents`: on an approved version, the knowledge it was approved
+    with, and nothing newer (Phase 7b.1). None searches what is current."""
     allowed = [uuid.UUID(s) for s in rag.source_ids] or None
     # Keyed on the config flag, not on `registry is None`: build_runtime_spec
     # is called without a registry from tests and from non-turn paths (a
@@ -103,6 +106,7 @@ def build_kb_search_tool(
                 query=query,
                 config=config,
                 source_ids=scope,
+                documents=documents,
             )
 
         if not results:

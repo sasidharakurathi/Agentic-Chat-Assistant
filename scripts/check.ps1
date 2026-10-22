@@ -21,7 +21,12 @@ finally { Pop-Location }
 Write-Host "==> pytest" -ForegroundColor Cyan
 Invoke-Native $py "-m" "pytest" "apps/api" "-q" "-m" "not integration"
 
-Write-Host "==> pytest (integration: needs Docker Postgres up)" -ForegroundColor Cyan
+Write-Host "==> pytest (integration: needs Docker Postgres and Redis up)" -ForegroundColor Cyan
+# A test that can't reach Postgres or Redis fails instead of skipping, so a
+# stopped container can't pass for a green run (Phase 7b.9). MySQL, Mongo
+# and the local models stay optional here: set REQUIRE_INTEGRATION=all when
+# the `datastores` profile is up and the models are downloaded.
+if (-not $env:REQUIRE_INTEGRATION) { $env:REQUIRE_INTEGRATION = "postgres,redis" }
 Invoke-Native $py "-m" "pytest" "apps/api" "-q" "-m" "integration"
 
 # Both test processes have exited, so nothing holds their files open any
@@ -52,5 +57,11 @@ Invoke-Native "npm" "run" "test" "-w" "web"
 
 Write-Host "==> prettier --check" -ForegroundColor Cyan
 Invoke-Native "npm" "run" "format:check"
+
+# Phase 8.11: the employee flows in a browser. Playwright starts its own
+# API on 8020 (SQLite, the fake driver) and web app on 3020; ports 8020 and
+# 3020 must be free. Uses the Chromium already in %LOCALAPPDATA%\ms-playwright.
+Write-Host "==> browser tests (Playwright)" -ForegroundColor Cyan
+Invoke-Native "npm" "run" "e2e" "-w" "web"
 
 Write-Host "`nAll green." -ForegroundColor Green

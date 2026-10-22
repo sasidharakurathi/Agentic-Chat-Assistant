@@ -15,7 +15,9 @@ from app.schemas.assistant_config import (
     ApprovalMode,
     ApprovalPolicy,
     BuiltinToolKey,
+    DeclaredAction,
     Guardrails,
+    HandoffConfig,
     MemoryConfig,
     ModelRoles,
     ModelSpec,
@@ -85,6 +87,8 @@ class DatabaseNodeData(_Strict):
     connection_id: str
     nl2sql: bool = True
     expose_write: bool = False
+    #: Named statements on this database (Phase 9.1).
+    actions: list[DeclaredAction] = Field(default_factory=list, max_length=30)
 
 
 class ToolNodeData(_Strict):
@@ -117,6 +121,9 @@ class AgentNodeData(_Strict):
     system_prompt: str = Field(default="You are a helpful assistant.", max_length=100_000)
     models: ModelRoles = Field(default_factory=ModelRoles)
     approval_policy: ApprovalPolicy = Field(default_factory=ApprovalPolicy)
+    #: Getting a person (Phase 9.5): assistant-wide, like the approval
+    #: policy, so it rides on the agent node.
+    handoff: HandoffConfig = Field(default_factory=HandoffConfig)
 
 
 class MemoryNodeData(MemoryConfig):

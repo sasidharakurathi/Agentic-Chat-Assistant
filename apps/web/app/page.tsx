@@ -93,12 +93,15 @@ function Header() {
         >
           <BrandLockup />
         </Link>
-        {/* Signing in is for a computer: no account links on a phone. */}
-        <nav aria-label="Account" className="hidden items-center gap-2 md:flex">
+        {/* Sign in on a phone too (Phase 8.6): Chat works there. */}
+        <nav aria-label="Account" className="flex items-center gap-2">
           <Link href="/login" className={buttonVariants({ variant: "ghost", size: "sm" })}>
             Sign in
           </Link>
-          <Link href="/register" className={buttonVariants({ size: "sm" })}>
+          <Link
+            href="/register"
+            className={cn(buttonVariants({ size: "sm" }), "hidden sm:inline-flex")}
+          >
             Create an account
           </Link>
         </nav>
@@ -127,7 +130,7 @@ function Hero() {
               changes anything.
             </p>
             <DesktopOnlyNote className="mt-7 md:hidden" />
-            <div className="mt-7 hidden flex-wrap gap-3 md:flex">
+            <div className="mt-7 flex flex-wrap gap-3">
               <Link href="/register" className={buttonVariants({ size: "lg" })}>
                 Create an account
               </Link>
@@ -589,7 +592,7 @@ function Closing() {
               </p>
             </div>
             <DesktopOnlyNote className="rv rv-d2 md:hidden" />
-            <div className="rv rv-d2 hidden flex-wrap gap-3 md:flex">
+            <div className="rv rv-d2 flex flex-wrap gap-3">
               <Link href="/register" className={buttonVariants({ size: "lg" })}>
                 Create an account
               </Link>

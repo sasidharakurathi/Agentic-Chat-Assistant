@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useId, useState } from "react";
 
-import { BudgetBar, BudgetLimitsForm } from "@/components/usage/Budgets";
+import { BudgetBar, BudgetLimitsForm, BuilderSpendLine } from "@/components/usage/Budgets";
+import { PeopleBudgets } from "@/components/usage/PeopleBudgets";
+import { OrgAnalyticsReport } from "@/components/analytics/OrgAnalytics";
 import { Alert } from "@/components/ui/alert";
 import { Loading } from "@/components/ui/loading";
 import { PageHeader } from "@/components/ui/page-header";
@@ -21,7 +23,9 @@ const RANGES: { value: Range; label: string }[] = [
 
 /** What the organization has spent, where, and against which limits. */
 export default function UsagePage() {
-  const { activeOrgId } = useAuth();
+  const { activeOrgId, activeRole } = useAuth();
+  // The assistants report is for admins (Phase 10.1).
+  const isAdmin = activeRole === "admin" || activeRole === "owner";
   const [range, setRange] = useState<Range>("month");
   const [budgetList, setBudgetList] = useState<Budgets | null>(null);
   const [byAssistant, setByAssistant] = useState<UsageRow[]>([]);
@@ -94,6 +98,11 @@ export default function UsagePage() {
                   ))}
                 </div>
               )}
+              {budgetList?.builder && (
+                <div className="max-w-160">
+                  <BuilderSpendLine spend={budgetList.builder} />
+                </div>
+              )}
               {budgetList?.can_edit && activeOrgId && (
                 <div className="max-w-160">
                   <BudgetLimitsForm
@@ -117,6 +126,8 @@ export default function UsagePage() {
                 </div>
               )}
             </section>
+
+            {budgetList?.can_edit && activeOrgId && <PeopleBudgets orgId={activeOrgId} />}
 
             <section aria-labelledby="usage-spend" className="flex flex-col gap-8">
               <SectionHeading
@@ -149,8 +160,11 @@ export default function UsagePage() {
                 rows={topConversations}
                 total={total}
                 unnamed="Deleted conversations and background work"
+                hidden="Someone else's conversation (its title is private)"
               />
             </section>
+
+            {isAdmin && activeOrgId && <OrgAnalyticsReport orgId={activeOrgId} />}
           </div>
         )
       )}
@@ -166,12 +180,15 @@ function SpendTable({
   rows,
   total,
   unnamed,
+  hidden,
 }: {
   title: string;
   column: string;
   rows: UsageRow[];
   total: number;
   unnamed: string;
+  /** A row that exists but whose name the viewer may not see (Phase 7b.2). */
+  hidden?: string;
 }) {
   const headingId = useId();
   return (
@@ -202,7 +219,7 @@ function SpendTable({
             {rows.map((r) => {
               const cost = Number(r.cost_usd);
               const share = total > 0 ? Math.round((cost / total) * 100) : 0;
-              const name = r.label ?? unnamed;
+              const name = r.label ?? (r.group_key && hidden ? hidden : unnamed);
               return (
                 <tr key={r.group_key ?? "none"} className="border-border border-b align-top">
                   <td className="py-2.5 pr-3">

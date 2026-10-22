@@ -41,6 +41,8 @@ describe("permissionText", () => {
   it("says how a call was permitted, in words", () => {
     expect(permissionText("auto")).toBe("Ran without asking");
     expect(permissionText("refused")).toBe("Not allowed by this assistant's rules");
+    // Phase 9.1: the call was stored as a request, not run in its turn.
+    expect(permissionText("queued")).toBe("Saved as a request: it runs once someone decides");
     expect(permissionText(null)).toBeNull();
   });
 });

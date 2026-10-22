@@ -60,7 +60,29 @@ async def enqueue_schema_refresh(connection_id: uuid.UUID) -> None:
         )
 
 
-__all__ = ["enqueue_ingest", "enqueue_schema_refresh", "get_queue"]
+async def enqueue_mail(message_id: uuid.UUID, data: dict) -> bool:
+    """Queue one email on the mail queue (Phase 7b.5); False if the queue
+    is down. Its own queue and worker, so mail never waits behind indexing
+    or an eval run."""
+    from app.services.mail import MAIL_QUEUE
+
+    try:
+        queue = await get_queue()
+        await queue.enqueue_job(
+            "send_mail_job",
+            str(message_id),
+            data,
+            _job_id=f"mail:{message_id}",
+            _queue_name=MAIL_QUEUE,
+        )
+    except Exception as exc:
+        log.warning("enqueue_mail_failed", message_id=str(message_id), error=str(exc)[:200])
+        _state.pool = None
+        return False
+    return True
+
+
+__all__ = ["enqueue_ingest", "enqueue_mail", "enqueue_schema_refresh", "get_queue"]
 
 
 async def enqueue_summary(conversation_id: uuid.UUID, version: int) -> bool:
